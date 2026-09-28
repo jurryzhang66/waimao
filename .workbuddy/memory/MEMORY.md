@@ -4,10 +4,13 @@
 谷歌外贸客户开发工具：搜索潜在客户 → 就地补全邮箱电话 → 评分 → 存 SQLite → 导出飞书多维表格。全部集于单文件 `客户开发工具.py`（Flask 本地网页 http://127.0.0.1:5000，启动 `启动客户开发工具.bat`）。
 
 ## 版本管理
-- 已是 git 仓库（`git init -b main`），首个提交 `07f146a`，附注标签 **`V1.0`**。问「是否已版本化」先 `git tag -l`，别凭印象。
-- `.gitignore` 排除：`__pycache__/`、`*.py[cod]`、`.venv/`、`venv/`、`.idea/`、`.vscode/`、`~$*`、`.workbuddy/_*`、`*.log`。**`.venv` 28MB/571 文件必须保持排除**。
-- 标签快照含 `DB/客户库.sqlite3` 与历史结果 xlsx（既是代码快照也是数据快照）。回滚：`git checkout V1.0 -- DB/客户库.sqlite3` 或复制 `DB/backups/` 里的备份。
-- ⚠️ 本机 git 身份是占位值（github用户名/注册邮箱），push 远端前用户需自行更正。
+- 已是 git 仓库（`git init -b main`）。附注标签 **`V1.0`**（提交 `07f146a`）、**`V1.1`**（提交 `7690296`，2026-09-28 全功能版）。问「是否已版本化」先 `git tag -l`，别凭印象。
+- **V1.1 快照内容**：搜索补全一体化闭环 + 条件词 8 语言本地化 + 结果输出改 `output/` + 补历史欠账脚本 + 客户库 150 条 + output/ 下 11 份结果 xlsx；跟踪 33 个文件。
+- 打标签流程（踩过的坑）：`git add -A` 后要**关掉 `core.quotepath`**（`git -c core.quotepath=false ls-files`）才能读到中文文件名，否则全是八进制转义导致校验读不出来；`git rev-parse V1.1` 返回的是**标签对象** hash，提交 hash 要用 `git rev-parse "V1.1^{commit}"`。
+- `.gitignore` 排除：`__pycache__/`、`*.py[cod]`、`.venv/`、`venv/`、`.idea/`、`.vscode/`、`~$*`、`*.tmp`、`.workbuddy/_*`、`*.log`。**`.venv` 28MB/571 文件必须保持排除**（每次提交后确认跟踪数 33 左右）。
+- ⚠️ `.workbuddy/关键词组合预览.png` 因文件名不带 `_` 前缀，**被跟踪进去了**（属临时截图）。要清就 `git rm --cached` 并给 .gitignore 补 `.workbuddy/*.png`。
+- 回滚：`git checkout V1.1 -- 客户开发工具.py` / `-- DB/客户库.sqlite3`，或复制 `DB/backups/` 里的备份。
+- ⚠️ 本机 git 身份是占位值（`github用户名` / `github注册邮箱`），push 远端前用户需自行更正。
 
 ## 文件约定
 - 数据库：`DB/客户库.sqlite3`（**必须在 DB 子文件夹**），表 `customers`，按 `website_key`（域名）去重，WAL 模式；备份放 `DB/backups/`。
@@ -55,7 +58,12 @@
 ## 谷歌搜索抓取链路（最易碎，2026-09-28 大修）
 - 判断结果是否渲染好：`RESULT_LINK_CSS = 'css:a:has(h3)'` 的条数（`count_results()`）。⚠️ 旧 `page.ele('div#search')` **已失效**（新版谷歌没 `#search`/`#rso`），别再改回去。
 - 开搜索页必须走 **`open_search(page, formula, country_params, start=0, min_items=3, attempts=3)`**：多轮重开，前 2 轮直连 `/search?q=`，第 3 轮用搜索框输入兜底。谷歌偶尔返回「壳页面」（搜索框在、结果区空，伴随 `Updating location`）——`page.refresh()` **救不回来**，**重新导航一次即正常**。
-- **不要加谷歌首页预热**：实测更易触发地区识别中间态导致空结果页。每个搜索 URL 自带 `gl`/`hl`。
+- ⚠️⚠️ **「结果没渲染出来」有两种完全不同的原因，日志里分不开（2026-09-28 真机实测锁定，未修）**：
+  - ① **壳页面**（上面那种，重开一次能好）；
+  - ② **谷歌「零结果页」**——页面上写着 `Your search - … - did not match any documents`，`a:has(h3)`=0，**重试同一条 URL 永远没用**（实测重开 3 次全败，含搜索框兜底）。截图证据 `.workbuddy/_fail_q1_p0.png`。
+  - **触发条件 = 新会话的第一个谷歌请求 + 重公式**：同一浏览器里，33 词的公式**首次**请求 → 0 条零结果页；**同一浏览器稍后再发同一条公式 → 10 条**。对照实验（`.workbuddy/_probe_open_search.py`）：A(33词,首次) 0 条 → B(21词) 10 条 → C(14词) 10 条 → D(=A,33词,再次) **10 条**。另一组：浏览器起来先发一条最简 `search?q=noodles` → 重公式立刻 10 条。
+  - **结论**：`gl/hl`+公式本身都没问题；是「**冷会话首请求**」被谷歌降级。可用修法（用户拍板后再改）：软预热（先发一条最简单的 `search?q=<首个产品词>`，**不是首页**）、零结果时先换 URL 再重发原公式、把零结果页与壳页面在日志里区分开、公式减负（现中国过滤默认全开让公式涨到 **33 词**，逼近谷歌 ~32 词实际上限）。
+- **不要加谷歌首页预热**：实测更易触发地区识别中间态导致空结果页。每个搜索 URL 自带 `gl`/`hl`。**注意区分**：首页预热有害，但「先发一条最简 `/search?q=` 请求」实测有益（见上条）。
 - `is_blocked()` 三层：① `BLOCK_SUBSTR`(`['ubuy','europages','exportgenius']`) 子串匹配 → ② `SEARCH_ENGINE_PREFIX=('google.','bing.','yahoo.','duckduckgo.','baidu.','yandex.')` 前缀 → ③ `BLOCK_DOMAINS` **精确或后缀匹配**（`netloc == d or netloc.endswith('.'+d)`）+ **`netloc.endswith('.cn')` 全局兜底**。注意「子域自动覆盖」只对 BLOCK_DOMAINS 成立，加 `xxx.com` 就能连带拦掉 `a.xxx.com`。已补 `indiamart.com`/`trade.gov`/`worldstopexports.com`/`dailyvoice.com`/`taobao.com`/`tmall.com`。`EXCLUDE_OPTIONS` 是**查询词级**排除（UI 勾选框 + 默认全开，`EXCLUDE_DEFAULT` 全部拼进 `q`），与域名黑名单是两套东西，加平台站建议**两边都加**。
 - ⚠️ **结果链接是谷歌跳转链，必须经 `resolve_goto(page, href, card)` 换真地址**：① 已是目标站 → 原样；② `/url?q=<明文>` → `parse_qs`；③ `/goto?url=<加密>` → 解不开，先取卡片 `<cite>`（`_cite_domain()`，零成本，实测与真实跳转同域），再不行才开标签页让谷歌 302（4.1 秒/条）。**判断是否跳转链必须用 `_is_search_engine_url()`**（去 `www.` 比 `SEARCH_ENGINE_PREFIX`）——旧代码硬编码 `google.com/goto`，在 `google.com.hk/goto` 上匹配失败 → 原样返回 → 又被黑名单丢掉，**一页全军覆没**（实测 10 条全丢，修复后留 9 条）。
 - 走 cite 快路径时 `website` 只到域名级（如 `https://www.miamland.com`），`/url?q=` 时是完整 URL；同一公司多页面会被 `url_key`（netloc+path）合并成一条。

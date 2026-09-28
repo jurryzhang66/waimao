@@ -39,6 +39,7 @@ from flask import Flask, request, jsonify
 CONDITIONS = [
     ('wholesale',   '找批发商/分销商'),
     ('importer',    '找进口商/贸易商'),
+    ('buyer',       '找采购/买家'),
     ('oem',         '找OEM贴牌客户'),
     ('retailer',    '找零售商/连锁门店'),
     ('project',     '找工程/项目客户'),
@@ -86,14 +87,24 @@ COND_ROLES = {
         'ar': 'مستورد OR "شركة تجارية"',
     },
     'oem': {
-        'en': 'OEM OR "private label"',
-        'fr': 'OEM OR "marque distributeur"',
-        'de': 'OEM OR "Private Label"',
-        'es': 'OEM OR "marca blanca"',
-        'it': 'OEM OR "marca privata"',
-        'nl': 'OEM OR "huismerk"',
-        'tr': 'OEM OR "özel marka"',
-        'ar': 'OEM OR "العلامة الخاصة"',
+        'en': 'OEM OR "private label" OR "own brand" OR "brand owner"',
+        'fr': 'OEM OR "marque distributeur" OR "marque propre" OR acheteur',
+        'de': 'OEM OR "Private Label" OR Eigenmarke OR Markeninhaber',
+        'es': 'OEM OR "marca blanca" OR "marca propia" OR propietario de marca',
+        'it': 'OEM OR "marca privata" OR "marchio proprio" OR titolare del marchio',
+        'nl': 'OEM OR "huismerk" OR "eigen merk" OR merkeigenaar',
+        'tr': 'OEM OR "özel marka" OR "kendi markası" OR marka sahibi',
+        'ar': 'OEM OR "العلامة الخاصة" OR "علامة تجارية خاصة"',
+    },
+    'buyer': {
+        'en': 'buyer OR procurement OR purchasing OR sourcing',
+        'fr': 'acheteur OR achats OR approvisionnement OR sourcing',
+        'de': 'Einkäufer OR Einkauf OR Beschaffung OR Sourcing',
+        'es': 'comprador OR compras OR aprovisionamiento OR abastecimiento',
+        'it': 'buyer OR acquisti OR approvvigionamento OR sourcing',
+        'nl': 'inkoper OR inkoop OR sourcing OR procurement',
+        'tr': 'alıcı OR satın alma OR tedarik OR sourcing',
+        'ar': 'مشتري OR مشتريات OR توريد OR مصادر',
     },
     'retailer': {
         'en': 'retailer OR "chain store"',
@@ -185,20 +196,37 @@ COUNTRIES = [
 
 # 排除条件（网页上可勾选，每项带说明）：(key, 排除词, 说明)
 EXCLUDE_OPTIONS = [
-    ('alibaba', '-alibaba', '阿里巴巴（中国B2B平台）'),
     ('amazon', '-amazon', '亚马逊（电商平台）'),
     ('ebay', '-ebay', 'eBay（电商平台）'),
     ('etsy', '-etsy', 'Etsy（电商平台）'),
-    ('made-in-china', '-made-in-china', '中国制造网（B2B平台）'),
-    ('globalsources', '-globalsources', '环球资源（B2B平台）'),
     ('wikipedia', '-wikipedia', '维基百科（百科）'),
-    ('taobao', '-taobao', '淘宝（中国电商平台）'),
-    ('cn', '-site:.cn', '中国 .cn 域名网站'),
 ]
 EXCLUDE_DEFAULT = ' '.join(v for _, v, _ in EXCLUDE_OPTIONS)
 
+# 中国商家过滤：全部默认开启；query 为空的项目只在结果/联系方式阶段判断。
+# key, 搜索公式排除词, 页面标签, 说明
+CHINA_FILTER_OPTIONS = [
+    ('alibaba', '-alibaba', '排除 Alibaba', '中国 B2B 平台'),
+    ('made-in-china', '-made-in-china', '排除 Made-in-China', '中国 B2B 平台'),
+    ('globalsources', '-globalsources', '排除 Global Sources', '供应商聚合平台'),
+    ('1688', '-1688', '排除 1688', '中国 B2B 平台'),
+    ('taobao', '-taobao -tmall', '排除淘宝 / 天猫', '中国电商平台'),
+    ('cn', '-site:.cn', '排除 .cn 域名', '中国域名'),
+    ('supplier_words', '-"China manufacturer" -"Chinese supplier"', '排除中国供应商关键词', '中国供应商/制造商表达'),
+    ('factory_words', '-"factory in China" -"China factory"', '排除中国工厂关键词', '中国工厂表达'),
+    ('made_in_china_words', '-"made in China"', '排除中国制造关键词', '中国制造表达'),
+    ('platform_words', '', '排除中国供应商平台关键词', 'supplier platform / B2B 平台信号'),
+    ('phone_86', '', '排除 +86 中国电话', '联系方式信号'),
+    ('wechat', '', '排除微信 / WeChat', '联系方式信号'),
+    ('qq', '', '排除 QQ', '联系方式信号'),
+    ('address_cn', '', '排除中文地址或明显中国地址', '地址/语言信号'),
+    ('email_cn', '', '排除中国供应商邮箱或 .cn 邮箱', '邮箱域名信号'),
+    ('competitor_cn', '', '排除明显中国同行网站', '中国同行/工厂信号'),
+    ('directory_cn', '', '排除中国 B2B 名录和供应商聚合站', '名录/聚合站信号'),
+]
+CHINA_FILTER_DEFAULTS = {k for k, _, _, _ in CHINA_FILTER_OPTIONS}
+
 BLOCK_DOMAINS = [
-    'alibaba.com', 'made-in-china.com', 'globalsources.com', '1688.com',
     'amazon.com', 'ebay.com', 'etsy.com', 'walmart.com', 'wikipedia.org',
     'youtube.com', 'facebook.com', 'instagram.com', 'linkedin.com',
     'reddit.com', 'pinterest.com', 'google.com',
@@ -206,8 +234,6 @@ BLOCK_DOMAINS = [
     'investorroom.com', 'nbd.ltd',
     # 行业名录 / 数据站 / 政府统计站：不是买家，但常年在搜索首页（实测混入）
     'indiamart.com', 'trade.gov', 'worldstopexports.com', 'dailyvoice.com',
-    # 中国电商/零售平台：域名是 .com 所以过不了 endswith('.cn') 那关，必须显式列
-    'taobao.com', 'tmall.com',
 ]
 # 子串匹配：这些站有多个后缀（.com/.fr/.co.uk）或域名变体，逐个列举容易漏
 BLOCK_SUBSTR = ['ubuy', 'europages', 'exportgenius']
@@ -513,7 +539,94 @@ def is_blocked(href):
         return True
     if netloc.startswith(SEARCH_ENGINE_PREFIX):     # google.com.hk / google.de 等区域域名
         return True
-    return any(netloc == d or netloc.endswith('.' + d) for d in BLOCK_DOMAINS) or netloc.endswith('.cn')
+    return any(netloc == d or netloc.endswith('.' + d) for d in BLOCK_DOMAINS)
+
+
+def china_filter_terms(enabled_keys):
+    """返回当前勾选的、需要追加到 Google 公式的排除词。"""
+    enabled = set(enabled_keys or ())
+    return ' '.join(query for key, query, _, _ in CHINA_FILTER_OPTIONS
+                    if key in enabled and query).strip()
+
+
+def china_filter_reasons(title, url, snippet='', emails=None, phones=None,
+                         html_text='', enabled_keys=None):
+    """按勾选项返回明确的中国供应商过滤原因。
+
+    单独出现 China/中文/中国进口不会触发过滤；只有和供应商、工厂、联系方式或
+    中国平台等明确信号组合时才过滤，避免误删真实海外进口商。
+    """
+    enabled = set(enabled_keys or ())
+    if not enabled:
+        return []
+    emails = emails or []
+    phones = phones or []
+    text = ' '.join(str(x or '') for x in (title, url, snippet, html_text)).lower()
+    host = normalize_domain(url)
+    reasons = []
+
+    platform_hosts = {
+        'alibaba': ('alibaba.com',),
+        'made-in-china': ('made-in-china.com',),
+        'globalsources': ('globalsources.com',),
+        '1688': ('1688.com',),
+        'taobao': ('taobao.com', 'tmall.com'),
+    }
+    for key, hosts in platform_hosts.items():
+        if key in enabled and any(host == h or host.endswith('.' + h) for h in hosts):
+            reasons.append(f'命中{key}平台')
+
+    if 'cn' in enabled and (host.endswith('.cn') or host == 'cn'):
+        reasons.append('网站域名为 .cn')
+
+    supplier_signal = bool(re.search(
+        r'china\s+(?:manufacturer|supplier|factory|wholesaler)|'
+        r'chinese\s+(?:manufacturer|supplier|factory)|'
+        r'中国(?:供应商|厂家|工厂|制造商)', text, re.I))
+    factory_signal = bool(re.search(
+        r'(?:factory|manufacturer|supplier)\s+(?:in|from)\s+china|'
+        r'(?:china|chinese)\s+(?:factory|manufacturer|supplier)', text, re.I))
+    made_signal = bool(re.search(r'(?:made|manufactured)\s+in\s+china|中国制造', text, re.I))
+    chinese_signal = bool(re.search(r'[\u4e00-\u9fff]', text))
+
+    if 'supplier_words' in enabled and supplier_signal:
+        reasons.append('标题/摘要命中中国供应商关键词')
+    if 'factory_words' in enabled and factory_signal:
+        reasons.append('标题/摘要命中中国工厂关键词')
+    if 'made_in_china_words' in enabled and made_signal:
+        reasons.append('标题/摘要命中中国制造关键词')
+
+    platform_signal = bool(re.search(
+        r'(?:supplier|manufacturer|factory)\s+(?:directory|platform|marketplace)|'
+        r'b2b\s+(?:platform|marketplace)|供应商平台|供应商名录|厂家直销', text, re.I))
+    if 'platform_words' in enabled and platform_signal and (supplier_signal or chinese_signal):
+        reasons.append('命中中国供应商平台关键词')
+
+    if 'phone_86' in enabled and (re.search(r'\+\s*86(?:[\s().-]*\d){6,}', text)
+                                  or any(re.search(r'\+\s*86(?:[\s().-]*\d){6,}', str(p)) for p in phones)):
+        reasons.append('联系方式含 +86 中国电话')
+    if 'wechat' in enabled and re.search(r'\bwechat\b|\bweixin\b|微信', text, re.I):
+        reasons.append('页面含微信/WeChat')
+    if 'qq' in enabled and re.search(r'\bqq\b|腾讯', text, re.I):
+        reasons.append('页面含 QQ')
+
+    address_signal = bool(re.search(
+        r'(?:中国|china|广东|浙江|江苏|福建|山东|深圳|广州|东莞|义乌|宁波|佛山)'
+        r'.{0,40}(?:地址|工厂|厂家|制造|supplier|factory|manufacturer|road|street|road)', text, re.I))
+    if 'address_cn' in enabled and address_signal:
+        reasons.append('页面含明显中国地址/工厂信息')
+
+    if 'email_cn' in enabled and any(str(e).lower().split('@')[-1].endswith('.cn') for e in emails):
+        reasons.append('邮箱域名为 .cn')
+
+    if 'competitor_cn' in enabled and (supplier_signal or factory_signal or (made_signal and chinese_signal)):
+        reasons.append('命中明显中国同行/工厂信号')
+
+    directory_signal = any(x in host for x in ('1688.com', 'alibaba.com', 'made-in-china.com',
+                                                'globalsources.com', 'taobao.com', 'tmall.com'))
+    if 'directory_cn' in enabled and directory_signal:
+        reasons.append('命中中国 B2B 名录/供应商聚合站')
+    return list(dict.fromkeys(reasons))
 
 
 def url_key(href):
@@ -742,11 +855,12 @@ def _closest_snippet(node):
     return ''
 
 
-def extract_results(page, seen_titles):
+def extract_results(page, seen_titles, china_filters=None):
     """抓取一页自然结果。返回 (结果列表, 被黑名单过滤的条数)。
     seen_titles 只在确认保留后才写入，避免被过滤掉的标题污染去重集合。
     DrissionPage 4.1 的 parent() 找不到元素会抛异常而不是返回 None，故一律包 try。"""
     results, blocked = [], 0
+    china_reasons = Counter()
     try:
         anchors = page.eles(RESULT_LINK_CSS, timeout=10)
     except Exception:
@@ -769,9 +883,17 @@ def extract_results(page, seen_titles):
         if not real or is_blocked(real):
             blocked += 1
             continue
+        snippet = _closest_snippet(h3)
+        reasons = china_filter_reasons(title, real, snippet=snippet,
+                                       enabled_keys=china_filters)
+        if reasons:
+            blocked += 1
+            for reason in reasons:
+                china_reasons[reason] += 1
+            continue
         seen_titles.add(title)
-        results.append({'title': title, 'url': real, 'snippet': _closest_snippet(h3)})
-    return results, blocked
+        results.append({'title': title, 'url': real, 'snippet': snippet})
+    return results, blocked, dict(china_reasons)
 
 
 # ================= 补全评分（复用原脚本） =================
@@ -808,13 +930,16 @@ def clean_phones(html):
 
 
 def enrich(page, url):
-    info = {'emails': [], 'phones': [], 'contact_url': ''}
+    info = {'emails': [], 'phones': [], 'contact_url': '', 'china_signal_text': ''}
+    signal_parts = []
     tab = None
     try:
         tab = page.new_tab(url)
         tab.wait.doc_loaded(timeout=10)
-        info['emails'] = clean_emails(tab.html)
-        info['phones'] = clean_phones(tab.html)
+        html = tab.html or ''
+        signal_parts.append(html[:80000])
+        info['emails'] = clean_emails(html)
+        info['phones'] = clean_phones(html)
         if not info['emails']:
             p = urlparse(url)
             base = f'{p.scheme}://{p.netloc}/'
@@ -824,10 +949,12 @@ def enrich(page, url):
                     tab.wait.doc_loaded(timeout=8)
                 except Exception:
                     continue
-                e = clean_emails(tab.html)
+                contact_html = tab.html or ''
+                signal_parts.append(contact_html[:80000])
+                e = clean_emails(contact_html)
                 if e:
                     info['emails'] = e
-                    info['phones'] = info['phones'] or clean_phones(tab.html)
+                    info['phones'] = info['phones'] or clean_phones(contact_html)
                     info['contact_url'] = tab.url
                     break
     except Exception as ex:
@@ -838,6 +965,7 @@ def enrich(page, url):
                 tab.close()
             except Exception:
                 pass
+    info['china_signal_text'] = '\n'.join(signal_parts)
     return info
 
 
@@ -881,13 +1009,14 @@ def rating(s):
 
 # ================= 后台任务 =================
 def run_search(products, cond_keys, countries, pages, exclude, match='or', target_count=10, industry='',
-               auto_enrich=True, lang=''):
+               auto_enrich=True, lang='', china_filters=None):
     """搜索 + 补全一体化闭环：每搜到一个新网站，立刻访问它抓邮箱/电话并评分、回写客户库，
     然后再去搜下一个；凑够 target_count 个新增网站就停。
     lang = 条件词的搜索语言（如 fr），留空则按所搜国家的 hl 自动取，取不到用 en。
     auto_enrich=False 时退化为「只收集网站线索」（邮箱电话留空、评分按无联系方式算），便于快速铺量。
     目标数量按「本轮新增网站数」计算。整轮结束（含中途停止）写出唯一一份结果 Excel。"""
     page = None
+    china_filters = set(CHINA_FILTER_DEFAULTS if china_filters is None else china_filters)
     search_tab_id = None      # 搜索主标签 id：补全会开临时标签，抓完要切回来
     all_rows = []             # 本轮结果（已就地补全），在 finally 里落盘
     search_ok = True
@@ -919,7 +1048,7 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
         reached_target = False
         # 整轮汇总统计：让「到底有没有写进客户库」一眼可见
         total_stat = {'cand': 0, 'blocked': 0, 'dup': 0, 'existing': 0, 'added': 0,
-                      'mail': 0, 'empty': 0}
+                      'mail': 0, 'empty': 0, 'china': Counter()}
 
         for code, cname, gl, hl in countries:
             country_params = f'&gl={gl}&hl={hl}'
@@ -934,7 +1063,8 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                         log('已停止')
                         return
                     q_index += 1
-                    formula = f'{tmpl.replace("{p}", pq)} {exclude}'
+                    china_exclude = china_filter_terms(china_filters)
+                    formula = f'{tmpl.replace("{p}", pq)} {exclude} {china_exclude}'.strip()
                     log(f'[{q_index}/{total}] 搜索({cname}·{cname2})：{pq}')
                     # 打开并确认结果已渲染（内置多次重开，专治谷歌的「壳页面」）
                     open_search(page, formula, country_params)
@@ -945,16 +1075,18 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                             pass
                     if not wait_captcha(page):
                         continue
-                    stat = {'cand': 0, 'blocked': 0, 'dup': 0, 'existing': 0, 'added': 0, 'mail': 0}
+                    stat = {'cand': 0, 'blocked': 0, 'dup': 0, 'existing': 0, 'added': 0,
+                            'mail': 0, 'china': Counter()}
                     for pg in range(pages):
                         if pg > 0:
                             if not open_search(page, formula, country_params, pg * 10):
                                 break
                             if not wait_captcha(page):
                                 break
-                        items, blocked_n = extract_results(page, seen_titles)
+                        items, blocked_n, china_reasons = extract_results(page, seen_titles, china_filters)
                         stat['cand'] += len(items) + blocked_n
                         stat['blocked'] += blocked_n
+                        stat['china'].update(china_reasons)
                         for item in items:
                             key = url_key(item['url'])
                             if key in seen:
@@ -963,7 +1095,22 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                             seen.add(key)
                             item['formula'] = formula
                             item['country'] = cname
-                            # ① 先登记线索：已在客户库中的公司不再作为新线索重复展示，但会更新最近发现时间。
+                            # ① 就地补全这一个网站；联系方式信号过滤必须发生在入库之前。
+                            info = {'emails': [], 'phones': [], 'contact_url': ''}
+                            if auto_enrich and not STATE['stop']:
+                                info = enrich(page, item['url'])
+                                _back_to_search(page, search_tab_id)
+                            contact_reasons = china_filter_reasons(
+                                item['title'], item['url'], item['snippet'],
+                                emails=info.get('emails'), phones=info.get('phones'),
+                                html_text=info.get('china_signal_text', ''),
+                                enabled_keys=china_filters)
+                            if contact_reasons:
+                                stat['blocked'] += 1
+                                stat['china'].update(contact_reasons)
+                                log(f'   过滤：{item["title"][:40]}（{"；".join(contact_reasons)}）')
+                                continue
+                            # ② 登记线索：已在客户库中的公司不再作为新线索重复展示。
                             existed = not db_upsert_customer({
                                 'company_name': item['title'], 'website': item['url'],
                                 'snippet': item['snippet'], 'search_formula': formula,
@@ -973,11 +1120,7 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                                 stat['existing'] += 1
                                 log(f'   ↩ 已存在，跳过重复客户：{item["title"][:45]}')
                                 continue
-                            # ② 就地补全这一个网站（闭环核心：搜到即抓，不再攒到最后统一抓）
-                            info = {'emails': [], 'phones': [], 'contact_url': ''}
-                            if auto_enrich and not STATE['stop']:
-                                info = enrich(page, item['url'])
-                                _back_to_search(page, search_tab_id)
+                            # ③ 用补全结果更新刚才的线索记录。
                             s = score_item(item['title'], item['url'], info)
                             if auto_enrich:
                                 # 用补全结果覆盖刚才的线索记录（空值不会冲掉库里已有的有效值）
@@ -1025,9 +1168,13 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                         total_stat[k] += stat[k]
                     if stat['cand'] == 0:
                         total_stat['empty'] += 1
+                    for reason, count in stat['china'].items():
+                        total_stat['china'][reason] += count
+                    reason_text = '；'.join(f'{k} {v}' for k, v in stat['china'].items()) or '无'
                     log(f'📊 [{q_index}/{total}] {cname}·{cname2} → 页面候选 {stat["cand"]} 条 | '
                         f'黑名单过滤 {stat["blocked"]} | 本页重复 {stat["dup"]} | '
-                        f'客户库已有 {stat["existing"]} | 新增 {stat["added"]}（其中 {stat["mail"]} 个抓到邮箱）')
+                        f'客户库已有 {stat["existing"]} | 新增 {stat["added"]}（其中 {stat["mail"]} 个抓到邮箱） | '
+                        f'中国商家过滤：{reason_text}')
                     if reached_target:
                         break
                     if not sleep_check(random.uniform(4, 8)):
@@ -1040,9 +1187,10 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
 
         log(f'✅ 搜索完成！本轮新增 {len(all_rows)} 个网站'
             + ('，联系方式已就地抓取并写入客户库' if auto_enrich else '（本次未抓取联系方式）'))
+        china_total = '；'.join(f'{k} {v}' for k, v in total_stat['china'].items()) or '无'
         log(f'📈 本轮总账：页面候选 {total_stat["cand"]} 条 | 黑名单过滤 {total_stat["blocked"]} | '
             f'本页重复 {total_stat["dup"]} | 客户库已有 {total_stat["existing"]} | '
-            f'新增 {total_stat["added"]}（带邮箱 {total_stat["mail"]}）')
+            f'新增 {total_stat["added"]}（带邮箱 {total_stat["mail"]}） | 中国商家过滤：{china_total}')
         if not reached_target:
             if total_stat['cand'] == 0:
                 log('⚠️ 一条候选都没抓到：多半是搜索结果页没渲染出来（或被谷歌拦截），建议先手动在浏览器里搜一次确认')
@@ -1336,13 +1484,15 @@ def api_start():
         STATE.update(running=True, done=False, logs=[], result_count=0, rows=[],
                      output='', stop=False, phase='search')
     exclude = data.get('exclude', EXCLUDE_DEFAULT)
+    china_filters = [k for k in data.get('china_filters', CHINA_FILTER_DEFAULTS)
+                     if k in CHINA_FILTER_DEFAULTS]
     match = data.get('match', 'or')
     industry = (data.get('industry') or '').strip()
     auto_enrich = bool(data.get('auto_enrich', True))   # 搜索时是否就地抓取联系方式（不勾=只收集网站线索）
     lang = (data.get('lang') or '').strip()             # 条件词的搜索语言，留空由 run_search 按国家 hl 推断
     t = threading.Thread(target=run_search,
                          args=(products, cond_keys, countries, pages, exclude, match, target_count, industry,
-                               auto_enrich, lang),
+                               auto_enrich, lang, china_filters),
                          daemon=True)
     t.start()
     return jsonify({'ok': True})
@@ -1545,6 +1695,12 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
         <div class="note">勾选：每搜到一个新网站，立刻访问它抓邮箱/电话并评分，抓完（或确认抓不到）再搜下一个，凑够数量即停。每条会多花几秒，但不用等全部搜完；结果文件在整轮结束时一次写出。<br>不勾：只收集网站线索，邮箱电话留空，速度快，适合先铺量，稍后再双击「补历史欠账.py」批量补。</div>
         <div style="margin:12px 0 4px; font-size:14px;">排除条件（勾选要排除的，默认全排除）</div>
       <div id="excludes"></div>
+      <div style="margin:12px 0 4px; font-size:14px;">中国商家过滤（默认全部勾选，可逐项关闭）</div>
+      <div style="display:flex; gap:8px; margin-bottom:6px;">
+        <button type="button" class="btn-mini" onclick="toggleChinaFilters(true)">全部勾选</button>
+        <button type="button" class="btn-mini" onclick="toggleChinaFilters(false)">全部取消</button>
+      </div>
+      <div id="chinaFilters"></div>
       <div class="note">⚠️ 搜索中会弹出 Chrome 窗口，遇到谷歌验证码请在浏览器里手动通过</div>
     </div>
 
@@ -1697,6 +1853,8 @@ async function start(){
     const pages = document.getElementById('pages').value;
     const targetCount = parseInt(document.getElementById('targetCount').value || '10');
     const exclude = [...document.querySelectorAll('#excludes input:checked')].map(i=>i.value).join(' ');
+    const chinaFilters = [...document.querySelectorAll('#chinaFilters .china-filter:checked')]
+      .map(i => i.dataset.key);
   const match = (document.querySelector('input[name="match"]:checked') || {}).value || 'or';
     const industry = document.getElementById('kwIndustry').value || '';   // 行业标签，取自关键词库的行业选择
     const autoEnrich = document.getElementById('autoEnrich').checked;      // 搜索时是否就地抓联系方式
@@ -1708,7 +1866,8 @@ async function start(){
     }
     const r = await fetch('/api/start', { method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({products, conditions, countries, pages, target_count: targetCount, exclude, match, industry, auto_enrich: autoEnrich, lang}) });
+      body: JSON.stringify({products, conditions, countries, pages, target_count: targetCount, exclude,
+        china_filters: chinaFilters, match, industry, auto_enrich: autoEnrich, lang}) });
   const d = await r.json();
   if (!d.ok){ alert(d.msg); return; }
   logBox('====== 开始搜索 ======');
@@ -1777,6 +1936,16 @@ EXCLS.forEach(e => {
   exclBox.insertAdjacentHTML('beforeend',
     `<label class="cond"><input type="checkbox" value="${e[1]}" checked> <b>${e[1]}</b> <span style="color:#888">${e[2]}</span></label>`);
 });
+const CHINA_FILTERS = CHINA_FILTERS_PLACEHOLDER;
+const chinaBox = document.getElementById('chinaFilters');
+CHINA_FILTERS.forEach(e => {
+  chinaBox.insertAdjacentHTML('beforeend',
+    `<label class="cond"><input type="checkbox" class="china-filter" data-key="${e[0]}" value="${e[1]}" checked> <b>${e[2]}</b> <span style="color:#888">${e[3]}</span></label>`);
+});
+function toggleChinaFilters(on){
+  document.querySelectorAll('#chinaFilters .china-filter').forEach(x => x.checked = on);
+  renderCombos();
+}
 let KW_DATA = {};
 async function loadKeywords(){
   try{ KW_DATA = await (await fetch('/api/keywords')).json(); }
@@ -1898,7 +2067,8 @@ function renderCombos(){
   const sum = document.getElementById('comboSummary');
   const pqs   = productQueries();
   const conds = [...document.querySelectorAll('#conds input:checked')];
-  const excl  = [...document.querySelectorAll('#excludes input:checked')].map(i => i.value).join(' ');
+  const excl  = [...document.querySelectorAll('#excludes input:checked, #chinaFilters input:checked')]
+    .map(i => i.value).filter(Boolean).join(' ');
   const csel  = document.getElementById('countries');
   const cname = (csel.selectedOptions[0] || {}).textContent || '未选择';
   const lang  = curLang();
@@ -1941,7 +2111,7 @@ function copyCombos(){
 document.getElementById('products').addEventListener('input', renderCombos);
 document.querySelectorAll('input[name="match"]').forEach(r => r.addEventListener('change', renderCombos));
 document.addEventListener('change', e => {
-  if (e.target.closest && e.target.closest('#conds, #excludes')) renderCombos();
+  if (e.target.closest && e.target.closest('#conds, #excludes, #chinaFilters')) renderCombos();
 });
 renderCombos();
 
@@ -1963,10 +2133,12 @@ def _build_page():
     # 和预览里显示国家筛选参数（gl=fr&hl=fr）
     counts_js = [(k, name, k == 'us', hl, gl) for k, name, gl, hl in COUNTRIES]
     excls_js = [(k, v, d) for k, v, d in EXCLUDE_OPTIONS]
+    china_js = [(k, q, label, desc) for k, q, label, desc in CHINA_FILTER_OPTIONS]
     import json as _json
     html = PAGE_HTML.replace('CONDS_PLACEHOLDER', _json.dumps(conds_js, ensure_ascii=False))
     html = html.replace('COUNTS_PLACEHOLDER', _json.dumps(counts_js, ensure_ascii=False))
     html = html.replace('EXCLS_PLACEHOLDER', _json.dumps(excls_js, ensure_ascii=False))
+    html = html.replace('CHINA_FILTERS_PLACEHOLDER', _json.dumps(china_js, ensure_ascii=False))
     return html
 
 
