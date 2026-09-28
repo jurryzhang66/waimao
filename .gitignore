@@ -1,0 +1,22 @@
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.python-version
+
+# ---------- IDE ----------
+.idea/
+.vscode/
+*.swp
+
+# ---------- Excel / Office 临时锁文件 ----------
+~$*
+*.tmp
+*.temp
+
+# ---------- 本工具运行时产生的临时/诊断文件 ----------
+.workbuddy/_*
+*.log
