@@ -194,6 +194,23 @@ COUNTRIES = [
     ('tr', '土耳其', 'tr', 'tr'),
 ]
 
+# 国家中心经纬度：仅「谷歌地图」数据源用来定位地图视野（@lat,lng,zoom）。
+# 刻意做成独立字典而不并进 COUNTRIES —— COUNTRIES 是 4 元组，前端 counts_js 按 5 元组注入、
+# run_search 按 4 元组解包，改元组长度会连带炸掉两处。
+COUNTRY_CENTERS = {
+    'us': (39.83, -98.58), 'ca': (56.13, -106.35), 'uk': (54.00, -2.00),
+    'de': (51.17, 10.45), 'fr': (46.60, 2.21), 'it': (41.87, 12.57),
+    'es': (40.46, -3.75), 'nl': (52.13, 5.29), 'be': (50.50, 4.47),
+    'ch': (46.82, 8.23), 'ma': (31.79, -7.09), 'dz': (28.03, 1.66),
+    'tn': (33.89, 9.54), 'sn': (14.50, -14.45),
+    'ca_fr': (46.81, -71.21),          # 加拿大法语区锁定魁北克
+    'ae': (23.42, 53.85), 'sa': (23.89, 45.08), 'qa': (25.35, 51.18),
+    'kw': (29.31, 47.48), 'om': (21.51, 55.92), 'bh': (26.07, 50.55),
+    'eg': (26.82, 30.80), 'ir': (32.43, 53.69), 'af': (33.94, 67.71),
+    'tr': (38.96, 35.24),
+}
+MAPS_CENTER_DEFAULT = 'us'   # 取不到国家中心坐标时的兜底
+
 # 排除条件（网页上可勾选，每项带说明）：(key, 排除词, 说明)
 EXCLUDE_OPTIONS = [
     ('amazon', '-amazon', '亚马逊（电商平台）'),
@@ -250,6 +267,8 @@ LEGACY_RESULT_FILES = (
 )   # 旧名字：仅兜底读取，不再生成，也不参与「最新结果」评选
 RESULT_DATE_RE = re.compile(r'\d{8}')                        # 结果文件名必带 8 位日期
 OUTPUT_DIRNAME = 'output'   # 所有结果 Excel 统一放这个子文件夹，程序目录不再堆文件
+# 谷歌地图 place 链接里的稳定标识段（/maps/place/<名字>/@lat,lng,11z/data=...!1s0x...:0x...）
+MAPS_PLACE_ID_RE = re.compile(r'!1s(0x[0-9a-f]+:0x[0-9a-f]+)', re.I)
 
 
 def _app_dir():
@@ -361,12 +380,25 @@ def db_path():
     return os.path.join(db_dir, DB_FILE)
 
 
+def maps_place_key(url):
+    """从谷歌地图 place 链接里提取稳定去重键（结尾的 0x...:0x... 十六进制段）。
+    比商家名可靠（同名商家多），也比 place_id 好取（place_id 还得额外解析一次）。
+    取不到返回空串。"""
+    m = MAPS_PLACE_ID_RE.search(url or '')
+    return ('maps:' + m.group(1).lower()) if m else ''
+
+
 def normalize_domain(url):
     """把网址规整为稳定的公司去重键。"""
     try:
         raw = (url or '').strip().lower()
         if '@' in raw and '://' not in raw:
             return ''
+        # 谷歌地图 place 链接：没官网的商家会落到这里。必须给个稳定键，
+        # 否则 netloc 全是 google.com —— 既被搜索引擎黑名单拦掉，又互相覆盖成一条。
+        mk = maps_place_key(raw)
+        if mk:
+            return mk
         netloc = urlparse(raw if '://' in raw else 'https://' + raw).netloc
         netloc = netloc.split(':', 1)[0].removeprefix('www.')
         return netloc
@@ -675,6 +707,24 @@ def search_url(formula, country_params='', start=0):
     if start:
         url += f'&start={start}'
     return url
+
+
+def maps_search_url(query, country_code=MAPS_CENTER_DEFAULT, gl='', hl='en', city=''):
+    """谷歌地图搜索 URL（路径式，非官方 api=1 形态 —— 路径式批量名录更稳）。
+
+    定位靠两层：① 城市名直接进查询词（Google 官方推荐的位置限定方式，比 gl 硬）；
+    ② @lat,lng,zoom 把地图视野锁到该国中心，影响返回的商家范围。
+    hl/gl 与网页搜索是同一套参数语义。
+    """
+    q = ' '.join(x for x in ((query or '').strip(), (city or '').strip()) if x).strip()
+    lat, lng = COUNTRY_CENTERS.get(country_code, COUNTRY_CENTERS[MAPS_CENTER_DEFAULT])
+    url = f'https://www.google.com/maps/search/{quote(q)}/@{lat},{lng},11z'
+    extra = []
+    if hl:
+        extra.append(f'hl={hl}')
+    if gl:
+        extra.append(f'gl={gl}')
+    return url + (('?' + '&'.join(extra)) if extra else '')
 
 
 def count_results(page):
@@ -1007,6 +1057,235 @@ def rating(s):
     return '观察'
 
 
+# ================= 谷歌地图名录采集（与网页搜索并列的第二条链路） =================
+# 地图与网页搜索是两条独立链路：run_search 一行不动，这里自成一套。
+# 三条与网页搜索不同的硬事实：
+#   ① 电话/官网/完整地址只存在于「左侧详情面板」，列表卡片层拿不到 → 必须逐条点开；
+#   ② 单次搜索硬上限约 120 条，滚到底会出「…the end of the list」→ 到末尾就收手，不硬凑；
+#   ③ 定位靠「城市名进查询词 + @lat,lng 视野」，且结果受出口 IP 所在地影响。
+MAPS_FEED_CSS = 'css:div[role="feed"]'
+MAPS_CARD_CSS = 'css:div[role="feed"] a[href*="/maps/place/"]'
+# 详情面板就绪判据：这三个 data-item-id 锚点因无障碍依赖而比混淆 class 稳得多
+MAPS_DETAIL_READY = (
+    'css:button[data-item-id="address"]',
+    'css:button[data-item-id^="phone:tel:"]',
+    'css:a[data-item-id="authority"]',
+)
+# 列表末尾提示（hl 会让文案本地化，所以多语言都要认）
+MAPS_END_HINTS = ('reached the end of the list', 'fin de la liste', 'ende der liste',
+                  'final de la lista', 'fine dell', 'einde van de lijst',
+                  'listenin sonuna', 'نهاية القائمة')
+
+
+def db_has_customer(website):
+    """库里是否已有这个网站（只查不写）。用来在「点开详情 + 访问官网」之前就跳过老客户，
+    省掉最贵的那两步 —— 比 run_search 里「先插一条再判断」的做法省事。"""
+    key = normalize_domain(website)
+    if not key:
+        return False
+    with closing(db_connect()) as conn:
+        return conn.execute('SELECT 1 FROM customers WHERE website_key=? LIMIT 1',
+                            (key,)).fetchone() is not None
+
+
+def _maps_attr(page, css, attr=None, timeout=1):
+    """读一个元素的属性/文本/绝对链接；找不到或读失败都返回空串。
+    地图 DOM 会小幅改版，这里全程容错，宁可字段留空也不要整轮崩掉。"""
+    try:
+        el = page.ele(css, timeout=timeout)
+    except Exception:
+        el = None
+    if not el:
+        return ''
+    try:
+        if attr == 'link':
+            return (el.link or '').strip()
+        if attr:
+            return (el.attr(attr) or '').strip()
+        return (el.text or '').strip()
+    except Exception:
+        return ''
+
+
+def maps_consent_wall(page):
+    """谷歌地图首访可能弹 Cookie 同意墙，挡住列表与详情面板。"""
+    try:
+        if 'consent.google' in (page.url or '').lower():
+            return True
+        return bool(page.ele('css:form[action*="consent"]', timeout=0.5))
+    except Exception:
+        return False
+
+
+def maps_open(page, url, attempts=2):
+    """打开地图搜索页并等结果列表出现。返回 True 表示有列表。
+    注意地图**没有**网页搜索那种「零结果页」，判据就是 feed 在不在。"""
+    for i in range(attempts):
+        if STATE['stop']:
+            return False
+        try:
+            page.get(url)
+            page.wait.doc_loaded(timeout=15)
+        except Exception as e:
+            log(f'⚠️ 地图页打开失败（第 {i + 1} 次）：{type(e).__name__}')
+            continue
+        if maps_consent_wall(page):
+            log('⚠️ 谷歌地图弹出 Cookie 同意墙：请在浏览器窗口点「全部接受」，脚本最多等 60 秒')
+            for _ in range(30):
+                if STATE['stop']:
+                    return False
+                time.sleep(2)
+                if not maps_consent_wall(page):
+                    break
+        if not wait_captcha(page):
+            return False
+        if page.ele(MAPS_FEED_CSS, timeout=12):
+            return True
+        log(f'↻ 地图结果列表没渲染出来（第 {i + 1} 次），重新打开…')
+        if not sleep_check(2):
+            return False
+    return False
+
+
+def maps_cards(page):
+    """当前 feed 里的商家卡片链接（列表层只有名称/评分/类目，拿不到电话官网）。"""
+    try:
+        return page.eles(MAPS_CARD_CSS, timeout=5) or []
+    except Exception:
+        return []
+
+
+def maps_reached_end(feed):
+    """feed 里出现「已到列表末尾」提示就该停止滚动。"""
+    if feed is None:
+        return False
+    try:
+        text = (feed.text or '').lower()
+    except Exception:
+        return False
+    return any(h in text for h in MAPS_END_HINTS)
+
+
+def maps_feed_scroll(page, want, max_rounds=16):
+    """滚动结果面板加载更多商家，返回卡片列表。
+    ⚠️ 必须滚 feed 元素本身 —— 滚 window 在地图上完全无效（实测）。
+    退出条件三条：够 want 条 / 连续两轮不增长 / 命中列表末尾提示。"""
+    cards = maps_cards(page)
+    if not cards:
+        return []
+    try:
+        feed = page.ele(MAPS_FEED_CSS, timeout=5)
+    except Exception:
+        feed = None
+    stalled = 0
+    for _ in range(max_rounds):
+        if STATE['stop'] or len(cards) >= want:
+            break
+        try:
+            if feed:
+                feed.scroll.to_bottom()
+            else:
+                page.scroll.down(2000)
+        except Exception:
+            try:
+                page.run_js('const f=document.querySelector(\'div[role="feed"]\');'
+                            'if(f){f.scrollTop=f.scrollHeight;}')
+            except Exception:
+                pass
+        if not sleep_check(random.uniform(1.5, 2.5)):
+            break
+        new_cards = maps_cards(page)
+        if len(new_cards) > len(cards):
+            cards = new_cards
+            stalled = 0
+            try:
+                feed = page.ele(MAPS_FEED_CSS, timeout=3)
+            except Exception:
+                pass
+        else:
+            stalled += 1
+        if stalled >= 2 or maps_reached_end(feed):
+            break
+    return cards
+
+
+def maps_collect_hrefs(page, want, max_rounds=16):
+    """滚列表 → 把商家链接取成字符串列表。
+    刻意转成字符串再返回：元素句柄在页面导航后会失效，字符串不会。"""
+    cards = maps_feed_scroll(page, want, max_rounds)
+    hrefs, seen_h = [], set()
+    for c in cards:
+        try:
+            h = (c.link or c.attr('href') or '').strip()
+        except Exception:
+            continue
+        if h and h not in seen_h:
+            seen_h.add(h)
+            hrefs.append(h)
+    return hrefs
+
+
+def maps_detail(page, place_url):
+    """导航到某个商家的 place 页面并读左侧详情面板。读不到返回 None。
+
+    ⚠️ 不要改成「逐个点列表卡片」：真机实测点开第一条后，搜索结果列表就被详情页替换掉，
+    剩下的卡片元素立刻全部失效（NoRectError）。所以直接导航到卡片 href 指向的 place URL ——
+    每条多一次页面加载（约 2~3 秒），但彻底摆脱 SPA 元素失效问题。
+    面板里各字段都可能合法缺失（有的商家就是没电话、没官网），缺了就留空，不算失败。
+    """
+    try:
+        page.get(place_url)
+        page.wait.doc_loaded(timeout=15)
+    except Exception as e:
+        log(f'     · 打开商家页失败：{type(e).__name__}')
+        return None
+    ready = False
+    for _ in range(10):
+        if STATE['stop']:
+            return None
+        for css in MAPS_DETAIL_READY:
+            try:
+                if page.ele(css, timeout=0.8):
+                    ready = True
+                    break
+            except Exception:
+                continue
+        if ready:
+            break
+        time.sleep(0.3)
+    if not ready:
+        return None
+    # 电话：data-item-id 形如 phone:tel:+3347889xxxx —— 与界面语言无关，最稳
+    phone = ''
+    try:
+        el = page.ele('css:button[data-item-id^="phone:tel:"]', timeout=1)
+        if el:
+            phone = (el.attr('data-item-id') or '').split('phone:tel:', 1)[-1].strip()
+            if not phone:
+                phone = (el.attr('aria-label') or '').split(':', 1)[-1].strip()
+    except Exception:
+        phone = ''
+    website = _maps_attr(page, 'css:a[data-item-id="authority"]', attr='link', timeout=1)
+    address = ''
+    try:
+        el = page.ele('css:button[data-item-id="address"]', timeout=1)
+        if el:
+            address = (el.attr('aria-label') or '').split(':', 1)[-1].strip() \
+                or (el.text or '').strip()
+    except Exception:
+        address = ''
+    category = _maps_attr(page, 'css:button[jsaction*="category"]', timeout=0.6) \
+        or _maps_attr(page, 'css:button.DkEaL', timeout=0.6)
+    return {
+        'name': _maps_attr(page, 'css:h1', timeout=1),
+        'phone': phone,
+        'website': website,
+        'address': address,
+        'category': category,
+        'place_url': (page.url or place_url),
+    }
+
+
 # ================= 后台任务 =================
 def run_search(products, cond_keys, countries, pages, exclude, match='or', target_count=10, industry='',
                auto_enrich=True, lang='', china_filters=None):
@@ -1219,6 +1498,240 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                 log(f'❌ 结果 Excel 写出失败：{type(e).__name__}: {e}')
         elif search_ok:
             log('本轮没有新增网站，未产出结果文件（客户库未变化）')
+        STATE['done'] = True
+        STATE['running'] = False
+
+
+def maps_role_word(cond_keys, lang='en'):
+    """地图模式下把「身份词」拼进查询词。
+
+    ⚠️ 这一步不是可选优化，是必需：真机实测搜「nouilles」+ 里昂返回的全是
+    「Restaurant chinois」餐馆；加上 grossiste 后才出现「Grossiste alimentaire」
+    （食品批发商）和进口杂货商 —— 那才是买家。
+    取第一个勾选条件的第一个角色词（如 fr → grossiste）。
+    """
+    for k in (cond_keys or []):
+        roles = COND_ROLES.get(k) or {}
+        word = roles.get(lang) or roles.get('en') or ''
+        if word:
+            return word.split(' OR ')[0].strip().strip('"')
+    return ''
+
+
+def run_maps(products, cond_keys, countries, city='', target_count=10, industry='', auto_enrich=True,
+             lang='', china_filters=None):
+    """谷歌地图名录采集 + 就地补全：与 run_search 并列的第二条链路，互不干扰。
+
+    地图的独特价值：名录里只有「有实体地址的真实商家」，所以 B2B 名录站、新闻站、
+    菜谱站这类非买家根本不会出现；而且电话/地址是结构化字段，不用再从官网里猜。
+    代价：单次搜索上限约 120 条，且电话/官网必须逐条点开详情面板才有。
+    auto_enrich=False 时只取地图给的字段（电话/地址），不访问官网补邮箱。
+    """
+    page = None
+    maps_tab_id = None
+    all_rows = []
+    run_ok = True
+    china_filters = set(CHINA_FILTER_DEFAULTS if china_filters is None else china_filters)
+    try:
+        init_customer_db()
+        STATE['phase'] = 'search'
+        log(f'谷歌地图采集：关键词 {len(products)} 个 × 国家 {len(countries)} 个'
+            + (f' · 城市「{city}」' if city else '（未指定城市，只用国家中心视野）'))
+        log('⚠️ 地图结果会受出口 IP 所在地影响，比网页搜索更明显；指定城市可显著提高精度')
+        page = create_browser_page()
+        try:
+            maps_tab_id = page.tab_id
+        except Exception:
+            maps_tab_id = None
+
+        seen = set()
+        seen_names = set()
+        reached_target = False
+        # 整轮汇总统计：让「到底有没有写进客户库」一眼可见
+        total_stat = {'cards': 0, 'detail': 0, 'end': 0, 'dup': 0, 'existing': 0,
+                      'added': 0, 'mail': 0, 'no_web': 0, 'china': Counter()}
+
+        for code, cname, gl, hl in countries:
+            if reached_target or STATE['stop']:
+                break
+            lang = (lang or '').strip() or hl or 'en'
+            role = maps_role_word(cond_keys, lang)
+            if role:
+                log(f'   （地图查询拼上身份词「{role}」—— 不带身份词只会返回餐馆/零售店）')
+            for kw in products:
+                if reached_target or STATE['stop']:
+                    break
+                want = target_count - len(all_rows)
+                query = f'{kw} {role}'.strip()
+                url = maps_search_url(query, code, gl, hl, city)
+                log(f'========== {cname} · 地图搜「{query}」'
+                    + (f' + {city}' if city else '') + f'（hl={hl} gl={gl}） ==========')
+                log(f'   {url}')
+                stat = {'cards': 0, 'detail': 0, 'end': 0, 'dup': 0,
+                        'existing': 0, 'added': 0, 'mail': 0, 'no_web': 0, 'china': Counter()}
+                if not maps_open(page, url):
+                    log('⚠️ 地图页没打开或没结果列表，跳过这个关键词')
+                    continue
+                try:
+                    maps_tab_id = page.tab_id or maps_tab_id
+                except Exception:
+                    pass
+                # 链接一次收够：按目标数 3 倍收（去重/过滤会消耗掉一部分），
+                # 上限 120 是谷歌地图单次搜索的硬上限，滚到底就停。
+                collect = min(max(want * 3, want + 5), 120)
+                hrefs = maps_collect_hrefs(page, collect)
+                stat['cards'] = len(hrefs)
+                if len(hrefs) < collect:
+                    stat['end'] = 1                    # 没滚满 = 已经到列表末尾
+                log(f'   列表滚出 {len(hrefs)} 条商家链接'
+                    + ('（已到列表末尾）' if stat['end'] else f'（目标还需 {want} 条）'))
+                if not hrefs:
+                    log('   这个关键词在当前城市没滚出任何商家，换城市或换个词')
+                for href in hrefs:
+                    if reached_target or STATE['stop']:
+                        break
+                    key = maps_place_key(href) or url_key(href)
+                    if not key or key in seen:
+                        stat['dup'] += 1
+                        continue
+                    seen.add(key)
+                    # ① 导航到商家页读详情面板（列表层拿不到电话/官网/地址）
+                    det = maps_detail(page, href)
+                    if not det:
+                        log('     · 商家页没读通，跳过这条')
+                        continue
+                    stat['detail'] += 1
+                    name = det['name'] or '(地图未给名称)'
+                    if name and name in seen_names:
+                        stat['dup'] += 1
+                        continue
+                    seen_names.add(name)
+                    place_url = det['place_url'] if '/maps/place/' in det['place_url'] else href
+                    website = det['website']
+                    # 没有官网时用 place 链接占位，靠 normalize_domain 的 maps 分支保持唯一
+                    target_url = website or place_url
+                    phones = [det['phone']] if det['phone'] else []
+                    snippet = ' · '.join(x for x in (det['category'], det['address']) if x) or name
+                    formula = f'[谷歌地图] {query}' + (f' @{city}' if city else '')
+                    if not website:
+                        stat['no_web'] += 1
+                    # ② 中国商家过滤（地图没有查询公式，只能走结果/联系方式阶段判据）
+                    pre_reasons = china_filter_reasons(
+                        name, target_url, snippet, phones=phones, enabled_keys=china_filters)
+                    if pre_reasons:
+                        stat['china'].update(pre_reasons)
+                        log(f'   过滤：{name[:40]}（{"；".join(pre_reasons)}）')
+                        continue
+                    # ③ 已经在库里的老客户，跳过最贵的那两步（点详情已经花掉，这里省访问官网）
+                    if db_has_customer(target_url):
+                        stat['existing'] += 1
+                        log(f'   ↩ 已存在，跳过重复客户：{name[:45]}')
+                        continue
+                    # ④ 就地补全：地图已经给了电话，官网只补邮箱
+                    info = {'emails': [], 'phones': [], 'contact_url': '', 'china_signal_text': ''}
+                    if auto_enrich and website and not STATE['stop']:
+                        info = enrich(page, website)
+                        _back_to_search(page, maps_tab_id)
+                    for p in info['phones']:
+                        if p not in phones:
+                            phones.append(p)
+                    info['phones'] = phones[:3]
+                    post_reasons = china_filter_reasons(
+                        name, target_url, snippet, emails=info['emails'], phones=info['phones'],
+                        html_text=info.get('china_signal_text', ''), enabled_keys=china_filters)
+                    if post_reasons:
+                        stat['china'].update(post_reasons)
+                        log(f'   过滤：{name[:40]}（{"；".join(post_reasons)}）')
+                        continue
+                    # ⑤ 一次性入库（地图字段 + 官网补到的邮箱），地图来源单独标记
+                    s = score_item(name, target_url, info)
+                    db_upsert_customer({
+                        'company_name': name, 'website': target_url,
+                        'email': ' / '.join(info['emails']),
+                        'phone': ' / '.join(info['phones']),
+                        'contact_url': info['contact_url'], 'score': s, 'rating': rating(s),
+                        'snippet': snippet, 'search_formula': formula,
+                        'country': cname, 'industry': industry, 'source': '谷歌地图',
+                    })
+                    all_rows.append({
+                        'title': name, 'url': target_url, 'emails': info['emails'],
+                        'phones': info['phones'], 'contact_url': info['contact_url'],
+                        'score': s, 'rating': rating(s), 'snippet': snippet,
+                        'formula': formula, 'country': cname, 'industry': industry,
+                    })
+                    stat['added'] += 1
+                    if info['emails']:
+                        stat['mail'] += 1
+                    STATE['result_count'] = len(all_rows)
+                    # 实时明细：前端表格每秒轮询 STATE['rows']，边采边显示入库内容
+                    with STATE_LOCK:
+                        STATE['rows'].append({
+                            'n': len(all_rows), 'title': name, 'url': target_url,
+                            'emails': info['emails'], 'phones': info['phones'],
+                            'contact_url': info['contact_url'], 'score': s,
+                            'rating': rating(s), 'industry': industry, 'country': cname,
+                        })
+                    log(f'   + [{len(all_rows)}/{target_count}] {name[:38]} '
+                        f'邮箱{len(info["emails"])} 电话{len(info["phones"])} 评分{s} {rating(s)}')
+                    if len(all_rows) >= target_count:
+                        reached_target = True
+                        log(f'🎯 已达到本次目标 {target_count} 个新增商家，停止继续采集')
+                        break
+                    if not sleep_check(random.uniform(1.5, 3)):
+                        log('已停止')
+                        return
+
+                # 一个关键词跑完，打印它的账目
+                for k in stat:
+                    if k == 'china':
+                        for reason, count in stat['china'].items():
+                            total_stat['china'][reason] += count
+                    else:
+                        total_stat[k] += stat[k]
+                reason_text = '；'.join(f'{k} {v}' for k, v in stat['china'].items()) or '无'
+                log(f'📊 {cname}·地图 {query} → 列表卡片 {stat["cards"]} 条 | '
+                    f'详情读通 {stat["detail"]} 条 | 重复 {stat["dup"]} | '
+                    f'客户库已有 {stat["existing"]} | 新增 {stat["added"]}'
+                    f'（其中 {stat["mail"]} 个抓到邮箱） | 中国商家过滤：{reason_text}')
+                if reached_target:
+                    break
+                if not sleep_check(random.uniform(3, 6)):
+                    log('已停止')
+                    return
+            if reached_target:
+                break
+
+        log(f'✅ 地图采集完成！本轮新增 {len(all_rows)} 个商家'
+            + ('，联系方式已就地抓取并写入客户库' if auto_enrich else '（本次未抓取联系方式）'))
+        china_total = '；'.join(f'{k} {v}' for k, v in total_stat['china'].items()) or '无'
+        log(f'📈 本轮总账：列表卡片 {total_stat["cards"]} 条 | 详情读通 {total_stat["detail"]} 条 | '
+            f'已滚到底 {total_stat["end"]} 次 | 重复 {total_stat["dup"]} | '
+            f'客户库已有 {total_stat["existing"]} | 新增 {total_stat["added"]}'
+            f'（带邮箱 {total_stat["mail"]}） | 中国商家过滤：{china_total}')
+        if total_stat['no_web']:
+            log(f'   （其中 {total_stat["no_web"]} 条商家没登记官网，只拿到电话/地址，'
+                f'所以没有邮箱；可后续用电话直接联系）')
+        if not reached_target:
+            log(f'⚠️ 未凑够目标 {target_count} 条：地图单次搜索的上限约 120 条，'
+                f'多数关键词滚到底也就几十条。建议换城市、换关键词，或把目标数调小')
+        log('正在写出结果 Excel…')
+    except Exception as e:
+        run_ok = False
+        log(f'❌ 出错：{type(e).__name__}: {e}')
+    finally:
+        if page:
+            try:
+                page.quit()
+            except Exception:
+                pass
+        # 落盘放 finally：中途「停止」在 try 内部是 return，只有这里能保证已采到的结果不白跑。
+        if all_rows:
+            try:
+                _save_enrich_excel(all_rows, industry=industry)
+            except Exception as e:
+                log(f'❌ 结果 Excel 写出失败：{type(e).__name__}: {e}')
+        elif run_ok:
+            log('本轮没有新增商家，未产出结果文件（客户库未变化）')
         STATE['done'] = True
         STATE['running'] = False
 
@@ -1490,6 +2003,16 @@ def api_start():
     industry = (data.get('industry') or '').strip()
     auto_enrich = bool(data.get('auto_enrich', True))   # 搜索时是否就地抓取联系方式（不勾=只收集网站线索）
     lang = (data.get('lang') or '').strip()             # 条件词的搜索语言，留空由 run_search 按国家 hl 推断
+    # 数据源：google=谷歌网页搜索（默认，老链路），maps=谷歌地图名录（新链路）
+    source = (data.get('source') or 'google').strip()
+    city = (data.get('city') or '').strip()             # 仅地图用：城市/地区名，会拼进查询词
+    if source == 'maps':
+        t = threading.Thread(target=run_maps,
+                             args=(products, cond_keys, countries, city, target_count, industry,
+                                   auto_enrich, lang, china_filters),
+                             daemon=True)
+        t.start()
+        return jsonify({'ok': True})
     t = threading.Thread(target=run_search,
                          args=(products, cond_keys, countries, pages, exclude, match, target_count, industry,
                                auto_enrich, lang, china_filters),
@@ -1678,28 +2201,43 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
       </div>
     </div>
 
-    <div class="card">
+    <div class="card" id="condCard">
       <h3>3. 搜索条件（勾选要跑的）</h3>
       <div id="conds"></div>
+      <div class="note" id="condMapsHint" style="display:none;">地图模式只用「<b>第一个勾选条件</b>」的身份词拼进查询词（如法国用 grossiste）。<br>⚠️ 这一步不能省：实测只搜「nouilles」返回的全是餐馆，加上 grossiste 才出现食品批发商。其余条件不参与。</div>
     </div>
 
     <div class="card">
       <h3>4. 参数</h3>
-        <label style="font-size:14px;">每条公式抓几页：</label>
-        <input type="number" id="pages" value="2" min="1" max="5" style="width:80px; margin:6px 0;">
+        <div style="margin:0 0 4px; font-size:14px;">数据源：</div>
+        <label class="cond" style="display:block;"><input type="radio" name="source" value="google" checked onchange="onSource()"> 谷歌网页搜索（按关键词找公司官网）</label>
+        <label class="cond" style="display:block;"><input type="radio" name="source" value="maps" onchange="onSource()"> 谷歌地图名录（找有实体地址的本地商家，带电话）</label>
+        <div id="mapsNote" class="note" style="display:none;">地图名录里只有「有实体地址的真实商家」，所以 B2B 名录站/新闻站/菜谱站不会混进来；电话和地址是地图直接给的，官方有官网的再访问官网补邮箱。<br>⚠️ 单次搜索上限约 120 条；结果受出口 IP 所在地影响，指定城市能明显提高精度。仅用于少量内部研究。</div>
+        <div id="mapsCityWrap" style="display:none; margin:8px 0;">
+          <label style="font-size:14px;">城市 / 地区：</label>
+          <input type="text" id="mapsCity" placeholder="如 Lyon / 里昂，留空只用国家" style="width:180px; margin:6px 0;">
+          <div class="note">城市名会拼进地图搜索词（谷歌官方推荐的位置限定方式），比只选国家精准得多</div>
+        </div>
+        <div id="pagesWrap">
+          <label style="font-size:14px;">每条公式抓几页：</label>
+          <input type="number" id="pages" value="2" min="1" max="5" style="width:80px; margin:6px 0;">
+        </div>
         <br><label style="font-size:14px;">本次任务采集数量：</label>
         <input type="number" id="targetCount" value="10" min="10" max="100" step="1" style="width:80px; margin:6px 0;">
-        <div class="note">本轮最多新增多少个「新网站」（10-100）；按新网站个数计，不按是否抓到联系方式计。SQLite 客户库总量不设上限</div>
+        <div class="note">本轮最多新增多少个新客户（10-100）；按新增个数计，不按是否抓到联系方式计。SQLite 客户库总量不设上限</div>
         <div style="margin:12px 0 4px; font-size:14px;">搜索方式：</div>
         <label class="cond"><input type="checkbox" id="autoEnrich" checked> 搜到一个就顺手抓它的联系方式（推荐）</label>
-        <div class="note">勾选：每搜到一个新网站，立刻访问它抓邮箱/电话并评分，抓完（或确认抓不到）再搜下一个，凑够数量即停。每条会多花几秒，但不用等全部搜完；结果文件在整轮结束时一次写出。<br>不勾：只收集网站线索，邮箱电话留空，速度快，适合先铺量，稍后再双击「补历史欠账.py」批量补。</div>
+        <div class="note">勾选：每搜到一个新客户，立刻访问它抓邮箱/电话并评分，抓完（或确认抓不到）再搜下一个，凑够数量即停。每条会多花几秒，但不用等全部搜完；结果文件在整轮结束时一次写出。<br>不勾：只收集网站线索，邮箱电话留空，速度快，适合先铺量，稍后再双击「补历史欠账.py」批量补。<br>（地图模式下：地图本来就给电话和地址，不勾就是不再访问官网补邮箱。）</div>
+      <div id="excludesWrap">
         <div style="margin:12px 0 4px; font-size:14px;">排除条件（勾选要排除的，默认全排除）</div>
       <div id="excludes"></div>
+      </div>
       <div style="margin:12px 0 4px; font-size:14px;">中国商家过滤（默认全部勾选，可逐项关闭）</div>
       <div style="display:flex; gap:8px; margin-bottom:6px;">
         <button type="button" class="btn-mini" onclick="toggleChinaFilters(true)">全部勾选</button>
         <button type="button" class="btn-mini" onclick="toggleChinaFilters(false)">全部取消</button>
       </div>
+      <div id="chinaMapsHint" class="note" style="display:none;">地图模式没有查询公式，所以「排除 China manufacturer」这类查询词选项不生效；但「中文地址 / +86 电话 / 平台域名」这些在结果上判断的项照常生效</div>
       <div id="chinaFilters"></div>
       <div class="note">⚠️ 搜索中会弹出 Chrome 窗口，遇到谷歌验证码请在浏览器里手动通过</div>
     </div>
@@ -1753,6 +2291,7 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
 
 <script>
 let since = 0, polling = null, renderedRows = 0;
+let RUN_SOURCE = 'google';   // 本轮数据源：google / maps（由 start() 写入，poll() 用来切换文案）
 
 function logBox(msg){
   const b = document.getElementById('log');
@@ -1812,7 +2351,8 @@ async function poll(){
     for (const l of d.logs) logBox(l);
     since = d.total_logs;
   }
-  document.getElementById('counter').textContent = '本轮新增 ' + d.result_count + ' 个网站';
+  document.getElementById('counter').textContent =
+    '本轮新增 ' + d.result_count + (RUN_SOURCE === 'maps' ? ' 个商家' : ' 个网站');
   renderRows(d.rows);
   if (d.db_total != null){
     document.getElementById('dbCounter').textContent = 'SQLite 已存 ' + d.db_total + ' 条（已评分 ' +
@@ -1827,8 +2367,11 @@ async function poll(){
   } else if (d.running){
     setButtons(true);
     const s = document.getElementById('status');
-    s.textContent = d.phase === 'search' ? '搜索中（每搜到一个网站就同步抓联系方式）…'
-                  : d.phase === 'export' ? '导出到飞书…' : '运行中…';
+    s.textContent = d.phase === 'export' ? '导出到飞书…'
+                  : RUN_SOURCE === 'maps'
+                    ? '地图采集 + 就地抓联系方式中（每条要点开详情面板，较慢）…'
+                    : d.phase === 'search' ? '搜索中（每搜到一个网站就同步抓联系方式）…'
+                  : '运行中…';
   }
 }
 
@@ -1859,18 +2402,21 @@ async function start(){
     const industry = document.getElementById('kwIndustry').value || '';   // 行业标签，取自关键词库的行业选择
     const autoEnrich = document.getElementById('autoEnrich').checked;      // 搜索时是否就地抓联系方式
     const lang = curLang();                                                // 条件词语言（随后国家自动联动）
+    const source = curSource();                                            // google=网页搜索 / maps=谷歌地图
+    const city = curCity();                                                // 仅地图用
     if (!products.trim()){ alert('请填写产品关键词'); return; }
-    if (!conditions.length){ alert('请至少勾选一个搜索条件'); return; }
+    if (source !== 'maps' && !conditions.length){ alert('请至少勾选一个搜索条件'); return; }
     if (!Number.isInteger(targetCount) || targetCount < 10 || targetCount > 100){
-      alert('本次任务采集数量只能设置为 10-100 的整数（按新增网站个数计）'); return;
+      alert('本次任务采集数量只能设置为 10-100 的整数'); return;
     }
     const r = await fetch('/api/start', { method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({products, conditions, countries, pages, target_count: targetCount, exclude,
-        china_filters: chinaFilters, match, industry, auto_enrich: autoEnrich, lang}) });
+        china_filters: chinaFilters, match, industry, auto_enrich: autoEnrich, lang, source, city}) });
   const d = await r.json();
   if (!d.ok){ alert(d.msg); return; }
-  logBox('====== 开始搜索 ======');
+  RUN_SOURCE = source;
+  logBox(source === 'maps' ? '====== 开始谷歌地图采集 ======' : '====== 开始搜索 ======');
   since = 0;
   renderedRows = 0;                                     // 清空上一轮的实时明细，等后端 rows 到达后重建
   document.getElementById('liveBody').innerHTML = '';
@@ -1918,6 +2464,46 @@ COUNTS.forEach(c => {
   countryBox.insertAdjacentHTML('beforeend',
     `<option value="${c[0]}" ${c[2]?'selected':''}>${c[1]}</option>`);
 });
+const MAPS_CENTERS = MAPS_CENTERS_PLACEHOLDER;   // 国家代码 → [纬度, 经度]，与后端 COUNTRY_CENTERS 同源
+const MAPS_ROLES = MAPS_ROLES_PLACEHOLDER;       // 条件 → {语言: 身份词}，与后端 COND_ROLES 同源
+
+// ==================== 数据源切换（谷歌网页搜索 / 谷歌地图） ====================
+function curSource(){
+  return (document.querySelector('input[name="source"]:checked') || {}).value || 'google';
+}
+function curCity(){
+  const el = document.getElementById('mapsCity');
+  return el ? (el.value || '').trim() : '';
+}
+// 地图查询要拼的身份词：取第一个勾选条件的角色词（与后端 maps_role_word 一致）
+// ⚠️ 不带身份词时地图只会返回餐馆/零售店，不是买家
+function mapsRoleWord(){
+  const first = document.querySelector('#conds input:checked');
+  if (!first) return '';
+  const r = MAPS_ROLES[first.value] || {};
+  return r[curLang()] || r.en || '';
+}
+function onSource(){
+  const maps = curSource() === 'maps';
+  document.getElementById('mapsCityWrap').style.display  = maps ? 'block' : 'none';
+  document.getElementById('mapsNote').style.display      = maps ? 'block' : 'none';
+  document.getElementById('pagesWrap').style.display     = maps ? 'none'  : 'block';
+  document.getElementById('excludesWrap').style.display  = maps ? 'none'  : 'block';
+  document.getElementById('condMapsHint').style.display  = maps ? 'block' : 'none';
+  document.getElementById('chinaMapsHint').style.display = maps ? 'block' : 'none';
+  renderCombos();
+}
+// 地图搜索 URL：与后端 maps_search_url() 保持完全一致
+// ① 城市名拼进查询词（谷歌官方推荐的位置限定方式）② @lat,lng 锁视野 ③ hl/gl 挂查询串
+function mapsUrlPreview(query, code, city, hl, gl){
+  const c  = MAPS_CENTERS[code] || MAPS_CENTERS.us || [39.83, -98.58];
+  const q  = [query, city].filter(Boolean).join(' ').trim();
+  const qs = [];
+  if (hl) qs.push('hl=' + hl);
+  if (gl) qs.push('gl=' + gl);
+  return 'https://www.google.com/maps/search/' + encodeURIComponent(q)
+       + '/@' + c[0] + ',' + c[1] + ',11z' + (qs.length ? '?' + qs.join('&') : '');
+}
 // 国家 → 语言联动：该国语言在语言下拉里有选项就自动选中；下拉里没有该语言 → 留空（完全空白，由用户自选）
 function applyCountryLang(){
   const sel = document.getElementById('kwLang');
@@ -2075,6 +2661,32 @@ function renderCombos(){
   const args  = countryParams();
   box.innerHTML = '';
   COMBO_CACHE = [];
+  if (curSource() === 'maps'){
+    const co    = document.getElementById('countries');
+    const code  = co.value;
+    const cname = (co.selectedOptions[0] || {}).textContent || '未选择';
+    const city  = curCity();
+    const hl    = curLang() || COUNTRY_LANG[code] || 'en';
+    const gl    = COUNTRY_GL[code] || code;
+    if (!pqs.length){
+      sum.textContent = '请先填写「2. 产品关键词」';
+      box.innerHTML = '<div class="cmb-empty">暂无可预览的地图查询</div>';
+      return;
+    }
+    const role  = mapsRoleWord();
+    const urls  = pqs.map(pq => mapsUrlPreview(
+      [pq.replace(/^"+|"+$/g, ''), role].filter(Boolean).join(' '), code, city, hl, gl));
+    COMBO_CACHE.push(...urls);
+    sum.innerHTML = '<b>' + urls.length + '</b> 条地图查询 · 目标国家：' + esc(cname)
+                  + (city ? ' · 城市：' + esc(city) : ' · 未指定城市（只用国家中心视野，精度较低）')
+                  + (role ? ' · 身份词：' + esc(role) : ' · ⚠️ 没勾搜索条件，没有身份词，结果会以餐馆/零售店为主');
+    box.insertAdjacentHTML('beforeend',
+      '<div class="cmb-group"><div class="cmb-head">谷歌地图搜索（点链接可直接打开验证）</div>'
+      + urls.map(u => '<div class="cmb-line"><a href="' + esc(u) + '" target="_blank" rel="noopener">'
+          + esc(u) + '</a></div>').join('')
+      + '</div>');
+    return;
+  }
   if (!pqs.length || !conds.length){
     sum.textContent = '请先填写「2. 产品关键词」，并至少勾选一个「3. 搜索条件」';
     box.innerHTML = '<div class="cmb-empty">暂无可预览的组合</div>';
@@ -2109,11 +2721,12 @@ function copyCombos(){
 }
 // 任何影响组合的输入都实时刷新预览
 document.getElementById('products').addEventListener('input', renderCombos);
+document.getElementById('mapsCity').addEventListener('input', renderCombos);
 document.querySelectorAll('input[name="match"]').forEach(r => r.addEventListener('change', renderCombos));
 document.addEventListener('change', e => {
   if (e.target.closest && e.target.closest('#conds, #excludes, #chinaFilters')) renderCombos();
 });
-renderCombos();
+onSource();   // 初始化：按默认数据源摆好界面，并渲染一次预览
 
 loadKeywords();
 </script>
@@ -2134,21 +2747,70 @@ def _build_page():
     counts_js = [(k, name, k == 'us', hl, gl) for k, name, gl, hl in COUNTRIES]
     excls_js = [(k, v, d) for k, v, d in EXCLUDE_OPTIONS]
     china_js = [(k, q, label, desc) for k, q, label, desc in CHINA_FILTER_OPTIONS]
+    # 国家代码 → [纬度, 经度]：给前端拼地图搜索 URL 用，与后端 COUNTRY_CENTERS 同源
+    centers_js = {k: [lat, lng] for k, (lat, lng) in COUNTRY_CENTERS.items()}
+    # 条件 → {语言: 该条件角色词的第一个词}：地图模式要把它拼进查询词，前端预览必须与后端一致
+    roles_js = {k: {lg: (v.get(lg) or v.get('en') or '').split(' OR ')[0].strip().strip('"')
+                    for lg in COND_LANGS}
+                for k, v in COND_ROLES.items()}
     import json as _json
     html = PAGE_HTML.replace('CONDS_PLACEHOLDER', _json.dumps(conds_js, ensure_ascii=False))
     html = html.replace('COUNTS_PLACEHOLDER', _json.dumps(counts_js, ensure_ascii=False))
     html = html.replace('EXCLS_PLACEHOLDER', _json.dumps(excls_js, ensure_ascii=False))
     html = html.replace('CHINA_FILTERS_PLACEHOLDER', _json.dumps(china_js, ensure_ascii=False))
+    html = html.replace('MAPS_CENTERS_PLACEHOLDER', _json.dumps(centers_js))
+    html = html.replace('MAPS_ROLES_PLACEHOLDER', _json.dumps(roles_js, ensure_ascii=False))
     return html
 
 
 PAGE_HTML = _build_page()
 
 
+# 启动端口候选：优先保持原来的 5000，被系统保留/占用就往后面顺延
+PREFERRED_PORTS = (5000, 8000, 8080, 8765, 9000, 7000, 6500, 5800, 5555)
+
+
+def pick_port(host='127.0.0.1', preferred=PREFERRED_PORTS):
+    """挑一个**真正能绑上**的端口，返回 (端口, 换端口的说明)。说明为空 = 首选端口可用。
+
+    ⚠️ 不能把端口写死：Windows 会把**成片**的 TCP 端口保留给 Hyper-V / WinNAT
+    （用 `netsh interface ipv4 show excludedportrange protocol=tcp` 可以看到），
+    落在保留段里的端口一 bind 就抛 `WSAEACCES(10013)` —— 中文提示是
+    「以一种访问权限不允许的方式做了一个访问套接字的尝试。」，而 `netstat` 里
+    **看不到任何进程占用**，极易被误判成「端口被别的程序抢了」。
+    更要命的是保留段每次开机由 winnat 重新生成、会漂移，所以固定换一个端口只是治标，
+    正确做法就是启动时实测一遍。
+    """
+    reason = ''
+    for p in preferred:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            s.bind((host, p))
+            return p, reason
+        except OSError as e:
+            if not reason:                      # 只记第一个失败的原因，通常就是 5000
+                reason = f'{e.strerror}（WinError {e.errno}）'
+        finally:
+            s.close()
+    # 候选全试不通：让系统分配一个空闲端口，记下号再释放（交给 app.run 重新绑）
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.bind((host, 0))
+        return s.getsockname()[1], reason or '候选端口全部不可用'
+    finally:
+        s.close()
+
+
 if __name__ == '__main__':
     init_customer_db()
-    url = 'http://127.0.0.1:5000/'
+    HOST = '127.0.0.1'
+    PORT, PORT_REASON = pick_port(HOST)
+    if PORT_REASON:
+        print(f'⚠️ 首选端口 {PREFERRED_PORTS[0]} 不能用：{PORT_REASON}')
+        print(f'   已自动改用端口 {PORT}。'
+              f'（Windows 把成片端口保留给 Hyper-V/WinNAT，属正常现象，不影响使用）')
+    url = f'http://{HOST}:{PORT}/'
     print(f'启动本地网页服务：{url}')
     print('请在浏览器中打开（若未自动打开请手动访问）')
     webbrowser.open(url)
-    app.run(host='127.0.0.1', port=5000, threaded=True, debug=False)
+    app.run(host=HOST, port=PORT, threaded=True, debug=False)
