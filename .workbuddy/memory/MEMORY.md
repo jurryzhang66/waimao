@@ -20,7 +20,10 @@
 - 脚本：`补历史欠账.py`(--dry) / `同步数据库到飞书.py`(--dry-run) / `回填行业.py` / `重标行业.py`(默认 dry-run，`--apply` 才写) / `demo.py` / `gen_import.py`。
 - ⚠️ `.workbuddy/` 与程序**零耦合**（引用 0 处）。**别删**：`memory/MEMORY.md`、`_todo.json`、`_fail_q1_p0.png`、所有回归脚本。
 - ⚠️ `.gitignore` 是**白名单式**（V1.4 起）：先 `.workbuddy/_*` 全排除，再用 `!` 逐条放行测试套件（`_run_all_reg.py`/`_check_*.py`/`_kwlib_check.py`/`_verify_maps_base.py`/`_smoke_*.py`/`_smoke_*.js`）。**新增回归脚本记得同步加一条 `!`**，否则备份里没有它。`*.log` 全局排除；`DB/backups/客户库_污染前_*` 排除（测试临时快照）。
-- git `main`：V1.0 `07f146a` / V1.1 `7690296` / V1.2 `556d857` / V1.3 `65c0f2f` / **V1.4 = 附注标签 `V1.4`**。⚠️ **V1.4 起不再往本文件写提交 hash** —— 该提交里就含本文件，写 hash 得再 amend、amend 又换 hash，永远差一位；取 hash 一律 `git rev-parse "V1.4^{commit}"`。查标签先 `git tag -l`。本机 git 身份是占位值（`github用户名 <github注册邮箱>`，V1.0 起一直如此），push 前需改。`.venv/` 必须保持 gitignore。**标签全是附注标签**（`-a -m`），新版本照做。回滚 `git checkout V1.4 -- <file>` 或复制 `DB/backups/`。
+- git `main`：V1.0 `07f146a` / V1.1 `7690296` / V1.2 `556d857` / V1.3 `65c0f2f` / **V1.4 = 附注标签 `V1.4`**（提交 `84f9584`）。⚠️ **V1.4 起不再往本文件写提交 hash** —— 该提交里就含本文件，写 hash 得再 amend、amend 又换 hash，永远差一位；取 hash 一律 `git rev-parse "V1.4^{commit}"`。查标签先 `git tag -l`。**标签全是附注标签**（`-a -m`），新版本照做。
+- **远端（2026-09-30 接入）**：`origin` = `https://github.com/jurryzhang66/waimao.git`，**仓库是 public**（用户在我列出全部风险后仍明确同意公开）。仓库级身份 `jurryzhang66 <jurryzhang66@users.noreply.github.com>`（⚠️ 旧提交 V1.0~V1.4 的作者**仍是占位值** `github用户名 <github注册邮箱>`，当时选择了不重写历史）。推送 `git push origin main --tags`；凭据走 `helper-selector`(GCM)，本机无缓存，实测直接推成功。
+- ⛔⛔ **公开仓库既成事实（用户知情同意）**：`main` 与全部标签含 ① `DB/客户库.sqlite3` **253 条真实客户**（156 邮箱 / 90 电话）② `output/` 16 份结果表 ③ `DB/backups/` 3 份库快照 ④ **飞书 BASE_TOKEN `ZhSSb18BMajKR7sacxTcCFY0njf`**（`core/state.py` / `同步数据库到飞书.py` / `回填行业.py` / `.workbuddy/_backfill_rules_snapshot.py`）。**推上去就删不干净**（历史 + 已被抓取）→ 要收口只能 `git filter-repo` 重写 + 强推 + **轮换飞书 token**。以后往仓库加敏感文件前先想清楚这一步。
+- `.venv/` 必须保持 gitignore。回滚 `git checkout V1.4 -- <file>` 或复制 `DB/backups/`。
 - ⚠️ 本机 `core.autocrlf=true`。**不影响 `ui/page.html` 的 sha256 锁**：`core/ui.py` 与 `_check_page.py` R5 都用 `open(..., encoding='utf-8')` **文本模式**读，Python 通用换行会把 CRLF 归一化成 LF（实测：CRLF 版二进制 35697B ≠ 35058B，但文本模式读出来仍是 `85207b10…`）。已验证过一次，**别再当隐患返工**。
 
 ## 关键词库 `关键词库.json`
