@@ -33,23 +33,90 @@ FIELD = '行业'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # ================= 行业判定规则 =================
-# 自上而下匹配，先命中先算；关键词针对公司名 + 官网域名
+# 自上而下匹配，先命中先算；匹配对象 = 公司名 + 官网域名。
+#
+# ⚠️ 行业名必须与「关键词库.json」的顶层键**逐字一致**（现在 8 个）：
+#      宠物用品 / LED照明 / 家具 / 服装 / 机械零部件 / 户外用品 / 食品 / 塑料包装袋
+#    否则客户库 industry 列、飞书「行业」单选字段、关键词库三处对不上，筛选会静默漏数据。
+#    历史遗留：本文件曾用「家具家居」「汽配」，本次已统一为「家具」「机械零部件」。
+#
+# ⚠️ 关键词的两种写法（见 _compile_kw）——这是本次唯一的匹配语义变更：
+#    · 普通写法  = **裸子串**。能吃域名的连写与中缀：'litter' 命中 catlitter、
+#                  'furniture' 命中 wholesalefurniture、'pet' 命中 chongjiapet。
+#    · '^' 开头  = **整词**（左边界 + 右边界，右边允许 s/es 复数），只用在「误判代价高、
+#                  且几乎不会出现在域名词尾」的词上：'^engine' 不命中 engineering、
+#                  '^pe bag' 不命中 type bags、'^vest bag' 不命中 harvest bags、
+#                  '^busta' 不命中 robusta、'^bin liner' 不命中 cabin liner。
+# ⚠️ 为什么 'pet' / 'bed' / 'chair' 仍用裸子串：产品词经常就落在域名词尾
+#    （chongjiapet.com / dreambed.com / diningchair.com），收紧成整词会把**真客户漏掉**。
+#    代价是 carpet / petroleum / embedded / chairman 会被误判 —— 这是**已知取舍**，不是疏忽。
+# ⚠️ 但 'cat' 恰恰不能裸用：裸 'cat' 会命中 catalog / category，以及 URL 里的 `/cat/` 路径段
+#    （电商站几乎必有 /category/），后果严重。故改用更具体的 'cat litter' + 'catlitter'。
 INDUSTRY_RULES = [
-    ('宠物用品', ['litter', 'cat ', 'cat.', 'cats', 'kitten', 'pet', 'pets', 'meow', 'paw',
+    ('宠物用品', ['litter', 'cat litter', 'catlitter', 'kitten', 'meow', 'paw', 'pet',
                   'litiere', 'katze', 'katzentoilette', 'arenero', 'петл', '宠物']),
-    ('家具家居', ['sofa', 'furniture', 'dining table', 'mattress', 'bed', 'chair', 'zuomod',
-                  'interior', 'home decor', 'linens', 'wholesale-interiors', 'jnmfurniture',
-                  'pfcind', 'novafurniture', 'knoxbeds', 'furnituredistributors', 'sheesham']),
-    ('汽配', ['auto part', 'autopart', 'automotive', 'auto body', 'ignition', 'engine',
-              'vehicle', 'car part', 'truck', 'durango', 'dodge', 'chindernetz']),
+    ('家具', ['sofa', 'furniture', 'dining table', 'mattress', 'bed', 'chair', 'zuomod',
+              'interior', 'home decor', 'linens', 'wholesale interiors', 'jnmfurniture',
+              'pfcind', 'novafurniture', 'knoxbeds', 'furnituredistributors', 'sheesham']),
+    ('机械零部件', ['auto part', 'autopart', 'automotive', 'auto body', 'ignition', '^engine',
+                    'vehicle', 'car part', 'truck', 'durango', 'dodge', 'chindernetz',
+                    'bearing', 'cnc', 'machining', 'machined', 'mechanical part',
+                    'spare part', 'mechanical component']),
+    # ⚠️ 塑料包装袋必须放**末位**：guess_industry 自上而下先命中先算，放末位可保证
+    #    「宠物用品 / 家具 / 机械零部件」的既有判定一条都不变，只影响原本判空的记录。
+    # 多词短语一律给两个写法：带空格的（命中公司名）+ 连写的（命中域名）。
+    ('塑料包装袋', ['trash bag', 'trashbag', 'garbage bag', 'garbagebag',
+                    'waste bag', 'wastebag', 'refuse sack', 'refusesack',
+                    'rubbish bag', 'rubbishbag', '^bin liner', 'binliner',
+                    '^bin bag', 'binbag', 'carrier bag', 'carrierbag',
+                    'shopping bag', 'shoppingbag', 'plastic bag', 'plasticbag',
+                    'poly bag', 'polybag', 'polythene bag', 'hdpe bag', 'ldpe bag', '^pe bag',
+                    '^t shirt bag', 'tshirtbag', '^vest bag', 'vestbag',
+                    'die cut bag', 'diecutbag', 'handle bag', 'handlebag',
+                    'wicket bag', 'wicketbag', 'ziplock', '^zip lock',
+                    'zipper bag', 'zipperbag', 'slider bag', 'sliderbag',
+                    'resealable bag', 'self seal bag', 'selfsealbag',
+                    'drawstring bag', 'drawstringbag', 'c fold bag', 'cfoldbag',
+                    'compostable bag', 'compostablebag', 'biodegradable bag', 'biodegradablebag',
+                    'compost bag', 'compostbag', 'pallet cover', 'palletcover',
+                    'dust cover bag', 'dustcoverbag', 'litter bag', 'litterbag',
+                    'poop bag', 'poopbag',
+                    '塑料袋', '垃圾袋', '包装袋',
+                    'müllbeutel', 'müllsack', '^beutel', 'folienbeutel', 'tragetasche',
+                    'sac poubelle', 'sac plastique', 'sac de courses',
+                    'bolsa de basura', 'bolsa de plástico', 'bolsa camiseta',
+                    'sacchetto', '^busta', '^shopper',
+                    'vuilniszak', 'plastic zak',
+                    'poşet', 'çöp poşeti', 'naylon poşet',
+                    'أكياس القمامة', 'كيس', 'کیسه', 'نایلون']),
 ]
+
+# 归一化：小写 + 非字母数字一律转空格（连字符/点/斜杠/下划线都变空格，
+# 于是 'c-fold'→'c fold'、'wholesale-interiors'→'wholesale interiors'）。
+# 保留带音标的拉丁字母 / 西里尔 / 阿拉伯 / CJK，否则 'müllbeutel'、'петл'、'垃圾袋' 会被打散。
+_NORM = re.compile(r'[^0-9a-z\u00c0-\u024f\u0400-\u04ff\u0590-\u06ff\u4e00-\u9fff]+')
+
+
+def _compile_kw(kw):
+    """'^' 开头 = 整词匹配（含 s/es 复数）；否则裸子串匹配。"""
+    if kw.startswith('^'):
+        return re.compile(r'(?<![0-9a-z])' + re.escape(kw[1:]) + r'(?:s|es)?(?![0-9a-z])')
+    return re.compile(re.escape(kw))
+
+
+_KW_PATTERNS = [(name, [_compile_kw(kw) for kw in kws]) for name, kws in INDUSTRY_RULES]
 
 
 def guess_industry(*texts):
-    """按关键词判断行业；判断不出返回空字符串"""
-    txt = ' '.join(t for t in texts if t).lower()
-    for name, kws in INDUSTRY_RULES:
-        if any(k in txt for k in kws):
+    """按关键词判断行业；判断不出返回空字符串。
+
+    ⚠️ '^' 开头的关键词走整词匹配，普通关键词走裸子串（见 _compile_kw 的说明）——
+    不能一律用裸子串：'pet' 会命中 carpet/petroleum、'bed' 会命中 embedded，
+    把无关公司**静默**标错行业且不报错。
+    """
+    txt = _NORM.sub(' ', ' '.join(t for t in texts if t).lower())
+    for name, pats in _KW_PATTERNS:
+        if any(p.search(txt) for p in pats):
             return name
     return ''
 

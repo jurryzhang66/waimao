@@ -1,0 +1,158 @@
+{
+  "todo_feishu": [
+    {
+      "db_id": 6,
+      "domain": "sourceready.com",
+      "record_id": "recvwfe0shTJJM",
+      "feishu_company": "Westpoint Pet Co., Ltd. - Leather and travel goods only ..."
+    },
+    {
+      "db_id": 16,
+      "domain": "sec.gov",
+      "record_id": "recvwfe0shMKTV",
+      "feishu_company": "odc-20250731"
+    },
+    {
+      "db_id": 19,
+      "domain": "ubuy.gt",
+      "record_id": "recvwfe0shemIs",
+      "feishu_company": "ASOCEA 14 Pcs Cat Litter Box Liners with Drawstrings Guatemala"
+    },
+    {
+      "db_id": 30,
+      "domain": "archive.org",
+      "record_id": "recvwpTJeuTEHg",
+      "feishu_company": "Full text of \"Official gazette of the United States Patent and ..."
+    },
+    {
+      "db_id": 35,
+      "domain": "ubuy.ws",
+      "record_id": "recvwpTJeuJQnr",
+      "feishu_company": "160 Count Cat Litter Box Liners for Litter Box Robot Samoa | Ubuy"
+    },
+    {
+      "db_id": 36,
+      "domain": "ubuy.dj",
+      "record_id": "recvwpTJeucGRa",
+      "feishu_company": "60 Count Litter Box Liners, Jumbo 36 x 18 Inches Djibouti"
+    },
+    {
+      "db_id": 37,
+      "domain": "en.nbd.ltd",
+      "record_id": "recvwpTJeu7LxW",
+      "feishu_company": "PETENGREAT CO., LTD. | Import Data"
+    },
+    {
+      "db_id": 38,
+      "domain": "ubuy.sc",
+      "record_id": "recvwpTJeuT6Rz",
+      "feishu_company": "160 Count Cat Litter Box Liners Compatible with Seychelles"
+    },
+    {
+      "db_id": 39,
+      "domain": "liberia.ubuy.com",
+      "record_id": "recvwpTJeukEN6",
+      "feishu_company": "Cat Litter Box Liners Drawstring XL (30 Bags) 39 x Liberia"
+    },
+    {
+      "db_id": 40,
+      "domain": "tiktok.com",
+      "record_id": "recvwpTJeuR93d",
+      "feishu_company": "Garbagebag manufacturer (@garbagebagsfactory)"
+    },
+    {
+      "db_id": 41,
+      "domain": "filecache.investorroom.com",
+      "record_id": "recvwpTJeubiqu",
+      "feishu_company": "BOQII HOLDING LIMITED"
+    },
+    {
+      "db_id": 44,
+      "domain": "exportgenius.in",
+      "record_id": "recvwpTJeuClMa",
+      "feishu_company": "List of Top 273 Auto Parts Importers in Bangladesh"
+    },
+    {
+      "db_id": 45,
+      "domain": "trade.gov",
+      "record_id": "recvwpTJeuh6Pr",
+      "feishu_company": "Dominican Republic Auto Parts"
+    },
+    {
+      "db_id": 47,
+      "domain": "dailyvoice.com",
+      "record_id": "recvwpTJeugBa5",
+      "feishu_company": "Nearly $170K In Auto Parts Seized At Virginia Port After ..."
+    },
+    {
+      "db_id": 48,
+      "domain": "worldstopexports.com",
+      "record_id": "recvwpTJeuU5y8",
+      "feishu_company": "Automotive Parts Imports by Country"
+    },
+    {
+      "db_id": 64,
+      "domain": "dir.indiamart.com",
+      "record_id": "recvwpTJeuZyjP",
+      "feishu_company": "Dining Table Set Wholesalers & Distributors in India"
+    }
+  ],
+  "todo_db_only": [
+    {
+      "db_id": 94,
+      "domain": "europages.fr"
+    },
+    {
+      "db_id": 97,
+      "domain": "fr.aliexpress.com"
+    },
+    {
+      "db_id": 103,
+      "domain": "bonjour-coree.org"
+    },
+    {
+      "db_id": 104,
+      "domain": "supersoluce.com"
+    },
+    {
+      "db_id": 112,
+      "domain": "fr.shein.com"
+    },
+    {
+      "db_id": 114,
+      "domain": "unileverfoodsolutions.fr"
+    },
+    {
+      "db_id": 115,
+      "domain": "ma.kompass.com"
+    },
+    {
+      "db_id": 116,
+      "domain": "lecourrier.vn"
+    },
+    {
+      "db_id": 117,
+      "domain": "fr.kompass.com"
+    },
+    {
+      "db_id": 118,
+      "domain": "douane.gouv.fr"
+    },
+    {
+      "db_id": 119,
+      "domain": "kapuaspalmoil.com"
+    },
+    {
+      "db_id": 120,
+      "domain": "agriculture.canada.ca"
+    },
+    {
+      "db_id": 121,
+      "domain": "open.spotify.com"
+    },
+    {
+      "db_id": 122,
+      "domain": "tripadvisor.fr"
+    }
+  ]
+}

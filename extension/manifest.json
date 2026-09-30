@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "外贸客户采集助手",
+  "version": "1.0.0",
+  "description": "浏览网页时看到有价值的客户网站，点一下就把网址/邮箱/电话采集进本机「谷歌客户开发工具」的客户库。",
+  "minimum_chrome_version": "96",
+
+  "permissions": ["activeTab", "scripting", "contextMenus", "storage"],
+
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "外贸客户采集助手"
+  },
+
+  "options_page": "options.html",
+
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "exclude_matches": ["http://127.0.0.1/*", "http://localhost/*"],
+      "js": ["floating-css.js", "content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

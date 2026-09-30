@@ -1,0 +1,110 @@
+# 全量回归验收记录 — 2026-09-30（第二轮：本轮明细「每行 ✕ 删除」）
+# 命令：D:\Users\admin\AppData\Local\Programs\Python\Python313\python.exe .workbuddy/_run_all_reg.py
+# 最终结果：**19 项全部 EXIT=0**（用时 238.2s；驱动脚本把每项输出写到 .workbuddy/_reg__<名字>.log）
+# 上一次（本轮会话 + popup 补明细）的记录在同名文件的历史版本里，19 项不变，只增了不少用例。
+
+EXIT=0  _check_page             页面文案/占位符/JS 语法/标签配对/数据源切换/端口避让 + R1–R7
+                               （R7 新增 6 条：class="row-del" / data-rid / onSessionBodyClick /
+                                deleteSessionRow / /api/manual/session/delete / 事件委托挂在
+                                #sessionBody / .row-del 样式；R5 两处 sha256 仍原样未动）
+EXIT=0  _check_startup          pick_port 单测 + 子进程真机启动 e2e
+EXIT=0  _kwlib_check            词库字节约定/规模/键序/行业内部唯一/deep-diff/语言覆盖看板
+EXIT=0  _check_industry_rules   回填行业.py 规则：必须挡住的误判 + 既有行业回归 + 逐条 diff
+EXIT=0  _verify_maps_base       国家坐标/地图 URL/去重键
+EXIT=0  _smoke_search           run_search 闭环打桩（临时库）
+EXIT=0  _smoke_maps             run_maps 闭环打桩（临时库）
+EXIT=0  _smoke_collect          手动采集核心 **8 组**（新增 ⑧）：
+                                ① 秒级命中入库 + 采集阶段不碰结果文件 + 自动开轮
+                                ①b 产品词 +10（65→75）② 去重跳过且明细留痕 ③ 升级恰 1 次
+                                ④ 结束本轮 → 新建一份 10 列/降序/不污染上一轮的结果文件
+                                ⑤ 落盘失败保留数据可重试 ⑥ 库内校验 ⑦ /api/collect 403
+                                ⑧ ★新★ 删除单条：明细+客户库双删 / 删前自动备份（校验备份文件可打开
+                                  且含被删那条）/ 计数回退 / 删不存在与不带 rid 都被拒 / 300 秒节流 /
+                                  被删条目不进 Excel / 删空后本轮不误关 + 空轮不落盘
+EXIT=0  _smoke_manual_session   **11 组 128 项**（原 10 组 88 项）：
+                                新增 ⑪ 删除单条 —— 删前备份落临时 backups 目录且可打开、
+                                按 rid 精确删（同 url 的 added/existed 不会连坐）、added 计数回退、
+                                /api/manual/state 反映新长度、删不存在 rid / 不带 rid 都被拒、
+                                300 秒节流、结束落盘不含被删行、删空后 session_active 仍 True、
+                                护栏新增 `_under_tmp(m.db._backups_dir())`（防测试备份写进真实 DB/backups/）
+EXIT=0  _check_feishu_records   飞书导出：来源渠道按网址回库查、50 分门槛对 [手动采集] 豁免、
+                                空评分行不崩、国家映射、邮箱只取第一个（19 项）
+EXIT=0  _check_maps_ui          地图模式真机 UI + 预览 URL 与后端逐字一致（整页截图改为「尽力而为」）
+EXIT=0  _check_kwlib_ui         关键词库三级联动真机校验
+EXIT=0  _check_live_ui          主界面真机 UI 截图
+EXIT=0  _check_manual_ui        /manual 真机 UI：A–F 六项 + ★新★「点行尾 ✕ 删除」子用例
+                                （confirm 覆盖为 true → 真点 → 行数 4→3、徽章变 3、库里那条真消失、
+                                 backups/客户库_删除前_* 出现、剩下那条仍在表里）
+                                ⚠️ 本脚本原来「不碰真实客户库」，本轮起**必须**把 db_path 打桩到临时目录：
+                                删除会走 backup_db_before_delete() + db_delete_customer()，
+                                两者都按 core.db.db_path() 定位真实库
+EXIT=0  _check_ext              扩展静态校验 **67 项**（原 64）：新增后端路由 /api/manual/session/delete
+                                在位、popup.js 发 DP_SESSION_DELETE、background.js 路由它且打真实路径、
+                                popup 与 manual.html 都带 data-rid
+EXIT=0  _smoke_ext_content      content.js 运行时（Node + 最小 DOM 桩）51 项
+EXIT=0  _smoke_ext_popup        popup.js 运行时（Node + 最小 DOM 桩）**93 项**（原 80）：
+                                新增 ⑪ 段落 —— 每行带 data-rid 与 .li-del / confirm 取消不发请求 /
+                                确认后发 DP_SESSION_DELETE / 回执与徽章 / 后端拒绝与后台无应答的原因
+                                留在 sessFile（不被随后的 refreshSession 吃掉）/ 点无 rid 处不动作
+                                （原 ⑪ 轮询纪律顺延为 ⑫）
+EXIT=0  _smoke_ext_live         扩展↔工具 端到端（真 Flask + 真 HTTP）41×2 + 9 + 9 项；
+                                ⑨ 段起多了一步「先删 1 条再结束」→ 库里剩 1 条、Excel 也只 1 行
+EXIT=0  补历史欠账.py --dry      欠账清单（只列不写）
+
+# 真实客户库复核（防打桩失效写脏数据）
+# DB/客户库.sqlite3 → 总条数 247（本次回归跑完那一刻；不是基线，用户在持续使用）
+#   source：谷歌搜索 214 / 手动采集 26 / 谷歌地图 7
+#   ⚠️ 手动采集从 6 涨到 26 是**用户自己在用扩展**（09-30 13:33~14:26 采了一批墨西哥食品
+#      供应商、ramen/泡面站、以及 1 条 Google 地图 place），不是测试写入。
+#      测试域名残留 = 0（plasticbagpc.com 是 09-26 谷歌搜索留下的真记录；ltpimpex.com 是
+#      "x.com" 子串误匹配；leasidepets.com 是用户 09-30 00:55 自己采的）。
+#   → 以后跑完回归别再拿固定数字当基线（227 → 247 → 253 …），先按 source 分布看一遍再说。
+#     2026-09-30 15:30 打 V1.4 备份时是 253（手动采集 32，且用户已成功用过一次 ✕ 删除）。
+# DB/backups/ 里没有「客户库_删除前_*」→ 删除路径的打桩全部有效（备份只落在临时目录）。
+
+# ⚠️⚠️ 本轮修掉的 4 个「回归脚本自身的脆弱点」（都不是产品 bug，但都会让全量回归假红）
+# 1) _check_startup：把换端口原因写死成 '10013'。5000 绑不上的成因会漂移 ——
+#    落在 Windows 保留段 → 10013（权限不允许）；有别的进程真占着它（比如用户自己开着的工具）
+#    → 10048（地址已被使用）。改为「只要拿到 WinError/权限 字样就通过」，
+#    并且把 `assert reason` 改成「首位候选绑不上时才要求有原因」。
+# 2) _check_manual_ui 心跳断言：原来 `loadManualState()` 后只 sleep 1.2s 就读 heart.className，
+#    机器忙时 async fetch 还没回来 → 读到 HTML 初始态 class="heart off" 假红。改成轮询等 'heart on'。
+# 3) _check_maps_ui / _check_manual_ui 的整页截图：3838px 的 full_page 截图 Chrome 偶尔 CDP 超时
+#    （实测 TimeoutError），而截图只是给人看的证据、不是断言 → 改成 try/except 尽力而为。
+# 4) _smoke_ext_live 两遍共用 core.db 模块对象 → `_last_delete_backup_at` 会跨遍残留，
+#    第二遍的删除被 300 秒节流成 backup='' → 断言莫名红。改为 load_tool() 里显式清零。
+
+# ⚠️⚠️ 仍然必须记住的两个大坑（上一轮踩到的，结论不变）
+# A) 扩展 ↔ 本工具联调必须遮蔽「环境里别的实例」（DP_SHADOW_PORTS）：
+#    扩展按 PREFERRED_PORTS 顺序扫 /api/ping，用户自己开着的那个实例常排在测试端口之前，
+#    会被优先选中 → 测试假网址真写进真实客户库（实测踩过）。修法见 _smoke_ext_live.py::shadow_ports()。
+# B) 改 extension/ 后不点「重新加载」会出现「popup 新 / service worker 旧」分裂态：
+#    症状是 popup 显示「0 条 + 未知消息：DP_MANUAL_STATE」、结束按钮灰着，但采集其实成功了。
+#    诊断：浏览器打开 http://127.0.0.1:<端口>/api/manual/state —— 有 JSON = 后端是新的；
+#    404/HTML = 后端也旧，得重启工具。_smoke_ext_popup.js ⑤ 段已把这一幕固化成断言。
+
+# 本轮改动的产物（每行 ✕ 删除：明细 + 客户库双删）
+#   客户开发工具.py   +POST /api/manual/session/delete（锁纪律：锁内定位 → 锁外备份+删库 → 锁内改内存 → 锁外 log）
+#                     +_next_rid() 发号器；collect_from_html 两条 append 都带 kind+rid；
+#                     _ensure_manual_session / api_manual_session_start 都清零 session_rid_seq
+#   core/state.py     MANUAL_STATE +'session_rid_seq'
+#   core/db.py        +_backups_dir() / backup_db_before_delete()（sqlite3 在线 backup，WAL 安全，
+#                     300 秒节流，失败不阻断）/ db_delete_customer()（key 为空直接返回 0，绝不退化成清库）
+#   ui/manual.html    表头 +第 9 列；renderSession 末列输出 .row-del[data-rid]；
+#                     +onSessionBodyClick（事件委托到 #sessionBody）/ +deleteSessionRow（confirm + fetch）；
+#                     .row-del 样式只写进本页自带的第二个 <style>（page.html 被 sha256 锁死）
+#   extension/background.js  +deleteManualSessionRow() + case 'DP_SESSION_DELETE'
+#   extension/popup.js       sessRowHtml 加 .li-del[data-rid]；+onSessionListClick / +deleteSessionRow
+#   extension/popup.css      +.li-del / .li-del:hover
+#   extension/README.md      ✕ 的用法与「双删 + 删前备份 + 5 分钟节流」说明；§七 加了重启工具的提示
+#   8 个回归脚本同步修订（_smoke_manual_session / _check_manual_ui / _check_ext / _smoke_ext_popup /
+#   _smoke_ext_bg / _smoke_ext_live / _smoke_collect / _check_page）
+
+# 本轮最关键的技术判定（写死在这里，别再重新推导）
+# 1) 采集即落库：_commit_candidate 在采集那一刻就 db_upsert_customer 了 → 「本轮明细」只是内存里
+#    决定 **Excel 有哪些行** 的清单。所以「只删明细」是假删除：库里那条还在 → 下次采到同一个站
+#    会被 db_has_customer 判「已在客户库」跳过、永远采不回来，飞书导出也仍会带它。
+# 2) 删除必须按 **rid** 定位，不能按 url：同一个 url 在同一轮里可能既有一条 added 又有一条 existed。
+# 3) 备份必须用 sqlite3 的在线 backup()，**禁止 shutil.copy2** —— 库是 WAL 模式，裸拷贝会漏掉
+#    -wal 里未 checkpoint 的写入。备份目录由 db_path() 推导（_backups_dir()），于是回归脚本只要
+#    打桩了 m.db.db_path，备份就自动落进临时目录、护栏零改动。

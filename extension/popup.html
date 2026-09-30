@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>外贸客户采集助手</title>
+<link rel="stylesheet" href="popup.css">
+</head>
+<body>
+
+<div class="head">
+  <div class="logo">📥</div>
+  <div class="htext">
+    <h1>外贸客户采集助手</h1>
+    <div class="conn" id="conn"><span class="dot" id="dot"></span><span id="connText">正在检测本机工具…</span></div>
+  </div>
+</div>
+
+<div class="card">
+  <button class="primary" id="btnCollect">采集当前页为客户</button>
+  <div class="hint">把当前页的网址、标题和页面内容发给本机「谷歌客户开发工具」，
+    自动抓邮箱/电话、评分、入库，并计入<b>本轮采集明细</b>（见下方）。
+    采完点下方「🏁 结束并生成 Excel」即可把本轮落成一份新结果文件。</div>
+</div>
+
+<div class="card">
+  <div class="fields">
+    <label class="f"><span>行业</span>
+      <select id="industry"><option value="">自动判断</option></select></label>
+    <label class="f"><span>国家 / 地区</span>
+      <input type="text" id="country" placeholder="可留空，如 法国"></label>
+  </div>
+  <label class="chk"><input type="checkbox" id="upgrade">
+    抓不到邮箱时升级到浏览器（更全，但单条要几秒）</label>
+  <label class="chk"><input type="checkbox" id="remember">
+    记住上面的行业/国家，下次默认用它</label>
+</div>
+
+<div class="card result" id="resultCard" hidden>
+  <div class="rTitle" id="rTitle"></div>
+  <div class="rBody" id="rBody"></div>
+</div>
+
+<div class="card live" id="liveCard">
+  <div class="live-head">
+    <h3>本轮采集明细</h3>
+    <span class="live-badge" id="sessCount">0 条</span>
+    <span class="live-status" id="sessStatus">本轮未开始</span>
+  </div>
+  <div class="live-scroll">
+    <div class="live-list" id="sessList"></div>
+    <div class="live-empty" id="sessEmpty">本轮还没有采集到条目…</div>
+  </div>
+  <button class="finish" id="btnFinish" disabled>🏁 结束并生成 Excel</button>
+  <div class="note" id="sessFile"></div>
+</div>
+
+<div class="foot">
+  <a href="#" id="lnkManual">手动采集页</a>
+  <a href="#" id="lnkHome">自动搜索主页</a>
+  <a href="#" id="lnkOptions">设置</a>
+  <a href="#" id="lnkReprobe" class="right">重新探测端口</a>
+</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

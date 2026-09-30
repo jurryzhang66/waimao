@@ -1058,5 +1058,488 @@
         }
       ]
     }
+  },
+  "塑料包装袋": {
+    "家用垃圾袋": {
+      "抽绳垃圾袋": [
+        {
+          "en": "Drawstring Trash Bags",
+          "cn": "抽绳垃圾袋（美国主流叫法）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Drawstring Bin Bags",
+          "cn": "抽绳垃圾袋（英国叫法）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Drawstring Garbage Bags On Roll",
+          "cn": "抽绳连卷垃圾袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Drawstring Refuse Sacks",
+          "cn": "抽绳垃圾袋（英/爱批发商常用）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        }
+      ],
+      "连卷八折垃圾袋": [
+        {
+          "en": "C-Fold Trash Bags On Roll",
+          "cn": "连卷八折垃圾袋（C 折＝八折）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Star Seal Garbage Bags On Roll",
+          "cn": "连卷星底垃圾袋（星型封底，与 C 折是两个维度）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Perforated Roll Trash Bags",
+          "cn": "连卷点断式垃圾袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "C-Fold T-Shirt Bags On Roll",
+          "cn": "连卷八折背心袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        }
+      ],
+      "背心垃圾袋": [
+        {
+          "en": "T-Shirt Trash Bags",
+          "cn": "背心垃圾袋（美国叫法）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Vest Type Garbage Bags",
+          "cn": "背心式垃圾袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Gusseted Vest Trash Bags",
+          "cn": "带侧褶背心垃圾袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        }
+      ],
+      "平口点断式垃圾袋": [
+        {
+          "en": "Flat Seal Trash Bags",
+          "cn": "平口垃圾袋（平封底）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Flat Bottom Garbage Bags",
+          "cn": "平底垃圾袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Flat Trash Bags On Roll",
+          "cn": "平口连卷垃圾袋（点断式）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        }
+      ],
+      "可降解堆肥袋": [
+        {
+          "en": "Compostable Trash Bags",
+          "cn": "可堆肥垃圾袋（欧美询盘高频）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Biodegradable Garbage Bags",
+          "cn": "可降解垃圾袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Compostable Bin Liners",
+          "cn": "可堆肥垃圾袋（英国叫法）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Eco Friendly Trash Bags",
+          "cn": "环保垃圾袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        }
+      ]
+    },
+    "宠物清洁袋": {
+      "猫砂盆衬袋": [
+        {
+          "en": "Cat Litter Box Liners",
+          "cn": "猫砂盆衬袋（完整全称，搜索最准）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Cat Litter Liners",
+          "cn": "猫砂盆衬袋（简称）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Drawstring Cat Litter Box Liners",
+          "cn": "抽绳猫砂盆衬袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Sifting Cat Litter Box Liners",
+          "cn": "带筛孔猫砂盆衬袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        }
+      ],
+      "猫砂清洁袋": [
+        {
+          "en": "Cat Litter Disposal Bags",
+          "cn": "猫砂清洁袋（铲屎袋）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Cat Litter Waste Bags",
+          "cn": "猫砂废弃物袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Scoop Bags For Cat Litter",
+          "cn": "猫砂铲屎袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Cat Litter Refill Bags",
+          "cn": "猫砂替换装袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        }
+      ]
+    },
+    "购物手挽袋": {
+      "手挽袋": [
+        {
+          "en": "Die Cut Handle Bags",
+          "cn": "冲孔手挽袋（最准）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Plastic Die Cut Handle Bags",
+          "cn": "PE 冲孔手挽袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Plastic Hand Carry Bags",
+          "cn": "塑料手提袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Soft Loop Handle Bags",
+          "cn": "软提环手挽袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Patch Handle Bags",
+          "cn": "贴片提手袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        }
+      ]
+    },
+    "拉链自封袋": {
+      "拉链袋": [
+        {
+          "en": "PE Zipper Bags",
+          "cn": "PE 拉链袋（最准）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Reclosable Zipper Plastic Bags",
+          "cn": "可重复封口拉链袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Zip Lock Bags",
+          "cn": "自封袋（通用叫法）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Press To Close Bags",
+          "cn": "压合自封袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Slider Zipper Bags",
+          "cn": "带滑块拉链袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        }
+      ]
+    },
+    "工业防护袋": {
+      "工业防尘袋": [
+        {
+          "en": "PE Dust Cover Bags",
+          "cn": "PE 防尘罩袋（注意避开 dust filter bag）",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Equipment Dust Covers",
+          "cn": "设备防尘罩",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Industrial Dust Proof Bags",
+          "cn": "工业防尘袋",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "Pallet Covers",
+          "cn": "托盘防尘罩",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        },
+        {
+          "en": "PE Protective Covers",
+          "cn": "PE 防护罩",
+          "de": "",
+          "fr": "",
+          "es": "",
+          "ar": "",
+          "it": "",
+          "nl": "",
+          "tr": ""
+        }
+      ]
+    }
   }
 }

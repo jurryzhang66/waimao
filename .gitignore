@@ -18,5 +18,25 @@ env/
 *.temp
 
 # ---------- 本工具运行时产生的临时/诊断文件 ----------
+# 默认排除 .workbuddy/ 下的临时件（日志、页面截图、一次性探针输出）
 .workbuddy/_*
+
+# 例外：回归测试套件 + 验收记录 + 校验基准（V1.4 起纳入备份）
+#   —— 这些是改代码时的安全网，不是运行时产物
+!.workbuddy/_run_all_reg.py
+!.workbuddy/_check_*.py
+!.workbuddy/_kwlib_check.py
+!.workbuddy/_verify_maps_base.py
+!.workbuddy/_smoke_*.py
+!.workbuddy/_smoke_*.js
+!.workbuddy/_reg_summary.txt
+!.workbuddy/_todo.json
+!.workbuddy/_baseline_v13.json
+!.workbuddy/_kwlib_before.json
+!.workbuddy/_industry_pred_before.json
+!.workbuddy/_fail_q1_p0.png
+
 *.log
+
+# 测试脚本为保护真实客户库留的临时快照（留在磁盘上，不进版本库）
+DB/backups/客户库_污染前_*.sqlite3

@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>手动采集 · 谷歌客户开发工具</title>
+<style>PAGE_CSS_PLACEHOLDER</style>
+<style>
+/* 本页专属样式（公共部分由 PAGE_CSS_PLACEHOLDER 从 ui/page.html 注入，保持单一来源） */
+.sub a { color:#1a73e8; }
+.row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+.row > div { min-width:0; }
+.lbl { font-size:13px; color:#666; display:block; margin-bottom:4px; }
+.heart { display:inline-block; padding:3px 10px; border-radius:12px; font-size:13px; font-weight:600; }
+.heart.on  { background:#eef8ee; color:#188038; }
+.heart.off { background:#fdeceb; color:#d93025; }
+.portbox { font-family:Consolas,monospace; background:#f7f9fc; border:1px solid #e8edf2;
+  border-radius:6px; padding:6px 10px; font-size:13px; color:#1a73e8; }
+.prog { height:10px; background:#eef3fe; border-radius:6px; overflow:hidden; margin:10px 0 6px; }
+.prog > i { display:block; height:100%; width:0; background:#1a73e8; transition:width .35s; }
+.steps { font-size:13px; color:#555; line-height:2; }
+.steps code { background:#f1f3f4; padding:1px 6px; border-radius:4px; font-family:Consolas,monospace; }
+.warn { background:#fff8e6; border:1px solid #f0d9a0; border-radius:8px; padding:10px 12px;
+  font-size:13px; color:#8a6d1f; margin-top:10px; line-height:1.7; }
+/* ③ 本轮明细每行的删除按钮。⚠️ 只能写在本页这个 <style> 里 ——
+   ui/page.html 的 <style> 被 _check_page.py R5 的 sha256 锁死，动它回归立刻红。 */
+.live-del-th, .live-del { width:38px; text-align:center; }
+.row-del { border:0; background:transparent; color:#9aa0a6; cursor:pointer;
+  font-size:13px; padding:2px 6px; border-radius:4px; line-height:1.4; }
+.row-del:hover { color:#d93025; background:#fdeceb; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🖐️ 手动采集</h1>
+  <div class="sub">浏览时看到目标客户网站就点一下采集 · 也可批量粘贴网址 ·
+    <a href="/">← 返回自动搜索主页</a></div>
+
+  <!-- ① 扩展连接状态 -->
+  <div class="card" style="margin-bottom:16px;">
+    <h3>① Chrome 扩展连接状态</h3>
+    <div class="row">
+      <div><span class="lbl">扩展心跳</span><span id="heart" class="heart off">检测中…</span></div>
+      <div><span class="lbl">本页后端端口</span><span id="port" class="portbox">-</span></div>
+      <div><span class="lbl">扩展该连的端口</span><span id="portHint" class="portbox">-</span></div>
+      <button class="btn-mini" onclick="probe()">重新探测</button>
+    </div>
+    <div class="note" id="probeResult">扩展每发一次请求都会刷新心跳；超过 60 秒没动静就算离线。</div>
+    <div class="warn">
+      <b>扩展还没装？</b>Chrome 打开 <code>chrome://extensions</code> → 右上角开启「开发者模式」→
+      「加载已解压的扩展程序」→ 选项目里的 <code>extension</code> 文件夹。
+      装好后在任意网站右下角会出现「采集」悬浮按钮，右键菜单里也有「采集本页为客户」。
+    </div>
+  </div>
+
+  <!-- ② 批量粘贴采集 -->
+  <div class="card" style="margin-bottom:16px;">
+    <h3>② 批量粘贴采集（一行一个网址）</h3>
+    <div class="row" style="margin-bottom:10px;">
+      <div style="flex:1; min-width:260px;"><label class="lbl" for="urls">网址</label>
+        <textarea id="urls" rows="6" placeholder="https://example-wholesaler.com&#10;https://another-distributor.co.uk"></textarea></div>
+      <div style="flex:1; min-width:260px;"><label class="lbl" for="pwords">产品关键词（用于评分，一行一个，可留空）</label>
+        <textarea id="pwords" rows="6" placeholder="Trash Bags&#10;Drawstring Bin Bags&#10;Wicket Bags"></textarea></div>
+    </div>
+    <div class="row">
+      <div><label class="lbl" for="industry">行业</label>
+        <select id="industry" style="width:170px;"><option value="">自动判断</option></select></div>
+      <div><label class="lbl" for="country">国家/地区（可留空）</label>
+        <input type="text" id="country" style="width:170px;" placeholder="如 法国"></div>
+      <div><label class="cond"><input type="checkbox" id="upgrade" checked>
+        抓不到邮箱时升级到浏览器</label></div>
+    </div>
+    <div class="prog"><i id="bar"></i></div>
+    <div class="status" id="mstatus">空闲</div>
+    <div class="btn-row">
+      <button class="btn-start" id="btnRun" onclick="run()">开始采集</button>
+      <button class="btn-stop" id="btnStop" onclick="stopIt()" disabled>停止</button>
+      <span class="counter" id="mcounter">0 / 0</span>
+    </div>
+    <div class="note">
+      三级抓取：① 有扩展送来的页面 HTML 就直接抽（秒级）→ ② 抓 <code>/contact</code> 联系页 →
+      ③ 升级到 Chromium 完整抓一遍。已在客户库里的网址会自动跳过。
+    </div>
+  </div>
+
+  <!-- ③ 本轮采集明细（实时） -->
+  <div class="card live-wrap" style="margin-bottom:16px;">
+    <div class="live-head">
+      <h3>③ 本轮采集明细</h3>
+      <span class="live-badge" id="sessionCount">0 条</span>
+      <span class="status" id="sessionStatus">本轮未开始</span>
+      <button class="btn-start" id="btnSessionStart" onclick="sessionStart()">🟢 开始本轮采集</button>
+      <button class="btn-stop" id="btnSessionFinish" onclick="sessionFinish()" disabled>🏁 结束并生成 Excel</button>
+      <button class="btn-open" onclick="openFolder()">📂 打开结果文件夹</button>
+    </div>
+    <div class="live-scroll">
+      <table class="live">
+        <thead><tr><th>#</th><th>公司 / 官网</th><th>邮箱</th><th>电话</th>
+          <th>评分</th><th>评级</th><th>行业</th><th>国家</th>
+          <th class="live-del-th"></th></tr></thead>
+        <tbody id="sessionBody"></tbody>
+      </table>
+      <div class="live-empty" id="sessionEmpty">本轮还没有采集到条目…</div>
+    </div>
+    <div class="note" id="sessionFile"></div>
+  </div>
+
+  <!-- ④ 采集浏览器 -->
+  <div class="card" style="margin-bottom:16px;">
+    <h3>④ 采集浏览器</h3>
+    <div class="steps">
+      升级抓取（第③级）会开一个常驻的 Chrome，之后复用，不再每次重启。<br>
+      它用的是独立临时配置，和你正在用的浏览器互不影响，关掉它也不会影响本工具其它功能。
+    </div>
+    <div class="btn-row">
+      <button class="btn-mini" onclick="closeBrowser()">关闭采集浏览器</button>
+      <span class="status" id="bstatus"></span>
+    </div>
+  </div>
+
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+let since = 0, polling = null;
+
+function logBox(msg){
+  const b = document.getElementById('log');
+  b.textContent += msg + '\n';
+  b.scrollTop = b.scrollHeight;
+}
+function esc(s){
+  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function domainOf(url){
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch(e){ return url || ''; }
+}
+function ratingCls(r){
+  return r === '重点客户' ? 'tag-r1' : r === '普通客户' ? 'tag-r2' : 'tag-r3';
+}
+function lines(id){
+  return document.getElementById(id).value.split('\n').map(s => s.trim()).filter(Boolean);
+}
+
+// 行业下拉从关键词库动态生成 —— 不在这个页面里再硬编码一份行业枚举
+async function loadIndustries(){
+  try{
+    const d = await (await fetch('/api/keywords')).json();
+    const sel = document.getElementById('industry');
+    Object.keys(d).forEach(n => sel.insertAdjacentHTML('beforeend',
+      '<option value="' + esc(n) + '">' + esc(n) + '</option>'));
+  }catch(e){}
+}
+
+// 扩展心跳：/api/manual/state 的 ext_last_seen 是「扩展最后一次调接口」的时间戳
+function renderHeart(st){
+  const last = st.ext_last_seen || 0;
+  const age = last ? (st.now - last) : Infinity;
+  const el = document.getElementById('heart');
+  if (age < 60){
+    el.className = 'heart on';
+    el.textContent = '在线 · ' + Math.round(age) + ' 秒前有请求';
+  } else if (last){
+    el.className = 'heart off';
+    el.textContent = '离线 · ' + Math.round(age / 60) + ' 分钟前有请求';
+  } else {
+    el.className = 'heart off';
+    el.textContent = '从未收到扩展请求';
+  }
+}
+
+// ==================== 本轮采集明细（实时） ====================
+// 游标式增量追加：只渲染 session_rows 里比上次多的那几条，新行带 .row-new 淡入。
+// 与自动搜索页的 renderRows() 同一套写法（那边渲染 STATE['rows']，表头少两列）。
+let renderedSession = 0;
+
+function renderSession(rows){
+  const tb = document.getElementById('sessionBody');
+  const empty = document.getElementById('sessionEmpty');
+  rows = Array.isArray(rows) ? rows : [];
+  // 行数变少（开了新一轮 / 本轮被清空）→ 整体重来，否则游标会错位
+  if (rows.length < renderedSession){ tb.innerHTML = ''; renderedSession = 0; }
+  for (let i = renderedSession; i < rows.length; i++){
+    const r = rows[i] || {};
+    const old = r.kind === 'existed';        // 「已在客户库，跳过」的轻量行（只有 title/url）
+    const mails  = (!old && r.emails && r.emails.length)  ? r.emails.join(' / ')  : '';
+    const phones = (!old && r.phones && r.phones.length)  ? r.phones.join(' / ')  : '';
+    const tr = document.createElement('tr');
+    tr.className = 'row-new';
+    tr.innerHTML =
+      '<td>' + (i + 1) + '</td>' +
+      '<td><a class="live-co" href="' + esc(r.url) + '" target="_blank" rel="noopener" ' +
+        'title="' + esc(r.title) + '">' + esc(r.title) + '</a><br>' +
+        '<span class="live-dom">' + esc(domainOf(r.url)) + '</span></td>' +
+      '<td class="live-cell">' + (old ? '<span class="live-miss">已在客户库</span>'
+            : (mails ? '<span class="live-mail">' + esc(mails) + '</span>'
+                     : '<span class="live-miss">未抓到</span>')) + '</td>' +
+      '<td class="live-cell">' + (old ? '<span class="live-miss">—</span>'
+            : (phones ? esc(phones) : '<span class="live-miss">未抓到</span>')) + '</td>' +
+      '<td class="live-sc">' + (old ? '' : (r.score == null ? '' : r.score)) + '</td>' +
+      '<td>' + (old ? '' : '<span class="tag-r ' + ratingCls(r.rating) + '">' +
+                          esc(r.rating) + '</span>') + '</td>' +
+      '<td>' + esc(r.industry || '') + '</td>' +
+      '<td>' + esc(r.country || '') + '</td>' +
+      // 第 9 列：✕ 删掉这一条（明细 + 客户库双删，删前后端自动备份客户库）。
+      // data-rid 是后端发的本轮内唯一行号 —— 同一个网址在同一轮里可能有两条
+      // （一条 added、一条 existed），所以不能靠 url 定位。缺 rid 时留空、点了不动作。
+      '<td class="live-del"><button type="button" class="row-del" data-rid="' +
+        esc(r.rid == null ? '' : String(r.rid)) +
+        '" title="从本轮明细和客户库删掉这一条">✕</button></td>';
+    tb.appendChild(tr);
+  }
+  renderedSession = rows.length;
+  document.getElementById('sessionCount').textContent = rows.length + ' 条';
+  empty.style.display = rows.length ? 'none' : 'block';
+  const sc = tb.closest('.live-scroll');
+  if (sc) sc.scrollTop = sc.scrollHeight;      // 始终停在最新一条
+}
+
+// 本轮状态行：进行中 / 上一轮已生成 / 落盘失败（红字，保留数据可直接重试）
+function renderSessionStatus(st){
+  const el = document.getElementById('sessionStatus');
+  const n = (st.session_rows || []).length;
+  if (st.session_error){
+    el.style.color = '#d93025';
+    el.textContent = '⚠️ ' + st.session_error;
+    return;
+  }
+  el.style.color = '';
+  if (st.session_active){
+    const bits = ['已采 ' + n + ' 条'];
+    if (st.session_industry) bits.push('行业 ' + st.session_industry);
+    if (st.session_country) bits.push('国家 ' + st.session_country);
+    if (st.running) bits.push('批量 ' + (st.done || 0) + '/' + (st.total || 0));
+    el.textContent = '🟢 进行中 · ' + bits.join(' · ');
+  } else if (st.session_excel){
+    el.textContent = '✅ 上一轮已生成结果文件';
+  } else {
+    el.textContent = '本轮未开始';
+  }
+}
+
+async function loadManualState(){
+  let st;
+  try { st = await (await fetch('/api/manual/state')).json(); } catch(e){ return; }
+  renderHeart(st);
+  renderSession(st.session_rows);
+  renderSessionStatus(st);
+  document.getElementById('sessionFile').textContent =
+    st.session_excel ? ('本批结果文件：' + st.session_excel + '（点「导出到飞书」导的就是它）') : '';
+  document.getElementById('btnSessionStart').disabled = !!st.session_active;
+  document.getElementById('btnSessionFinish').disabled = !st.session_active;
+  document.getElementById('mcounter').textContent =
+    (st.done || 0) + ' / ' + (st.total || 0) +
+    '　本轮 新增 ' + (st.added || 0) + ' · 已有 ' + (st.existed || 0) +
+    ' · 失败 ' + (st.failed || 0);
+  const bar = document.getElementById('bar');
+  bar.style.width = st.total ? Math.round((st.done / st.total) * 100) + '%' : '0';
+  document.getElementById('btnRun').disabled = !!st.running;
+  document.getElementById('btnStop').disabled = !st.running;
+  const s = document.getElementById('mstatus');
+  if (st.running){
+    s.textContent = '采集中… 当前：' + (st.current || '');
+  } else if (st.total){
+    s.textContent = '✅ 本次批量结束：新增 ' + (st.added || 0) + ' · 已在库 ' + (st.existed || 0) +
+                    ' · 失败 ' + (st.failed || 0) + '（其中升级抓取 ' + (st.upgraded || 0) + ' 次）';
+  } else {
+    s.textContent = '空闲';
+  }
+}
+
+async function sessionStart(){
+  const d = await (await fetch('/api/manual/session/start', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({industry: document.getElementById('industry').value,
+                          country: document.getElementById('country').value})})).json();
+  if (!d.ok){ alert(d.msg); return; }
+  renderedSession = 0;
+  document.getElementById('sessionBody').innerHTML = '';
+  logBox('====== 已开始本轮采集 ======');
+  loadManualState();
+}
+
+async function sessionFinish(){
+  const d = await (await fetch('/api/manual/session/finish', {method:'POST'})).json();
+  if (!d.ok){ alert(d.msg); return; }
+  if (d.pending) logBox('正在停止批量并收尾，稍候自动生成 Excel…');
+  else logBox('====== ' + (d.saved ? ('本轮结果已保存：' + d.file) : (d.msg || '未生成文件')) + ' ======');
+  loadManualState();
+}
+
+async function pollLogs(){
+  try{
+    const d = await (await fetch('/api/status?since=' + since)).json();
+    if (d.logs && d.logs.length){ for (const l of d.logs) logBox(l); since = d.total_logs; }
+  }catch(e){}
+}
+
+async function probe(){
+  const here = location.port || '80';
+  document.getElementById('port').textContent = '127.0.0.1:' + here;
+  const hit = document.getElementById('probeResult');
+  hit.textContent = '正在探测候选端口…';
+  // 与后端 PREFERRED_PORTS 一致：扩展就是按这批端口逐个试 /api/ping 的。
+  // ⚠️ 本页所在端口放**第一个**：它最可能就是答案，能省掉一串白试（每个失败要等
+  //    最多 900ms 超时，9 个候选全试一遍要好几秒）。
+  const cands = [here, '5000', '8000', '8080', '8765', '9000', '7000', '6500', '5800', '5555'];
+  const found = [];
+  for (const port of cands){
+    if (found.some(f => f.port === port)) continue;
+    try{
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 900);
+      const r = await fetch('http://127.0.0.1:' + port + '/api/ping', {signal: ctl.signal});
+      clearTimeout(t);
+      const d = await r.json();
+      if (d && d.ok && d.app === 'waimao-dp') found.push({port, d});
+    }catch(e){}
+  }
+  if (found.length){
+    document.getElementById('portHint').textContent = '127.0.0.1:' + found[0].port;
+    hit.textContent = '✅ 发现 ' + found.length + ' 个在运行的本工具实例：' +
+      found.map(f => '127.0.0.1:' + f.port).join(' / ') +
+      '（扩展会自动挑一个并记住）';
+  } else {
+    document.getElementById('portHint').textContent = '未发现';
+    hit.textContent = '⚠️ 没探测到本工具实例 —— 如果你正看着这个页面，说明它其实在运行，' +
+      '可能是浏览器拦了跨端口探测，不影响扩展使用。';
+  }
+}
+
+async function run(){
+  const urls = lines('urls');
+  if (!urls.length){ alert('请先粘贴至少一个网址'); return; }
+  const body = {
+    urls: urls.join('\n'),
+    industry: document.getElementById('industry').value,
+    country: document.getElementById('country').value,
+    upgrade: document.getElementById('upgrade').checked,
+    product_words: lines('pwords').join('\n'),
+  };
+  const r = await fetch('/api/manual/batch', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const d = await r.json();
+  if (!d.ok){ alert(d.msg); return; }
+  logBox('====== 已提交 ' + d.total + ' 个网址 ======');
+  since = 0;
+  loadManualState();
+}
+
+async function stopIt(){
+  await fetch('/api/manual/stop', {method:'POST'});
+  logBox('已请求停止手动采集…');
+}
+
+async function closeBrowser(){
+  const d = await (await fetch('/api/manual/close_browser', {method:'POST'})).json();
+  document.getElementById('bstatus').textContent = d.closed ? '已关闭' : '当前没有开着的采集浏览器';
+}
+
+async function openFolder(){ await fetch('/api/open_folder', {method:'POST'}); }
+
+// 「本轮明细」每行的 ✕：从本轮明细 + 客户库都删掉这一条，且不再进入本次生成的结果 Excel。
+// ⚠️ 事件委托挂在 #sessionBody（tbody）上，不要逐行绑：行是 innerHTML 拼好再 appendChild 的，
+//    且 sessionStart() 换轮和「行数变少」时都会 innerHTML=''，逐行绑的监听会跟着丢。
+function onSessionBodyClick(e){
+  const btn = (e.target && e.target.closest) ? e.target.closest('.row-del') : null;
+  if (!btn) return;
+  const rid = btn.getAttribute('data-rid');
+  if (rid === null || rid === '') return;   // 没有 rid 的行（如人工造的假数据）不动作
+  deleteSessionRow(Number(rid));
+}
+
+async function deleteSessionRow(rid){
+  if (!confirm('确定删除这一条吗？\n\n会同时从「本轮明细」和「客户库」删掉它，\n'
+             + '也不会进入本次生成的结果 Excel。\n（后端会先自动备份一份客户库）')) return;
+  const d = await (await fetch('/api/manual/session/delete', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({rid})})).json();
+  if (!d.ok){ alert(d.msg || '删除失败'); return; }
+  logBox('🗑️ 已删除一条' + (d.deleted ? '（客户库同步删掉 1 条）' : '（客户库里没有这条记录）')
+         + (d.backup ? '，已备份：' + d.backup : '（本轮已有备份，未重复备份）'));
+  loadManualState();
+}
+
+loadIndustries();
+probe();
+loadManualState();
+document.getElementById('sessionBody').addEventListener('click', onSessionBodyClick);
+polling = setInterval(pollLogs, 1000);
+setInterval(loadManualState, 1000);      // 与自动搜索页同节奏；以前 run() 里还挂了一个重复的定时器，已收敛到这里
+</script>
+</body>
+</html>

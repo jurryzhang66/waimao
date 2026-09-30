@@ -1,0 +1,12 @@
+{
+  "src_lines": 2817,
+  "raw_len": 30683,
+  "raw_sha": "85207b10bef4f636ebfb12ed39e1501759f080a3a6a8ed3821afc178649ba4d5",
+  "built_len": 38100,
+  "built_sha": "d2afeab91c0369d64bcd770a1bac565fdc6d2a373f1a296eedaecf00a15b808d",
+  "raw_head": "<!DOCTYPE html>\n<htm",
+  "raw_tail": "pt>\n</body>\n</html>\n",
+  "output_dir": "D:\\waimao\\dp\\output",
+  "db_path": "D:\\waimao\\dp\\DB\\客户库.sqlite3",
+  "enrich_file": "D:\\waimao\\dp\\output\\宠物用品-20260929_1119-加拿大.xlsx"
+}

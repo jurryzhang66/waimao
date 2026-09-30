@@ -18,522 +18,91 @@ import glob
 import json
 import subprocess
 import sqlite3
+import atexit
 from collections import Counter
 from contextlib import closing
 from datetime import datetime
 import webbrowser
 import tempfile
 import socket
+import sys
 from urllib.parse import quote, parse_qs, urlparse, urljoin
 
 from DrissionPage import ChromiumPage, ChromiumOptions
 from DrissionPage.common import Keys
 from openpyxl import Workbook, load_workbook
 from flask import Flask, request, jsonify
+# requests 是 DrissionPage 的依赖，实际一定装得上；但仍软导入并留降级路径，
+# 免得万一缺了它整个工具都起不来（手动采集的第②级会跳过，直接走 Chromium 升级）。
+try:
+    import requests
+except ImportError:                      # pragma: no cover
+    requests = None
 
-# ================= 可配置常量 =================
-# 搜索条件（来自手册第2/3/11章），网页上可勾选
-# ⚠️ 含 OR 的模板一律用括号把「同义词组」锁在一起：`A B OR C` 里 OR 往左管到哪儿谷歌的解读是模糊的，
-# 不锁会退化成 `(A B) OR C`，让 C 单独生效、把任意行业的同类角色拉进结果（实测确认）。括号谷歌支持。
-# 搜索条件：(key, 中文名)。顺序即页面上的顺序，前两个默认勾选。
-CONDITIONS = [
-    ('wholesale',   '找批发商/分销商'),
-    ('importer',    '找进口商/贸易商'),
-    ('buyer',       '找采购/买家'),
-    ('oem',         '找OEM贴牌客户'),
-    ('retailer',    '找零售商/连锁门店'),
-    ('project',     '找工程/项目客户'),
-    ('exhibitor',   '找协会/展会名录'),
-    ('contact',     '直达联系页'),
-    ('linkedin',    '找采购决策人(领英)'),
-]
+# ---- sys.path 自举 ----
+# .workbuddy/ 下的回归脚本用 importlib.util.spec_from_file_location + exec_module 加载本文件，
+# 那时 sys.path[0] 是 .workbuddy/ 而不是项目根，`import core` 会失败；这里显式把项目根插进来。
+# 同时它也保证「双击 .bat / 命令行直接 python 客户开发工具.py」之外的调用方式同样能用。
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
-# 公式骨架：{p} = 产品词，{role} = 本地化角色词（见 COND_ROLES）
-COND_TEMPLATE = {
-    'wholesale': '{p} ({role})',
-    'importer':  '{p} ({role})',
-    'oem':       '{p} ({role})',
-    'retailer':  '{p} ({role})',
-    'project':   '{p} ({role})',
-    'exhibitor': '{p} ({role}) filetype:pdf',
-    # ⚠️ {p} 本身已带引号（run_search 里 pq_list 就包好了），这里绝对不能再加引号，
-    # 否则会拼出 site:linkedin.com/in ""nouilles"" 这种双引号（2026-09-28 修）。
-    'contact':   'inurl:contact {p}',            # 无角色词，各语言一致
-    'linkedin':  'site:linkedin.com/in {p} ({role})',
-}
-
-# 角色词的本地化表达。⚠️ 这一点很关键：只写英文条件词去搜法语/德语市场时，
-# 谷歌是在非英语页面里找英文词，命中的多是英文版块或 B2B 名录站，真正的本地买家反而搜不到。
-# 缺失的语言自动回落到 en（如波斯语 fa 暂缺，与「伊朗/阿富汗词条回落英文」的已知行为一致）。
-COND_ROLES = {
-    'wholesale': {
-        'en': 'wholesaler OR distributor',
-        'fr': 'grossiste OR distributeur',
-        'de': 'Großhändler OR Distributor',
-        'es': 'mayorista OR distribuidor',
-        'it': 'grossista OR distributore',
-        'nl': 'groothandel OR distributeur',
-        'tr': 'toptancı OR distribütör',
-        'ar': 'تاجر جملة OR موزع',
-    },
-    'importer': {
-        'en': 'importer OR "trading company"',
-        'fr': 'importateur OR "société de négoce"',
-        'de': 'Importeur OR Handelsunternehmen',
-        'es': 'importador OR "empresa comercializadora"',
-        'it': 'importatore OR "società commerciale"',
-        'nl': 'importeur OR handelsonderneming',
-        'tr': 'ithalatçı OR "ticaret şirketi"',
-        'ar': 'مستورد OR "شركة تجارية"',
-    },
-    'oem': {
-        'en': 'OEM OR "private label" OR "own brand" OR "brand owner"',
-        'fr': 'OEM OR "marque distributeur" OR "marque propre" OR acheteur',
-        'de': 'OEM OR "Private Label" OR Eigenmarke OR Markeninhaber',
-        'es': 'OEM OR "marca blanca" OR "marca propia" OR propietario de marca',
-        'it': 'OEM OR "marca privata" OR "marchio proprio" OR titolare del marchio',
-        'nl': 'OEM OR "huismerk" OR "eigen merk" OR merkeigenaar',
-        'tr': 'OEM OR "özel marka" OR "kendi markası" OR marka sahibi',
-        'ar': 'OEM OR "العلامة الخاصة" OR "علامة تجارية خاصة"',
-    },
-    'buyer': {
-        'en': 'buyer OR procurement OR purchasing OR sourcing',
-        'fr': 'acheteur OR achats OR approvisionnement OR sourcing',
-        'de': 'Einkäufer OR Einkauf OR Beschaffung OR Sourcing',
-        'es': 'comprador OR compras OR aprovisionamiento OR abastecimiento',
-        'it': 'buyer OR acquisti OR approvvigionamento OR sourcing',
-        'nl': 'inkoper OR inkoop OR sourcing OR procurement',
-        'tr': 'alıcı OR satın alma OR tedarik OR sourcing',
-        'ar': 'مشتري OR مشتريات OR توريد OR مصادر',
-    },
-    'retailer': {
-        'en': 'retailer OR "chain store"',
-        'fr': 'détaillant OR "chaîne de magasins"',
-        'de': 'Einzelhändler OR Ladenkette',
-        'es': 'minorista OR "cadena de tiendas"',
-        'it': 'dettagliante OR "catena di negozi"',
-        'nl': 'detailhandel OR winkelketen',
-        'tr': 'perakendeci OR "zincir mağaza"',
-        'ar': 'تاجر تجزئة OR "سلسلة متاجر"',
-    },
-    'project': {
-        'en': 'project OR contractor OR tender',
-        'fr': "projet OR entrepreneur OR appel d'offres",
-        'de': 'Projekt OR Auftragnehmer OR Ausschreibung',
-        'es': 'proyecto OR contratista OR licitación',
-        'it': 'progetto OR appaltatore OR gara',
-        'nl': 'project OR aannemer OR aanbesteding',
-        'tr': 'proje OR yüklenici OR ihale',
-        'ar': 'مشروع OR مقاول OR مناقصة',
-    },
-    'exhibitor': {
-        'en': 'association OR "exhibitor list"',
-        'fr': 'association OR "liste des exposants"',
-        'de': 'Verband OR Ausstellerliste',
-        'es': 'asociación OR "lista de expositores"',
-        'it': 'associazione OR "elenco espositori"',
-        'nl': 'vereniging OR deelnemerslijst',
-        'tr': 'dernek OR "fuar katılımcı listesi"',
-        'ar': 'جمعية OR "قائمة العارضين"',
-    },
-    'linkedin': {
-        'en': 'purchasing OR procurement OR buyer',
-        'fr': 'achats OR approvisionnement OR acheteur',
-        'de': 'Einkauf OR Beschaffung OR Einkäufer',
-        'es': 'compras OR aprovisionamiento OR comprador',
-        'it': 'acquisti OR approvvigionamento OR acquirente',
-        'nl': 'inkoop OR inkoopbeheer OR inkoper',
-        'tr': 'satın alma OR tedarik OR alıcı',
-        'ar': 'مشتريات OR توريد OR مشتري',
-    },
-}
-
-# 有本地化角色词的语言（fa 暂缺 → 回落英文）
-COND_LANGS = ('en', 'fr', 'de', 'es', 'it', 'nl', 'tr', 'ar')
+# ================= 从 core/ 包引入被拆出去的实现 =================
+# ⚠️ 必须用**绝对导入**：项目根的「补历史欠账.py」用
+# importlib.util.spec_from_file_location('kf', SRC) + exec_module 加载本文件，
+# 本文件没有包上下文，相对导入会抛 "attempted relative import with no known parent package"。
+# ⚠️ 这里是「同名 re-export」：外部脚本与 .workbuddy/ 回归脚本都按 `模块名.<名字>` 读取，
+# 所以被搬走的名字必须在这里原样再导出一遍。
+from core.config import (CONDITIONS, COND_TEMPLATE, COND_ROLES, COND_LANGS, cond_template,
+                         KEYWORD_LIB, COUNTRIES, COUNTRY_CENTERS, MAPS_CENTER_DEFAULT,
+                         EXCLUDE_OPTIONS, EXCLUDE_DEFAULT, CHINA_FILTER_OPTIONS,
+                         CHINA_FILTER_DEFAULTS, BLOCK_DOMAINS, BLOCK_SUBSTR,
+                         SEARCH_ENGINE_PREFIX)
+from core.paths import (LEGACY_RESULT_FILES, RESULT_DATE_RE, OUTPUT_DIRNAME, MAPS_PLACE_ID_RE,
+                        _app_dir, output_dir, _safe_name_part, build_result_name,
+                        ts_result_path, _result_time_key, find_latest_result,
+                        DB_DIR, DB_FILE)
+# ⚠️ 刻意**不**写 `from core.paths import ENRICH_FILE` —— 它是会被重新赋值的活变量，
+#    那样导入只能拿到快照。读写一律走 `paths.ENRICH_FILE`。
+from core import paths       # 模块对象：_save_enrich_excel 要靠它写 paths.ENRICH_FILE
+from core.state import (BASE_TOKEN, TABLE_ID, LARK_CLI, IMPORT_JSON, COUNTRY_STANDARD,
+                        STATE, STATE_LOCK, MANUAL_STATE, log)
+from core.db import (db_path, maps_place_key, normalize_domain, normalize_email,
+                     db_connect, init_customer_db, db_upsert_customer, db_stats,
+                     backup_db_before_delete, db_delete_customer)
+from core import db          # 模块对象：回归脚本要靠 m.db.db_path 才能把打桩打到 core.db 内部
+# 页面模板本体在独立文件 ui/page.html（改样式/文案不用再碰 Python），
+# 这里只把构建结果与构建函数拉回来：路由 `return PAGE_HTML` 与老脚本 `kf._build_page()` 都靠它。
+# 手动采集页同理在 ui/manual.html（它复用 page.html 的样式块，样式只维护一份）。
+from core.ui import PAGE_HTML, _build_page, MANUAL_HTML, _build_manual_page
 
 
-def cond_template(key, lang='en'):
-    """返回某条件的公式模板（仍含 {p} 占位符），角色词按语言本地化，缺该语言则回落英文。"""
-    tpl = COND_TEMPLATE.get(key, '{p}')
-    if '{role}' not in tpl:
-        return tpl
-    roles = COND_ROLES.get(key, {})
-    word = roles.get(lang) or roles.get('en') or ''
-    return tpl.replace('{role}', word)
+def __getattr__(name):
+    """PEP 562 模块级属性兜底：把搬进 core/* 的「动态变量」实时转发出去。
 
-# 产品关键词库数据文件（行业 → 产品 → 关键词，三级分类）
-# 以后加行业/产品/关键词直接编辑这个 JSON 文件，不用改代码
-KEYWORD_LIB = '关键词库.json'
+    目前唯一需要它的是 `ENRICH_FILE`：它会被 `_save_enrich_excel()` 重新赋值，而项目根的
+    「补历史欠账.py」第 58 行是在跑完 `enrich_core()` **之后**才读 `kf.ENRICH_FILE` 的，
+    必须拿到最新值。`from core.paths import ENRICH_FILE` 只能拿到 import 那一刻的快照，
+    所以改用本函数在属性访问时实时取。
 
-# 国家列表：(代码, 名称, gl, hl)
-COUNTRIES = [
-    ('us', '美国', 'us', 'en'),
-    ('ca', '加拿大', 'ca', 'en'),
-    ('uk', '英国', 'uk', 'en'),
-    ('de', '德国', 'de', 'de'),
-    ('fr', '法国', 'fr', 'fr'),
-    ('it', '意大利', 'it', 'it'),
-    ('es', '西班牙', 'es', 'es'),
-    ('nl', '荷兰', 'nl', 'nl'),
-    ('be', '比利时', 'be', 'fr'),
-    ('ch', '瑞士', 'ch', 'fr'),
-    ('ma', '摩洛哥', 'ma', 'fr'),
-    ('dz', '阿尔及利亚', 'dz', 'fr'),
-    ('tn', '突尼斯', 'tn', 'fr'),
-    ('sn', '塞内加尔', 'sn', 'fr'),
-    ('ca_fr', '加拿大(法语)', 'ca', 'fr'),
-    ('ae', '阿联酋', 'ae', 'en'),
-    ('sa', '沙特', 'sa', 'ar'),
-    ('qa', '卡塔尔', 'qa', 'en'),
-    ('kw', '科威特', 'kw', 'en'),
-    ('om', '阿曼', 'om', 'en'),
-    ('bh', '巴林', 'bh', 'en'),
-    ('eg', '埃及', 'eg', 'ar'),
-    ('ir', '伊朗', 'ir', 'fa'),
-    ('af', '阿富汗', 'af', 'fa'),
-    ('tr', '土耳其', 'tr', 'tr'),
-]
-
-# 国家中心经纬度：仅「谷歌地图」数据源用来定位地图视野（@lat,lng,zoom）。
-# 刻意做成独立字典而不并进 COUNTRIES —— COUNTRIES 是 4 元组，前端 counts_js 按 5 元组注入、
-# run_search 按 4 元组解包，改元组长度会连带炸掉两处。
-COUNTRY_CENTERS = {
-    'us': (39.83, -98.58), 'ca': (56.13, -106.35), 'uk': (54.00, -2.00),
-    'de': (51.17, 10.45), 'fr': (46.60, 2.21), 'it': (41.87, 12.57),
-    'es': (40.46, -3.75), 'nl': (52.13, 5.29), 'be': (50.50, 4.47),
-    'ch': (46.82, 8.23), 'ma': (31.79, -7.09), 'dz': (28.03, 1.66),
-    'tn': (33.89, 9.54), 'sn': (14.50, -14.45),
-    'ca_fr': (46.81, -71.21),          # 加拿大法语区锁定魁北克
-    'ae': (23.42, 53.85), 'sa': (23.89, 45.08), 'qa': (25.35, 51.18),
-    'kw': (29.31, 47.48), 'om': (21.51, 55.92), 'bh': (26.07, 50.55),
-    'eg': (26.82, 30.80), 'ir': (32.43, 53.69), 'af': (33.94, 67.71),
-    'tr': (38.96, 35.24),
-}
-MAPS_CENTER_DEFAULT = 'us'   # 取不到国家中心坐标时的兜底
-
-# 排除条件（网页上可勾选，每项带说明）：(key, 排除词, 说明)
-EXCLUDE_OPTIONS = [
-    ('amazon', '-amazon', '亚马逊（电商平台）'),
-    ('ebay', '-ebay', 'eBay（电商平台）'),
-    ('etsy', '-etsy', 'Etsy（电商平台）'),
-    ('wikipedia', '-wikipedia', '维基百科（百科）'),
-]
-EXCLUDE_DEFAULT = ' '.join(v for _, v, _ in EXCLUDE_OPTIONS)
-
-# 中国商家过滤：全部默认开启；query 为空的项目只在结果/联系方式阶段判断。
-# key, 搜索公式排除词, 页面标签, 说明
-CHINA_FILTER_OPTIONS = [
-    ('alibaba', '-alibaba', '排除 Alibaba', '中国 B2B 平台'),
-    ('made-in-china', '-made-in-china', '排除 Made-in-China', '中国 B2B 平台'),
-    ('globalsources', '-globalsources', '排除 Global Sources', '供应商聚合平台'),
-    ('1688', '-1688', '排除 1688', '中国 B2B 平台'),
-    ('taobao', '-taobao -tmall', '排除淘宝 / 天猫', '中国电商平台'),
-    ('cn', '-site:.cn', '排除 .cn 域名', '中国域名'),
-    ('supplier_words', '-"China manufacturer" -"Chinese supplier"', '排除中国供应商关键词', '中国供应商/制造商表达'),
-    ('factory_words', '-"factory in China" -"China factory"', '排除中国工厂关键词', '中国工厂表达'),
-    ('made_in_china_words', '-"made in China"', '排除中国制造关键词', '中国制造表达'),
-    ('platform_words', '', '排除中国供应商平台关键词', 'supplier platform / B2B 平台信号'),
-    ('phone_86', '', '排除 +86 中国电话', '联系方式信号'),
-    ('wechat', '', '排除微信 / WeChat', '联系方式信号'),
-    ('qq', '', '排除 QQ', '联系方式信号'),
-    ('address_cn', '', '排除中文地址或明显中国地址', '地址/语言信号'),
-    ('email_cn', '', '排除中国供应商邮箱或 .cn 邮箱', '邮箱域名信号'),
-    ('competitor_cn', '', '排除明显中国同行网站', '中国同行/工厂信号'),
-    ('directory_cn', '', '排除中国 B2B 名录和供应商聚合站', '名录/聚合站信号'),
-]
-CHINA_FILTER_DEFAULTS = {k for k, _, _, _ in CHINA_FILTER_OPTIONS}
-
-BLOCK_DOMAINS = [
-    'amazon.com', 'ebay.com', 'etsy.com', 'walmart.com', 'wikipedia.org',
-    'youtube.com', 'facebook.com', 'instagram.com', 'linkedin.com',
-    'reddit.com', 'pinterest.com', 'google.com',
-    'sec.gov', 'archive.org', 'tiktok.com', 'sourceready.com',
-    'investorroom.com', 'nbd.ltd',
-    # 行业名录 / 数据站 / 政府统计站：不是买家，但常年在搜索首页（实测混入）
-    'indiamart.com', 'trade.gov', 'worldstopexports.com', 'dailyvoice.com',
-]
-# 子串匹配：这些站有多个后缀（.com/.fr/.co.uk）或域名变体，逐个列举容易漏
-BLOCK_SUBSTR = ['ubuy', 'europages', 'exportgenius']
-# 搜索引擎自身的域名族：谷歌会按出口 IP 跳到 google.com.hk / google.de 等区域站，
-# 只写 'google.com' 拦不住，结果里会混进谷歌内部链接（曾污染出假客户 google.com.hk）。
-SEARCH_ENGINE_PREFIX = ('google.', 'bing.', 'yahoo.', 'duckduckgo.', 'baidu.', 'yandex.')
-
-# ================= 结果 Excel 命名 =================
-# 每轮生成一份结果文件，命名：行业-日期_时间-主国家.xlsx，例 宠物用品-20260928_0145-加拿大.xlsx
-# 搜索过程中每条线索就地补全联系方式，整轮结束时（含中途停止）写出这一份唯一产物，固定 10 列。
-LEGACY_RESULT_FILES = (
-    '客户结果_含联系方式与评分.xlsx',            # 最早的手工文件名
-    '客户搜索结果_20260928_0118.xlsx',           # 已停用的旧 5 列搜索文件
-)   # 旧名字：仅兜底读取，不再生成，也不参与「最新结果」评选
-RESULT_DATE_RE = re.compile(r'\d{8}')                        # 结果文件名必带 8 位日期
-OUTPUT_DIRNAME = 'output'   # 所有结果 Excel 统一放这个子文件夹，程序目录不再堆文件
-# 谷歌地图 place 链接里的稳定标识段（/maps/place/<名字>/@lat,lng,11z/data=...!1s0x...:0x...）
-MAPS_PLACE_ID_RE = re.compile(r'!1s(0x[0-9a-f]+:0x[0-9a-f]+)', re.I)
+    ⚠️ 只对「属性访问」生效（`kf.ENRICH_FILE`、`from kf import ENRICH_FILE`）。
+       本模块**内部函数里的裸名 `ENRICH_FILE` 不走这里**（会 NameError），
+       所以入口内部一律显式写 `paths.ENRICH_FILE`。
+    ⚠️ 本模块一旦出现任何模块级 `ENRICH_FILE = ...` 赋值、或
+       `from core.paths import ENRICH_FILE`，模块字典里就有了这个名字，本函数永久失效。
+    """
+    if not name.startswith('_'):        # 不碰 dunder，免得干扰导入机制
+        from core import config, paths as _paths, state as _state, db as _db, ui as _ui
+        for _mod in (config, _paths, _state, _db, _ui):
+            if hasattr(_mod, name):
+                return getattr(_mod, name)
+    raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
-def _app_dir():
-    """程序所在目录（主工具脚本所在处）。"""
-    return os.path.dirname(os.path.abspath(__file__))
 
 
-def output_dir():
-    """结果 Excel 的输出目录（绝对路径）；不存在就自动创建。"""
-    d = os.path.join(_app_dir(), OUTPUT_DIRNAME)
-    try:
-        os.makedirs(d, exist_ok=True)
-    except Exception:
-        return _app_dir()   # 创建失败（如只读磁盘）时退回程序目录，保证仍能出文件
-    return d
 
 
-def _safe_name_part(text, default):
-    """把行业/国家变成安全的文件名片段，去掉 Windows 非法字符。"""
-    s = re.sub(r'[\\/:*?"<>|\r\n\t]', '', (text or '').strip())
-    s = s.strip(' .')
-    return s or default
-
-
-def build_result_name(industry, country):
-    """行业-日期_时间-主国家.xlsx（日期精确到分）。"""
-    stamp = datetime.now().strftime('%Y%m%d_%H%M')
-    return (f'{_safe_name_part(industry, "未分类")}-{stamp}'
-            f'-{_safe_name_part(country, "未知国家")}.xlsx')
-
-
-def ts_result_path(industry='', country=''):
-    """本轮结果 Excel 的绝对路径（存于 output/ 子目录）；同分钟同行业同国家重名时自动加 _2/_3，避免覆盖。"""
-    base_dir = output_dir()
-    stem = build_result_name(industry, country)[:-len('.xlsx')]
-    path = os.path.join(base_dir, stem + '.xlsx')
-    n = 2
-    while os.path.exists(path):
-        path = os.path.join(base_dir, f'{stem}_{n}.xlsx')
-        n += 1
-    return path
-
-
-def _result_time_key(path):
-    """结果文件的排序键：优先取文件名里的日期+时间（如 宠物用品-20260928_0145-加拿大.xlsx
-    -> 202609280145）。文件名开头是行业名，所以不能用整个文件名排序；用 mtime 又会被
-    「打开旧文件另存一下」带偏，故从名字里解析时间，解析不到才退回 mtime。"""
-    m = re.search(r'(\d{8})(?:_(\d{4}))?', os.path.basename(path))
-    stamp = (m.group(1) + (m.group(2) or '')) if m else ''
-    return (stamp, os.path.getmtime(path))
-
-
-def find_latest_result():
-    """找最近一次生成的结果 Excel。优先 output/ 子目录，其次程序根目录（兼容早先版本
-    直接写在根目录的老文件）；都没有时回退到旧文件名。"""
-    search_dirs = [output_dir(), _app_dir()]
-    try:
-        cands = []
-        for d in search_dirs:
-            for p in glob.glob(os.path.join(d, '*.xlsx')):
-                name = os.path.basename(p)
-                if name.startswith('~$') or name in LEGACY_RESULT_FILES:
-                    continue
-                if RESULT_DATE_RE.search(name):
-                    cands.append(p)
-        if cands:
-            return max(cands, key=_result_time_key)
-    except Exception:
-        pass
-    for d in search_dirs:
-        for name in LEGACY_RESULT_FILES:
-            p = os.path.join(d, name)
-            if os.path.exists(p):
-                return p
-    return ''
-
-
-ENRICH_FILE = find_latest_result()   # 当前结果文件；每轮任务结束会指向新的时间戳文件
-DB_DIR = 'DB'                  # 数据库统一放在 DB 子文件夹
-DB_FILE = '客户库.sqlite3'
-
-# ================= 飞书导出配置 =================
-BASE_TOKEN = 'ZhSSb18BMajKR7sacxTcCFY0njf'   # 飞书客户管理多维表格
-TABLE_ID = 'tblY38YnVIQ5AYYA'                # 客户数据表 ID
-LARK_CLI = r'C:\Users\admin\.trae-cn\plugins\trae-remote-official\lark\1.0.5\bin\lark-cli.exe'
-IMPORT_JSON = 'import_records.json'           # 导出时生成的临时 JSON
-# 本地国家简称 -> 飞书「国家/地区」选项名（飞书叫"沙特阿拉伯"，代码里简称"沙特"）
-COUNTRY_STANDARD = {'沙特': '沙特阿拉伯', '加拿大(法语)': '加拿大'}
-
-# ================= 全局运行状态 =================
-STATE = {
-    'running': False,
-    'phase': '',           # search / export
-    'logs': [],
-    'result_count': 0,
-    'rows': [],            # 本轮已入库明细（供前端实时表格显示：公司/域名/邮箱/电话/评分）
-    'done': False,
-    'output': '',
-    'stop': False,
-}
-STATE_LOCK = threading.Lock()
-
-
-# ================= SQLite 客户库 =================
-def db_path():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    db_dir = os.path.join(base_dir, DB_DIR)
-    os.makedirs(db_dir, exist_ok=True)   # DB 文件夹不存在时自动创建
-    return os.path.join(db_dir, DB_FILE)
-
-
-def maps_place_key(url):
-    """从谷歌地图 place 链接里提取稳定去重键（结尾的 0x...:0x... 十六进制段）。
-    比商家名可靠（同名商家多），也比 place_id 好取（place_id 还得额外解析一次）。
-    取不到返回空串。"""
-    m = MAPS_PLACE_ID_RE.search(url or '')
-    return ('maps:' + m.group(1).lower()) if m else ''
-
-
-def normalize_domain(url):
-    """把网址规整为稳定的公司去重键。"""
-    try:
-        raw = (url or '').strip().lower()
-        if '@' in raw and '://' not in raw:
-            return ''
-        # 谷歌地图 place 链接：没官网的商家会落到这里。必须给个稳定键，
-        # 否则 netloc 全是 google.com —— 既被搜索引擎黑名单拦掉，又互相覆盖成一条。
-        mk = maps_place_key(raw)
-        if mk:
-            return mk
-        netloc = urlparse(raw if '://' in raw else 'https://' + raw).netloc
-        netloc = netloc.split(':', 1)[0].removeprefix('www.')
-        return netloc
-    except Exception:
-        return ''
-
-
-def normalize_email(email):
-    return (email or '').strip().lower()
-
-
-def db_connect():
-    conn = sqlite3.connect(db_path(), timeout=30)
-    conn.row_factory = sqlite3.Row
-    conn.execute('PRAGMA journal_mode=WAL')
-    return conn
-
-
-def init_customer_db():
-    """初始化客户库，并把已有评分 Excel 导入一次。"""
-    with closing(db_connect()) as conn:
-        conn.execute('''CREATE TABLE IF NOT EXISTS customers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_name TEXT NOT NULL DEFAULT '',
-            website TEXT NOT NULL DEFAULT '',
-            website_key TEXT UNIQUE,
-            email TEXT DEFAULT '',
-            phone TEXT DEFAULT '',
-            contact_url TEXT DEFAULT '',
-            country TEXT DEFAULT '',
-            industry TEXT DEFAULT '',
-            score INTEGER,
-            rating TEXT DEFAULT '',
-            snippet TEXT DEFAULT '',
-            search_formula TEXT DEFAULT '',
-            source TEXT DEFAULT '谷歌搜索',
-            status TEXT DEFAULT '未联系',
-            next_follow_up TEXT DEFAULT '',
-            notes TEXT DEFAULT '',
-            first_seen_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-            last_seen_at TEXT NOT NULL DEFAULT (datetime('now','localtime')),
-            verified_at TEXT DEFAULT ''
-        )''')
-        conn.execute('CREATE INDEX IF NOT EXISTS idx_customers_email ON customers(email)')
-        # 老库升级：补齐后加的列（已有 DB 不会因缺列报错）
-        cols = [r[1] for r in conn.execute('PRAGMA table_info(customers)')]
-        if 'industry' not in cols:
-            conn.execute("ALTER TABLE customers ADD COLUMN industry TEXT DEFAULT ''")
-        conn.commit()
-    # 只在库为空时迁移旧结果，保证重复运行不会重复导入。
-    with closing(db_connect()) as conn:
-        empty = conn.execute('SELECT 1 FROM customers LIMIT 1').fetchone() is None
-    if empty and os.path.exists(ENRICH_FILE):
-        try:
-            wb = load_workbook(ENRICH_FILE, read_only=True)
-            ws = wb.active
-            for r in ws.iter_rows(min_row=2, values_only=True):
-                if r and len(r) > 1 and r[1]:
-                    db_upsert_customer({
-                        'company_name': r[0], 'website': r[1],
-                        'email': r[2] or '', 'phone': r[3] or '',
-                        'contact_url': r[4] or '', 'score': r[5],
-                        'rating': r[6] or '', 'snippet': r[7] or '',
-                        'search_formula': r[8] or '',
-                        'country': r[9] if len(r) > 9 else '',
-                    })
-            wb.close()
-            log('✅ 已将现有评分 Excel 导入 SQLite 客户库')
-        except Exception as ex:
-            log(f'⚠️ 旧 Excel 导入客户库失败：{type(ex).__name__}: {ex}')
-
-
-def db_upsert_customer(data):
-    """新增或合并客户；空值不会覆盖数据库里已有的有效值。"""
-    website = (data.get('website') or '').strip()
-    website_key = normalize_domain(website)
-    email = normalize_email(data.get('email', ''))
-    if not website_key and not email:
-        return False
-    fields = {
-        'company_name': data.get('company_name', ''), 'website': website,
-        'email': email, 'phone': data.get('phone', ''),
-        'contact_url': data.get('contact_url', ''), 'country': data.get('country', ''),
-        'industry': data.get('industry', ''),
-        'score': data.get('score'), 'rating': data.get('rating', ''),
-        'snippet': data.get('snippet', ''), 'search_formula': data.get('search_formula', ''),
-        'source': data.get('source', '谷歌搜索'), 'notes': data.get('notes', ''),
-    }
-    with closing(db_connect()) as conn:
-        row = None
-        if website_key:
-            row = conn.execute('SELECT * FROM customers WHERE website_key=?', (website_key,)).fetchone()
-        if row is None and email:
-            row = conn.execute('SELECT * FROM customers WHERE lower(email)=?', (email,)).fetchone()
-        if row is None:
-            conn.execute('''INSERT INTO customers
-                (company_name,website,website_key,email,phone,contact_url,country,industry,score,rating,
-                 snippet,search_formula,source,notes)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
-                (fields['company_name'], fields['website'], website_key, fields['email'],
-                 fields['phone'], fields['contact_url'], fields['country'], fields['industry'],
-                 fields['score'], fields['rating'], fields['snippet'], fields['search_formula'],
-                 fields['source'], fields['notes']))
-            conn.commit()
-            return True
-        updates = []
-        values = []
-        for key, value in fields.items():
-            if value not in ('', None) and (key != 'score' or isinstance(value, (int, float))):
-                updates.append(f'{key}=?')
-                values.append(value)
-        if website_key and not row['website_key']:
-            updates.append('website_key=?')
-            values.append(website_key)
-        updates.append("last_seen_at=datetime('now','localtime')")
-        values.append(row['id'])
-        conn.execute(f"UPDATE customers SET {', '.join(updates)} WHERE id=?", values)
-        conn.commit()
-        return False
-
-
-def db_stats():
-    init_customer_db()
-    with closing(db_connect()) as conn:
-        total = conn.execute('SELECT COUNT(*) FROM customers').fetchone()[0]
-        verified = conn.execute("SELECT COUNT(*) FROM customers WHERE score IS NOT NULL").fetchone()[0]
-    return {'total': total, 'verified': verified, 'file': DB_DIR + '/' + DB_FILE}
-
-
-def log(msg):
-    """同时打印到控制台和写到日志队列（前端轮询读取）"""
-    line = str(msg)
-    with STATE_LOCK:
-        STATE['logs'].append(line)
-    print(line)
 
 
 def create_browser_page():
@@ -958,6 +527,56 @@ CTYPE_WORDS = ['wholesale', 'distributor', 'importer', 'trading', 'dealer', 'sup
 PRODUCT_WORDS = ['litter', 'liner', 'cat', 'pet']
 BLOG_WORDS = ['blog', 'news', 'article', 'tips-and-advice']
 
+# ================= 手动采集（Chrome 扩展送 HTML 过来）=================
+# 扩展把当前页的 outerHTML 一起送过来，我们直接在字符串上抽邮箱/电话 —— 不用再开浏览器，
+# 且是**用户浏览器渲染后**的真实页面（不怕反爬、JS 异步渲染的邮箱也在）。
+MAX_PAGE_HTML = 500_000                     # 清洗后最多留 500KB 交给正则
+_STRIP_BLOCK_RE = re.compile(
+    r'<(script|style|noscript|svg|template)\b[^>]*>.*?</\1>', re.S | re.I)
+_META_DESC_RE = re.compile(
+    r'<meta[^>]+name\s*=\s*["\']description["\'][^>]*content\s*=\s*["\'](.*?)["\']',
+    re.S | re.I)
+_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36')
+
+
+def _sanitize_page_html(html):
+    """把扩展送来的整页 HTML 压到能安全跑正则的规模。
+
+    ⚠️ 先粗截再跑正则：outerHTML 可能好几 MB，直接把 `.*?` 丢上去会退化（甚至卡死）。
+    ⚠️ 剥掉 script/style/noscript/svg/template：邮箱多为 `mailto:` 或可见文本，剥完照样能抽到，
+       而这几类块里塞的噪声（base64、内联 JSON）却是主要误报来源。
+    """
+    s = (html or '')[:4 * MAX_PAGE_HTML]
+    s = _STRIP_BLOCK_RE.sub(' ', s)
+    return s[:MAX_PAGE_HTML]
+
+
+def _meta_description(html):
+    """抽 <meta name="description"> 当摘要；抽不到就交给调用方回退标题。"""
+    m = _META_DESC_RE.search((html or '')[:200_000])
+    if not m:
+        return ''
+    return re.sub(r'\s+', ' ', m.group(1)).strip()[:300]
+
+
+def _find_contact_url(html, base_url):
+    """从页面里找一个「联系页」链接（比盲猜 /contact 准得多）。
+    找不到返回空串，由调用方按 CONTACT_PATHS 兜底。"""
+    base = urlparse(base_url)
+    for m in re.finditer(r'<a\b[^>]*href\s*=\s*["\']([^"\']+)["\'][^>]*>(.*?)</a>',
+                         (html or '')[:200_000], re.S | re.I):
+        href, text = m.group(1), re.sub(r'<[^>]+>', '', m.group(2)).lower()
+        if not re.search(r'contact|联系|about|contacto|kontakt', href + ' ' + text, re.I):
+            continue
+        if re.search(r'\.(png|jpe?g|gif|svg|css|js)$', href, re.I) or href.startswith(('mailto:', 'tel:', '#')):
+            continue
+        full = urljoin(f'{base.scheme}://{base.netloc}/', href)
+        # 只认同站链接，避免跳到社交平台
+        if urlparse(full).netloc == base.netloc:
+            return full
+    return ''
+
 
 def clean_emails(html):
     out = []
@@ -1031,7 +650,14 @@ def _back_to_search(page, tab_id):
         pass
 
 
-def score_item(title, url, info):
+def score_item(title, url, info, product_words=None):
+    """给一条线索打分（满分 90）。
+
+    ⚠️ `PRODUCT_WORDS` 是**写死的猫砂垫词表**（['litter','liner','cat','pet']），换行业后就
+       名不副实 —— 塑料包装袋的客户永远吃不到那 +10，会从「重点客户」掉到「普通客户」。
+       所以这里开一个可选入参：传了就按传进来的产品词算，不传仍是原来的行为（零回归）。
+       自动链路暂时不传（保持既有评分口径不变）；手动采集会带上你自己的产品词。
+    """
     s = 0
     text = (title + ' ' + url).lower()
     if info['emails']:
@@ -1042,7 +668,8 @@ def score_item(title, url, info):
         s += 10
     if any(w in text for w in CTYPE_WORDS):
         s += 25
-    if any(w in text for w in PRODUCT_WORDS):
+    words = [w for w in (product_words or PRODUCT_WORDS) if w]
+    if any(w.lower() in text for w in words):
         s += 10
     if not any(w in text for w in BLOG_WORDS):
         s += 10
@@ -1086,6 +713,266 @@ def db_has_customer(website):
     with closing(db_connect()) as conn:
         return conn.execute('SELECT 1 FROM customers WHERE website_key=? LIMIT 1',
                             (key,)).fetchone() is not None
+
+
+# ================= 手动采集：公共落库尾段 + 行业自动判定 =================
+_UNLOADED = object()          # 懒加载哨兵：区分「还没试过」与「试过但失败了(None)」
+_BFHY = _UNLOADED             # 缓存「回填行业」模块
+
+
+def _guess_industry(title, url):
+    """用「回填行业.py」的规则从标题/网址猜行业（8 个规范值之一），猜不出返回空串。
+
+    ⚠️ 刻意**不**把规则复制进 core/：行业口径只能有一份（原来就是因为「回填行业.py 用
+      家具家居/汽配、词库用家具/机械零部件」而对不上）。这里复用同一个模块，口径天然一致。
+       该模块除 `__main__` 外没有模块级副作用（只编译正则），导入安全。
+    """
+    global _BFHY
+    if _BFHY is _UNLOADED:                 # 懒加载：首次用到才 import，避免影响启动
+        try:
+            import 回填行业 as _mod
+        except Exception as ex:            # 缺文件/语法错都不该拖垮手动采集
+            log(f'⚠️ 行业规则加载失败（将留空行业）：{type(ex).__name__}: {ex}')
+            _mod = None
+        _BFHY = _mod
+    if _BFHY is None:
+        return ''
+    try:
+        return _BFHY.guess_industry(title, url) or ''
+    except Exception:
+        return ''
+
+
+def _commit_candidate(title, url, info, *, snippet, formula, country,
+                      industry='', source='谷歌搜索', product_words=None):
+    """手动采集的公共尾段：评分 → 写库 → 返回规范化行（供 10 列 Excel 用）。
+
+    `product_words` 一路透传给 `score_item`（不传=沿用原有的写死词表，行为不变）。
+
+    ⚠️ 刻意**没**让 run_search / run_maps 改用它：那两条链路已经跑通、且有回归脚本守着，
+       项目既有约定是「不动跑通的链路」。run_maps 更特殊 —— 它在 china_filter_reasons()
+       之前就把「地图电话并入官网电话」了，合并时机一旦挪动，中国过滤的入参就变了，
+       smoke 可能仍绿而真机行为已改。待手动链路真机跑顺后再择机迁移。
+    """
+    s = score_item(title, url, info, product_words=product_words)
+    db_upsert_customer({
+        'company_name': title, 'website': url,
+        'email': ' / '.join(info['emails']),
+        'phone': ' / '.join(info['phones']),
+        'contact_url': info['contact_url'], 'score': s, 'rating': rating(s),
+        'snippet': snippet, 'search_formula': formula,
+        'country': country, 'industry': industry, 'source': source,
+    })
+    return {'title': title, 'url': url, 'emails': info['emails'], 'phones': info['phones'],
+            'contact_url': info['contact_url'], 'score': s, 'rating': rating(s),
+            'snippet': snippet, 'formula': formula, 'country': country, 'industry': industry}
+
+
+# ================= 手动采集：常驻浏览器 =================
+# 自动链路（run_search / run_maps / enrich_core）都是「任务开头建、finally 里 quit」，
+# 手动采集是「点一下采一条」，每次重建一个 Chrome 要 3–5 秒，所以这里做成**惰性常驻**。
+# ⚠️ 与自动链路互不干扰：`create_browser_page()` 每次都给独立临时 profile + 独立调试端口，
+#    是各自独立的 Chrome 实例，谁 quit 都影响不到对方。
+_MANUAL_PAGE = None
+_BROWSER_LOCK = threading.Lock()
+
+
+def _manual_browser():
+    """拿到常驻的采集浏览器（首次调用才创建）。"""
+    global _MANUAL_PAGE
+    with _BROWSER_LOCK:
+        if _MANUAL_PAGE is not None:
+            try:
+                if _MANUAL_PAGE.states.is_alive:       # 用户手动关掉了浏览器的话要重建
+                    return _MANUAL_PAGE
+            except Exception:
+                pass
+            try:
+                _MANUAL_PAGE.quit()
+            except Exception:
+                pass
+            _MANUAL_PAGE = None
+        log('启动采集浏览器（首次较慢，之后复用）...')
+        _MANUAL_PAGE = create_browser_page()
+        return _MANUAL_PAGE
+
+
+def close_manual_browser():
+    """关掉常驻采集浏览器（页面上有按钮，进程退出时也会自动调）。"""
+    global _MANUAL_PAGE
+    with _BROWSER_LOCK:
+        if _MANUAL_PAGE is None:
+            return False
+        try:
+            _MANUAL_PAGE.quit()
+        except Exception:
+            pass
+        _MANUAL_PAGE = None
+    log('采集浏览器已关闭')
+    return True
+
+
+# 进程退出兜底：常驻浏览器不像自动链路那样有 finally，不注册的话会留下一个孤儿 Chrome
+atexit.register(close_manual_browser)
+
+
+def _ensure_manual_session(industry='', country=''):
+    """确保「本轮手动采集」已开始；还没开始就自动开一轮。
+
+    为什么需要「自动开轮」：扩展是在任意网页上点一下采集的，用户不可能每次都先切回
+    /manual 页点「开始本轮」。所以第一条进来时替他把轮开起来。
+    本轮口径（行业/国家）**只在开轮那一刻记下**，后续条目不覆盖 —— 否则同一轮 Excel 的
+    文件名会随最后一条变来变去（也避免中途改表单意外改名）。
+
+    ⚠️ 锁纪律：本函数只在 STATE_LOCK 内改内存状态，不碰文件 IO。
+    """
+    with STATE_LOCK:
+        if MANUAL_STATE.get('session_active'):
+            return
+        MANUAL_STATE.update({
+            'session_active': True, 'session_started_at': time.time(),
+            'session_rows': [], 'session_rid_seq': 0,
+            'session_excel': '', 'session_error': '',
+            'session_finish_pending': False,
+            'added': 0, 'existed': 0, 'failed': 0, 'upgraded': 0,
+            'session_industry': (industry or '').strip(),
+            'session_country': (country or '').strip(),
+        })
+    log('====== 已开始本轮手动采集 ======')
+
+
+def _next_rid():
+    """发一个本轮内唯一、单调递增的行号，给 session_rows 的每一行当稳定主键。
+
+    为什么明细行需要它：同一个 url 在同一轮里可能既有一条 'added' 又有一条 'existed'
+    （第二轮采被去重跳过），按 url 删会一次删掉两条。rid 才能精确指认「哪一行」。
+    ⚠️ 必须在 `with STATE_LOCK` 块内调用（本函数只改内存，不自带加锁）。"""
+    MANUAL_STATE['session_rid_seq'] = MANUAL_STATE.get('session_rid_seq', 0) + 1
+    return MANUAL_STATE['session_rid_seq']
+
+
+def collect_from_html(url, title, html, industry='', country='',
+                      source='手动采集', allow_upgrade=True, product_words=None):
+    """手动采集一个网址：三级抓取 → 评分 → 入库 → 计入本轮明细。
+
+    三级抓取（前一级拿不到邮箱才进下一级）：
+      ① 秒级   ：扩展送来的当前页 HTML，直接正则抽邮箱/电话（不开浏览器，<0.1s）
+      ② 联系页 ：用 requests 抓 /contact（约 1–2s）
+      ③ 升级   ：开 Chromium 跑完整的 enrich()（3–10s，含 JS 渲染与反爬绕过）
+    `product_words` 是本轮的产品词（用于评分里的 +10）；不传则沿用原有的写死词表。
+    返回统一结果 dict，直接回给扩展 popup / 前端。
+
+    ⚠️ 这里**不落盘**：采到的行只进 `MANUAL_STATE['session_rows']`，等用户点
+       「🏁 结束并生成 Excel」时由 `_flush_manual_session()` 一次性写成结果 Excel
+       （对齐自动搜索的「整轮结束才落盘」，也避免把手动采集的条目混进上一轮自动搜索的 Excel）。
+    """
+    init_customer_db()
+    url = (url or '').strip()
+    title = (title or '').strip()
+    if not url.lower().startswith(('http://', 'https://')):
+        url = 'https://' + url.lstrip('/') if url else ''
+    key = normalize_domain(url)
+    if not key:
+        return {'ok': False, 'added': False, 'msg': f'网址无效：{url[:60]}'}
+
+    # 网址有效就往本轮攒 —— 放在 db_has_customer 之前，保证「已在库跳过」的条目也计入本轮，
+    # 也让本轮口径（行业/国家）从第一条就定下来（第③级升级可能要跑好几秒，不能等它）。
+    _ensure_manual_session(industry, country)
+
+    # 老客户直接跳过 —— 在「升级抓取」之前就省掉最贵的那一步（与 run_maps 的老客户策略一致）
+    if db_has_customer(url):
+        with STATE_LOCK:
+            MANUAL_STATE['existed'] += 1
+            # 也记一条轻量明细：用户要靠它回答「我刚点的那条去哪了」
+            MANUAL_STATE.setdefault('session_rows', []).append(
+                {'kind': 'existed', 'title': title or key, 'url': url, 'rid': _next_rid()})
+        log(f'   · 已在客户库，跳过：{key}')
+        return {'ok': True, 'added': False, 'existed': True, 'upgraded': False,
+                'row': {'url': url, 'title': title or key}, 'msg': '已在客户库，跳过'}
+
+    clean = _sanitize_page_html(html)
+    tier = 0
+
+    # ---- ① 秒级：优先用扩展送来的当前页 HTML（已渲染、最准）----
+    if clean.strip():
+        tier = 1
+    elif requests is not None:
+        # 没有 HTML：这是「/manual 页批量粘贴网址」的场景，先用 requests 抓一次首页
+        # （不抓就会跳过首页直奔 /contact，把首页上写着的邮箱漏掉）
+        try:
+            r = requests.get(url, timeout=10, headers={'User-Agent': _UA},
+                             allow_redirects=True)
+            if r.status_code < 400 and r.text:
+                clean = _sanitize_page_html(r.text)
+                tier = 1
+        except Exception:
+            pass
+
+    info = {'emails': clean_emails(clean), 'phones': clean_phones(clean),
+            'contact_url': '', 'china_signal_text': clean[:80000]}
+    upgraded = False
+
+    # ---- ② 联系页：优先用页面里自己写的联系链接；没有才按 CONTACT_PATHS 猜 ----
+    if not info['emails'] and requests is not None:
+        own = _find_contact_url(clean, url)
+        if own:
+            candidates = [own]          # 找到自带链接就只用它，别再盲猜（省请求也更准）
+        else:
+            p = urlparse(url)
+            base = f'{p.scheme}://{p.netloc}/'
+            candidates = [urljoin(base, c.lstrip('/')) for c in CONTACT_PATHS[:2]]
+        for cand in candidates:
+            try:
+                r = requests.get(cand, timeout=8, headers={'User-Agent': _UA},
+                                 allow_redirects=True)
+                if r.status_code >= 400 or not r.text:
+                    continue
+            except Exception:
+                continue
+            e = clean_emails(r.text)
+            if e:
+                # 与 enrich() 的语义保持一致：只有联系页真的抽到邮箱才认这个 contact_url
+                info['emails'] = e
+                info['phones'] = info['phones'] or clean_phones(r.text)
+                info['contact_url'] = str(r.url)
+                info['china_signal_text'] = (info['china_signal_text'] + '\n' + r.text[:80000])[:160000]
+                tier = 2
+                break
+
+    # ---- ③ 升级：开 Chromium 跑完整 enrich() ----
+    if not info['emails'] and allow_upgrade:
+        with STATE_LOCK:
+            busy = STATE['running']
+        if busy:
+            log('   · 自动任务运行中，本次不升级抓取（只登记已抓到的字段）')
+        else:
+            info = enrich(_manual_browser(), url)
+            upgraded = True
+            tier = 3
+
+    if upgraded:
+        with STATE_LOCK:
+            MANUAL_STATE['upgraded'] += 1
+
+    industry = (industry or '').strip() or _guess_industry(title, url)
+    snippet = _meta_description(html) or title or url
+    row = _commit_candidate(title or key, url, info, snippet=snippet,
+                            formula=f'[手动采集] {url}', country=country,
+                            industry=industry, source=source,
+                            product_words=product_words)
+
+    with STATE_LOCK:
+        MANUAL_STATE['added'] += 1
+        # kind='added' 只加进本轮明细，**不加进返回给扩展的 row**（/api/collect 响应结构不变）
+        # dict(row, ...) 是副本，所以加的 kind / rid 不会污染下面 return 的那个 row
+        MANUAL_STATE.setdefault('session_rows', []).append(
+            dict(row, kind='added', rid=_next_rid()))
+    log(f'   + 手动采集 [{tier}级] {row["title"][:38]} '
+        f'邮箱{len(row["emails"])} 电话{len(row["phones"])} 评分{row["score"]} {row["rating"]}'
+        + (f' 行业={industry}' if industry else ''))
+
+    return {'ok': True, 'added': True, 'existed': False, 'upgraded': upgraded,
+            'tier': tier, 'row': row}
 
 
 def _maps_attr(page, css, attr=None, timeout=1):
@@ -1788,11 +1675,97 @@ def _pick_country(results):
     return counter.most_common(1)[0][0] if counter else ''
 
 
-def _save_enrich_excel(results, industry=''):
+EXCEL_HEADER_10 = ['公司/页面标题', '网站网址', '邮箱', '电话', '联系页',
+                   '评分', '评级', '摘要', '搜索公式', '国家']
+EXCEL_WIDTHS_10 = (50, 50, 40, 20, 40, 8, 10, 60, 50, 10)
+EXCEL_LOCK = threading.Lock()      # 手动采集可能并发点，追加写必须串行
+
+
+def _row10(row):
+    """把内部行（11 键）映射成结果 Excel 的 10 列 —— 顺序必须与 _save_enrich_excel 一致。"""
+    return [row['title'], row['url'], ' / '.join(row['emails']), ' / '.join(row['phones']),
+            row['contact_url'], row['score'], row['rating'], row['snippet'],
+            row['formula'], row.get('country', '')]
+
+
+def _append_result_row(row):
+    """把一条手动采集的结果**追加**到当前结果 Excel，并按评分重排整表。
+
+    ⚠️ 已被「本轮会话」模式取代（本轮结束才落盘，见 `_flush_manual_session`，2026-09-29），
+       **当前无调用方**。保留而不删：它是经过回归验证的实现，删除只会扩大 diff；
+       将来若又要「点一下即时落盘」可以再挂回去。
+
+    ⚠️ 为什么当初不用现成的 `_save_enrich_excel`：那个函数每次 `Workbook()` 新开一个文件、
+       按 `ts_result_path()` 重新命名，还会把 `paths.ENRICH_FILE` 改指过去 ——
+       手动采集是「点一下加一条」，用它就会每点一次产出一个只含 1 行的 xlsx，
+       并把「最新结果」污染成那份。所以当年改成原地追加。
+    三种异常各自退避（都不丢数据）：
+      · 文件被 Excel 打开着 → 重试 3 次后另存为新的时间戳文件
+      · 文件不存在/路径为空 → 退回 `_save_enrich_excel` 新建
+      · 列头不符（拿到别的 xlsx）→ 不追加，改为新建（护住 10 列硬契约）
+    """
+    with EXCEL_LOCK:
+        path = paths.ENRICH_FILE or find_latest_result()
+        if path and os.path.exists(path):
+            for attempt in range(3):
+                wb = None
+                try:
+                    wb = load_workbook(path)
+                    ws = wb.active
+                    head = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
+                    if not head or list(head)[:10] != EXCEL_HEADER_10:
+                        log('⚠️ 当前结果文件列头不是本工具的 10 列契约，改为另存新文件')
+                        wb.close()
+                        wb = None
+                        break
+                    data = [r for r in ws.iter_rows(min_row=2, values_only=True) if r and r[1]]
+                    data.append(tuple(_row10(row)))
+                    # 与搜索产出一致：整表按评分降序，方便一眼看到重点客户
+                    data.sort(key=lambda r: -(r[5] if isinstance(r[5], (int, float)) else 0))
+                    ws.delete_rows(2, ws.max_row)
+                    for r in data:
+                        ws.append(list(r))
+                    for col, w in zip('ABCDEFGHIJ', EXCEL_WIDTHS_10):
+                        ws.column_dimensions[col].width = w
+                    wb.save(path)
+                    wb.close()
+                    STATE['output'] = f'{OUTPUT_DIRNAME}/{os.path.basename(path)}'
+                    log(f'💾 已追加到结果文件：{STATE["output"]}（现 {len(data)} 行）')
+                    return True
+                except PermissionError:
+                    if wb:
+                        try:
+                            wb.close()
+                        except Exception:
+                            pass
+                    if attempt < 2:
+                        log('⚠️ 结果 Excel 正被 Excel 打开，稍后重试…')
+                        time.sleep(0.6)
+                    else:
+                        log('⚠️ 结果 Excel 一直被占用，本次另存为新文件（数据没丢）')
+                except Exception as e:
+                    log(f'⚠️ 结果 Excel 追加失败：{type(e).__name__}: {e}（另存新文件）')
+                    if wb:
+                        try:
+                            wb.close()
+                        except Exception:
+                            pass
+                    break
+        return _save_enrich_excel([row], industry=row.get('industry', ''))
+
+
+def _save_enrich_excel(results, industry='', country=''):
     """写出本轮结果。固定 10 列——飞书导出与启动迁移都按下标读取，列名与顺序不可改。
     文件名：行业-日期_时间-主国家.xlsx（如 宠物用品-20260928_0145-加拿大.xlsx），
-    统一写到 output/ 子目录，每轮一份便于留档。"""
-    global ENRICH_FILE
+    统一写到 output/ 子目录，每轮一份便于留档。
+
+    `industry` / `country` 都留空时行为与以前完全一致（行业从行里推、国家取条数最多的）。
+    手动采集的「本轮会话」会显式传入开轮时定下的行业/国家，这样同一轮 Excel 的名字
+    不会因为批次里混了其它国家而改变。同名文件由 `ts_result_path()` 自动加 `_2`/`_3` 后缀。
+    """
+    # ⚠️ 这里原来是 `global ENRICH_FILE`。ENRICH_FILE 已搬进 core/paths.py，
+    # 且是全项目唯一会被重新赋值的模块级变量 —— 必须按属性写 `paths.ENRICH_FILE`，
+    # 否则只会在本模块里新建一个同名全局，core/db.py 与飞书导出读到的仍是旧路径。
     out = Workbook()
     ows = out.active
     ows.title = '客户名单'
@@ -1804,16 +1777,69 @@ def _save_enrich_excel(results, industry=''):
                     r.get('country', '')])
     for col, w in zip('ABCDEFGHIJ', (50, 50, 40, 20, 40, 8, 10, 60, 50, 10)):
         ows.column_dimensions[col].width = w
-    path = ts_result_path(_pick_industry(industry, results), _pick_country(results))
+    path = ts_result_path(_pick_industry(industry, results),
+                          (country or '').strip() or _pick_country(results))
     try:
         out.save(path)
-        ENRICH_FILE = path                      # 后续飞书导出读这份最新结果
+        paths.ENRICH_FILE = path                # 后续飞书导出读这份最新结果
         STATE['output'] = f'{OUTPUT_DIRNAME}/{os.path.basename(path)}'
         log(f'💾 结果已保存：{STATE["output"]}')
         return True
     except Exception as e:
         log(f'⚠️ 结果 Excel 保存失败（可能被 Excel 占用）：{type(e).__name__}: {e}')
         return False
+
+
+def _flush_manual_session():
+    """结束「本轮手动采集」：把本轮明细落成一份结果 Excel，并把它设为「最新结果文件」。
+
+    与自动搜索的 `finally` 落盘对齐 —— 一轮一份文件，而不是采一条追加一次。
+
+    三处刻意设计：
+      · **空轮不落盘**：本轮只有「已在库」的跳过期（或压根没采到），就不产出一份 0 行的表，
+        也不会动 `paths.ENRICH_FILE` / `STATE['output']`。
+      · **只写新客户**：`kind='existed'` 的行只是给人看「这条之前就有」，不进 Excel。
+      · **失败不清数据**：保存失败时保留 `session_rows` 且 `session_active` 仍为 True，
+        页面红字提示、用户可以直接再点一次「结束」（数据最坏也还在 SQLite 客户库里）。
+    """
+    with STATE_LOCK:
+        snap = list(MANUAL_STATE.get('session_rows') or [])          # 锁内快照，出锁再做 IO
+        industry = (MANUAL_STATE.get('session_industry') or '').strip()
+        country = (MANUAL_STATE.get('session_country') or '').strip()
+        rows = [r for r in snap if r.get('kind') != 'existed']
+        empty = not rows
+        if empty:
+            MANUAL_STATE.update({'session_active': False, 'session_finish_pending': False,
+                                 'session_rows': [], 'session_excel': '', 'session_error': ''})
+        else:
+            MANUAL_STATE['session_finish_pending'] = False
+
+    # ⚠️ log() 内部也要抢 STATE_LOCK（非可重入的 Lock），所以任何 log 都必须在**锁外**调，
+    #    否则自己把自己锁死 —— 这个坑在本函数和 _manual_batch_worker 里都踩过。
+    if empty:
+        log('本轮没有采到新客户，未生成结果文件')
+        return {'ok': True, 'saved': False, 'msg': '本轮没有采到新客户，未生成结果文件'}
+
+    log(f'====== 结束本轮手动采集：新客户 {len(rows)} 条，正在生成 Excel ======')
+    with EXCEL_LOCK:                       # 与自动搜索的落盘互斥；Excel 写盘一律在 STATE_LOCK 外
+        ok = _save_enrich_excel(rows, industry=industry, country=country)
+        if not ok:                         # 多半是被 Excel 打开着 —— 退避一秒再试一次
+            time.sleep(0.8)
+            ok = _save_enrich_excel(rows, industry=industry, country=country)
+
+    with STATE_LOCK:
+        if ok:
+            MANUAL_STATE.update({'session_active': False, 'session_rows': [], 'session_error': '',
+                                 'session_excel': os.path.basename(paths.ENRICH_FILE or '')})
+            out = STATE.get('output', '')
+        else:
+            MANUAL_STATE['session_error'] = ('结果 Excel 保存失败（可能被 Excel 占用），'
+                                             '本轮数据已保留，可直接重试')
+            out = ''
+    if ok:
+        log(f'====== 本轮结果已保存：{out} ======')
+        return {'ok': True, 'saved': True, 'file': out, 'rows': len(rows)}
+    return {'ok': False, 'saved': False, 'msg': MANUAL_STATE['session_error']}
 
 
 def enrich_core(industry=''):
@@ -1865,7 +1891,7 @@ def enrich_core(industry=''):
     if results:
         key_count = sum(1 for r in results if r['score'] >= 70)
         mail_count = sum(1 for r in results if r['emails'])
-        tail = (f'已保存 {os.path.basename(ENRICH_FILE)}' if saved
+        tail = (f'已保存 {os.path.basename(paths.ENRICH_FILE)}' if saved
                 else '结果 Excel 未写出（客户库已更新，不影响飞书导出以外的用途）')
         log(f'✅ 补全完成！共 {len(results)} 个：{mail_count} 个有邮箱，'
             f'{key_count} 个重点客户(≥70分)。{tail}')
@@ -1873,16 +1899,39 @@ def enrich_core(industry=''):
 
 
 # ================= 导出到飞书 =================
+# 「来源渠道」是飞书的**单选**字段，取值必须是表里已有的选项，否则整条记录会被拒。
+# 客户库 customers.source 目前只有这三个取值（谷歌搜索 / 谷歌地图由两条自动链路写，
+# 手动采集由 collect_from_html 写）。⚠️ 在飞书「客户信息」表里给「来源渠道」加选项时，
+# 记得同步改这里。
+FEISHU_SOURCES = ('谷歌搜索', '谷歌地图', '手动采集')
+
+
 def build_feishu_records():
-    """读取最近一份结果 Excel，生成待导入飞书的记录（评分≥50分）"""
-    path = ENRICH_FILE or find_latest_result()
+    """读取最近一份结果 Excel，生成待导入飞书的记录。
+
+    · 评分门槛：**≥50 分**才导出 —— 但 `[手动采集]` 的行豁免，理由见下面循环里的注释。
+    · 来源渠道：结果 Excel 的 10 列里**没有**这一列（列契约一个都不能改），所以按网址
+      回客户库查真实的 source。一次性查成 map，不在循环里逐条开连接。
+    """
+    path = paths.ENRICH_FILE or find_latest_result()
     if not path or not os.path.exists(path):
         log('⚠️ 没找到结果 Excel（形如 行业-日期_时间-国家.xlsx），请先运行「开始搜索」')
         return []
     log(f'读取结果文件：{os.path.basename(path)}')
+
+    src_map = {}
+    try:
+        with closing(db_connect()) as conn:
+            for k, s in conn.execute('SELECT website_key, source FROM customers'):
+                if k and s:
+                    src_map[k] = s
+    except Exception as e:
+        log(f'⚠️ 读取客户库来源失败（本行统一按「谷歌搜索」写）：{type(e).__name__}: {e}')
+
     wb = load_workbook(path)
     ws = wb.active
     records = []
+    warned_src = set()
     for r in ws.iter_rows(min_row=2, values_only=True):
         if not (r and r[1]):
             continue
@@ -1894,17 +1943,28 @@ def build_feishu_records():
         rating = r[6] or ''
         formula = r[8] if len(r) > 8 else ''
         country = r[9] if len(r) > 9 and r[9] else ''
-        if not isinstance(score, (int, float)) or score < 50:
+        manual = str(formula or '').startswith('[手动采集]')
+        # ⚠️ 50 分门槛是用来拦「自动搜索捞进来的无关垃圾站」的；手动采集是用户自己
+        #    认定「这个网站就是我的目标客户」才动手点的，低分不该被静默丢掉 —— 豁免它。
+        if not manual and (not isinstance(score, (int, float)) or score < 50):
             continue
         mails = [m.strip() for m in emails.split(' / ') if EMAIL_OK.match(m.strip())]
-        note = '脚本评分%d分（%s），待人工核实' % (int(score), rating)
+        note = '脚本评分%d分（%s），待人工核实' % (int(score) if isinstance(score, (int, float)) else 0, rating)
+        if manual:
+            note += '；手动采集'
         if len(mails) > 1:
             note += '；其他邮箱：' + ' / '.join(mails[1:])
+        src = src_map.get(normalize_domain(url), '谷歌搜索')
+        if src not in FEISHU_SOURCES:
+            if src not in warned_src:
+                warned_src.add(src)
+                log(f'⚠️ 客户库里的来源渠道取值「{src}」不在飞书单选选项里，本行按「谷歌搜索」写入')
+            src = '谷歌搜索'
         rec = {
             '公司名称': title,
             '官网': url,
             '电话': phones,
-            '来源渠道': ['谷歌搜索'],
+            '来源渠道': [src],
             '使用的搜索公式': formula,
             '跟进状态': ['未联系'],
             '备注': note,
@@ -1928,7 +1988,7 @@ def run_export_feishu():
             log('没有可导出的记录（需要评分≥50分的客户，请先运行「开始搜索」完成抓取与评分）')
             return
         log(f'共 {len(records)} 条记录待导出')
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+        base_dir = _app_dir()          # 程序根（原来是内联的 dirname(abspath(__file__))）
         tmp_path = os.path.join(base_dir, IMPORT_JSON)
         with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump({'create_records': records}, f, ensure_ascii=False)
@@ -1967,11 +2027,307 @@ def run_export_feishu():
 
 # ================= Flask 应用 =================
 app = Flask(__name__)
+# 兜住超大请求体：Chrome 扩展会把当前页 HTML 一起送过来（正常 ≤500KB），
+# 这里给个 2MB 上限，超了直接 413，不进入业务逻辑。全站没有任何文件上传，设它安全。
+app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
+
+# 实际监听端口（由 __main__ 里 pick_port() 决定后回填），只用于 /api/ping 告诉扩展连哪个端口。
+# ⚠️ 端口仍是运行时决定的，不落文件、不写死 —— 保留段每次开机漂移，见 pick_port() 的说明。
+_RUN_PORT = 0
+
+
+@app.before_request
+def _cors_preflight():
+    """让浏览器扩展的预检请求过关。
+
+    扩展发的是 `Content-Type: application/json` + 自定义头 `X-DP-Ext`，属于「非简单请求」，
+    浏览器会**先发 OPTIONS 预检**。这里直接放行 OPTIONS，真正的来源校验在 after_request 里做
+    （只有 chrome-extension:// 才会拿到 Access-Control-Allow-Origin）。
+    """
+    if request.method == 'OPTIONS':
+        return ('', 204)
+
+
+@app.after_request
+def _cors_headers(resp):
+    """CORS：**只**回显 chrome-extension:// 来源，绝不返回 `*`。
+
+    这样能挡住「你正在浏览别的网站时，那个页面偷偷调本工具接口」：
+      ① 恶意页面带 json/自定义头 → 浏览器先发预检 → 我们不给它 ACAO → 浏览器判定失败
+         → **真正的 POST 根本不会发出**（不是发了再拦响应）；
+      ② 不给 `*`、不给 Allow-Credentials → 任意站点读不到响应内容；
+      ③ `Vary: Origin` 防止中间缓存把带 ACAO 的响应串给别的源。
+    残余风险（已接受并写在 extension/README.md）：加载前拿不到本扩展的 ID，所以只能按
+    「只要是 chrome-extension:// 就回显」，本机其它扩展理论上也能调 —— 已被「只绑 127.0.0.1」
+    收敛在本机可信域内。
+    """
+    origin = request.headers.get('Origin', '')
+    if origin.startswith('chrome-extension://'):
+        resp.headers['Access-Control-Allow-Origin'] = origin
+        resp.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        resp.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-DP-Ext'
+        resp.headers['Access-Control-Max-Age'] = '600'
+        with STATE_LOCK:                     # 顺手当扩展心跳：/manual 页据此显示「扩展在线」
+            MANUAL_STATE['ext_last_seen'] = time.time()
+    resp.headers['Vary'] = 'Origin'
+    return resp
 
 
 @app.route('/')
 def index():
     return PAGE_HTML
+
+
+@app.route('/manual')
+def manual_page():
+    """手动采集页：扩展连接状态 + 批量粘贴 + 最近记录 + 关闭采集浏览器。
+
+    ⚠️ 首页刻意**不放**指向本页的链接 —— 那样就得改 ui/page.html，而它的 sha256 被
+       `_check_page.py` 第 6 节 R5 硬校验着。本页入口是扩展 popup 的按钮 + 直接敲地址。
+    """
+    return MANUAL_HTML
+
+
+@app.route('/api/ping')
+def api_ping():
+    """扩展用它「发现端口 + 确认这就是本工具」。
+    app 字段是身份标记：扩展只在 `ok && app == 'waimao-dp'` 时才认，避免误连到本机别的服务。"""
+    with STATE_LOCK:
+        running = STATE['running']
+        manual_running = MANUAL_STATE['running']
+    return jsonify({
+        'ok': True,
+        'app': 'waimao-dp',
+        'name': '谷歌客户开发工具',
+        'port': _RUN_PORT,
+        'running': running,
+        'manual_running': manual_running,
+        'enrich_file': os.path.basename(paths.ENRICH_FILE or ''),
+    })
+
+
+# ================= 手动采集：接口 =================
+@app.route('/api/collect', methods=['POST', 'OPTIONS'])
+def api_collect():
+    """Chrome 扩展点一下「采集」就走这里（同步返回，popup 直接显示结果）。
+
+    ⚠️ 两道门缺一不可：
+      ① 自定义头 `X-DP-Ext` —— 自定义头必然触发 CORS 预检，而我们的 after_request 只给
+         chrome-extension:// 来源发 ACAO，所以网页里的恶意 fetch 连预检都过不去；
+      ② `request.get_json()` —— 非 application/json 拿不到数据，堵掉「简单请求」直发。
+    """
+    if request.headers.get('X-DP-Ext') != '1':
+        return jsonify({'ok': False, 'msg': 'unauthorized'}), 403
+    d = request.get_json(silent=True) or {}
+    if not (d.get('url') or '').strip():
+        return jsonify({'ok': False, 'msg': '没有拿到网址'})
+    words = d.get('product_words') or None
+    if isinstance(words, str):
+        words = [w.strip() for w in re.split(r'[\n,;，；]+', words) if w.strip()]
+    return jsonify(collect_from_html(
+        d.get('url'), d.get('title'), d.get('html'),
+        industry=(d.get('industry') or '').strip(),
+        country=(d.get('country') or '').strip(),
+        allow_upgrade=bool(d.get('upgrade', True)),
+        product_words=words))
+
+
+def _manual_batch_worker(urls, industry, country, allow_upgrade, product_words):
+    """批量粘贴采集：**单线程串行**跑。
+
+    为什么串行：① 本轮结束时的落盘要串行（EXCEL_LOCK）；② 「升级抓取」共用同一个
+    常驻浏览器；③ 避免日志交错不可读、以及本地资源被并发打爆。
+
+    本函数只负责「批量子过程」；采到的行由 `collect_from_html` 攒进本轮明细，
+    落盘由用户点「🏁 结束并生成 Excel」触发（或下方 finally 里的挂起收尾）。
+    """
+    log(f'====== 开始手动采集：{len(urls)} 条 ======')
+    try:
+        for i, u in enumerate(urls, 1):
+            with STATE_LOCK:
+                stopped = MANUAL_STATE['stop']
+                if not stopped:
+                    MANUAL_STATE['current'] = u
+            # ⚠️ log() 自己要抢 STATE_LOCK，只能在锁外调（原来这里写在 with 块里，是个死锁）
+            if stopped:
+                log('已停止手动采集')
+                break
+            try:
+                collect_from_html(u, '', '', industry=industry, country=country,
+                                  allow_upgrade=allow_upgrade, product_words=product_words)
+            except Exception as e:
+                with STATE_LOCK:
+                    MANUAL_STATE['failed'] += 1
+                log(f'   ❌ 采集失败 {u[:60]}：{type(e).__name__}: {e}')
+            with STATE_LOCK:
+                MANUAL_STATE['done'] = i
+            if i < len(urls):
+                time.sleep(1)
+    finally:
+        with STATE_LOCK:
+            MANUAL_STATE['running'] = False
+            MANUAL_STATE['current'] = ''
+            pending = MANUAL_STATE.get('session_finish_pending')
+        log(f'====== 手动采集结束：成功 {MANUAL_STATE["added"]} / 已有 {MANUAL_STATE["existed"]} '
+            f'/ 失败 {MANUAL_STATE["failed"]} ======')
+        if pending:
+            # 用户在批量还在跑的时候点了「结束并生成 Excel」—— 替他把本轮落盘。
+            # 放在锁外（落盘是慢 IO），且此时 running 已置 False、循环已退出，不会再有新行进来。
+            log('收到「结束本轮」请求（批量收尾中），现在生成 Excel…')
+            _flush_manual_session()
+
+
+@app.route('/api/manual/batch', methods=['POST'])
+def api_manual_batch():
+    if STATE['running']:
+        return jsonify({'ok': False, 'msg': '自动搜索/采集正在运行，请先等它结束'})
+    with STATE_LOCK:
+        if MANUAL_STATE['running']:
+            return jsonify({'ok': False, 'msg': '手动采集已在运行'})
+    d = request.get_json(silent=True) or {}
+    raw = d.get('urls') or ''
+    urls = [u.strip() for u in re.split(r'[\s]+', raw) if u.strip()]
+    if not urls:
+        return jsonify({'ok': False, 'msg': '请至少粘贴一个网址（一行一个）'})
+    urls = urls[:200]                       # 手滑粘几千行的话给个上限
+    words = d.get('product_words') or None
+    if isinstance(words, str):
+        words = [w.strip() for w in re.split(r'[\n,;，；]+', words) if w.strip()]
+    ind = (d.get('industry') or '').strip()
+    cty = (d.get('country') or '').strip()
+    # 批量属于「本轮」的一部分：本轮没开始就先开起来（表单里的行业/国家即本轮口径）
+    _ensure_manual_session(ind, cty)
+    with STATE_LOCK:
+        # ⚠️ 只重置「批量子过程」的字段；added/existed/failed/upgraded 是**本轮**计数，
+        #    这里清零会把本轮先前（比如扩展单点）的成果抹掉。
+        MANUAL_STATE.update({'running': True, 'stop': False, 'total': len(urls),
+                             'done': 0, 'current': ''})
+    threading.Thread(target=_manual_batch_worker,
+                     args=(urls, ind, cty, bool(d.get('upgrade', True)), words),
+                     daemon=True).start()
+    return jsonify({'ok': True, 'total': len(urls)})
+
+
+@app.route('/api/manual/session/start', methods=['POST'])
+def api_manual_session_start():
+    """显式开一轮手动采集（页面上的「🟢 开始本轮采集」）。
+
+    ⚠️ 本轮已有内容时**拒绝**而不是覆盖：覆盖会静默丢掉刚采到的行。
+       要重来的话正确姿势是先「结束并生成 Excel」（落盘留档）再开新一轮。
+    """
+    if STATE['running']:
+        return jsonify({'ok': False, 'msg': '自动搜索/采集正在运行，请先等它结束'})
+    d = request.get_json(silent=True) or {}
+    with STATE_LOCK:
+        if MANUAL_STATE['running']:
+            return jsonify({'ok': False, 'msg': '批量采集正在运行，本轮已在进行中'})
+        if MANUAL_STATE.get('session_active') and MANUAL_STATE.get('session_rows'):
+            return jsonify({'ok': False,
+                            'msg': '本轮还在进行中，请先「🏁 结束并生成 Excel」再开新一轮'})
+        MANUAL_STATE.update({
+            'session_active': True, 'session_started_at': time.time(),
+            'session_rows': [], 'session_rid_seq': 0,
+            'session_excel': '', 'session_error': '',
+            'session_finish_pending': False,
+            'added': 0, 'existed': 0, 'failed': 0, 'upgraded': 0,
+            'session_industry': (d.get('industry') or '').strip(),
+            'session_country': (d.get('country') or '').strip(),
+        })
+    log('====== 已开始本轮手动采集 ======')
+    return jsonify({'ok': True})
+
+
+@app.route('/api/manual/session/finish', methods=['POST'])
+def api_manual_session_finish():
+    """结束本轮：落盘成一份结果 Excel，并设为「最新结果文件」。
+
+    批量还在跑时不阻塞这个请求 —— 只置 `stop` + 挂起标志，由 worker 的 finally 落盘
+    （当前那条可能正卡在 3–10s 的升级抓取里，在这里 join 会把 HTTP 请求拖死）。
+    """
+    with STATE_LOCK:
+        if not MANUAL_STATE.get('session_active'):
+            return jsonify({'ok': False, 'msg': '当前没有进行中的本轮采集，无需结束'})
+        if MANUAL_STATE['running']:
+            MANUAL_STATE['stop'] = True
+            MANUAL_STATE['session_finish_pending'] = True
+            return jsonify({'ok': True, 'pending': True,
+                            'msg': '正在停止批量并收尾，稍候会自动生成 Excel…'})
+    return jsonify(_flush_manual_session())
+
+
+@app.route('/api/manual/session/delete', methods=['POST'])
+def api_manual_session_delete():
+    """把本轮明细里的某一条删掉，**并同时从客户库删掉它**（删除前自动备份客户库）。
+
+    为什么要删库：采集那一刻记录就已经写进 SQLite 了（`_commit_candidate` → `db_upsert_customer`）。
+    只删明细是假删除 —— 库里那条还在，下次再采到同一个站会被 db_has_customer 判「已在客户库」
+    直接跳过、永远采不回来，飞书导出也仍会带它。
+
+    ⚠️ 锁纪律（STATE_LOCK 非可重入，且 log() 自己也要抢同一把锁）：
+       ① 锁内定位  ② 锁外做备份与 DB 删除（慢 IO）  ③ 锁内改内存  ④ 锁外 log。
+    ⚠️ 定位用 rid 而不是 url：同一 url 在同一轮里可能既有一条 added 又有一条 existed，
+       按 url 删会一次删两条。无 rid 的条目（老数据/测试造的假行）一律拒绝，不误删。
+    """
+    d = request.get_json(silent=True) or {}
+    rid = d.get('rid')
+    with STATE_LOCK:
+        rows = MANUAL_STATE.get('session_rows') or []
+        hit = next((r for r in rows if r.get('rid') == rid), None) if rid is not None else None
+        if hit is None:
+            return jsonify({'ok': False,
+                            'msg': '这条已不在本轮明细里（可能已被删除，或本轮已结束）'})
+        url = hit.get('url') or ''
+        kind = hit.get('kind')
+
+    backup = backup_db_before_delete()      # 锁外：先备份（失败不阻断，返回 ''）
+    deleted = db_delete_customer(url)       # 锁外：真删库
+
+    with STATE_LOCK:
+        rows = MANUAL_STATE.get('session_rows') or []
+        idx = next((i for i, r in enumerate(rows) if r.get('rid') == rid), -1)
+        if idx >= 0:
+            rows.pop(idx)
+        # 计数跟着回退，否则状态行的「已采 N 条」会与实际行数对不上。
+        # upgraded/failed 不动：它们是「本轮发生过几次」的事件计数，不指涉某一行。
+        ckey = 'existed' if kind == 'existed' else 'added'
+        MANUAL_STATE[ckey] = max(0, (MANUAL_STATE.get(ckey) or 0) - 1)
+        n = len(rows)
+
+    log(f'🗑️ 已从本轮明细删除：{url[:60]}（客户库删除 {deleted} 条）')
+    return jsonify({'ok': True, 'deleted': deleted, 'rows': n,
+                    'backup': os.path.basename(backup) if backup else ''})
+
+
+@app.route('/api/manual/stop', methods=['POST'])
+def api_manual_stop():
+    with STATE_LOCK:
+        MANUAL_STATE['stop'] = True       # ⚠️ 只停手动队列，不动 STATE['stop']（那会误杀自动搜索）
+    return jsonify({'ok': True})
+
+
+@app.route('/api/manual/state')
+def api_manual_state():
+    with STATE_LOCK:
+        st = dict(MANUAL_STATE)
+        # ⚠️ `dict()` 是浅拷贝：session_rows 必须换成独立快照，否则 jsonify 遍历列表期间
+        #    worker 线程又 append，会撞上「遍历中容器被修改」。
+        st['session_rows'] = list(MANUAL_STATE.get('session_rows') or [])
+    st['now'] = time.time()               # 让前端能自己算「扩展心跳是几秒前」
+    try:
+        with closing(db_connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            st['recent'] = [dict(r) for r in conn.execute(
+                "SELECT company_name,website,email,phone,score,rating,industry,country,"
+                "last_seen_at FROM customers WHERE source='手动采集' "
+                "ORDER BY datetime(last_seen_at) DESC, id DESC LIMIT 50")]
+    except Exception:
+        st['recent'] = []
+    return jsonify(st)
+
+
+@app.route('/api/manual/close_browser', methods=['POST'])
+def api_manual_close_browser():
+    return jsonify({'ok': True, 'closed': close_manual_browser()})
 
 
 @app.route('/api/start', methods=['POST'])
@@ -2043,7 +2399,7 @@ def api_open_folder():
 
 @app.route('/api/keywords')
 def api_keywords():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    base_dir = _app_dir()          # 程序根（原来是内联的 dirname(abspath(__file__))）
     try:
         with open(os.path.join(base_dir, KEYWORD_LIB), 'r', encoding='utf-8') as f:
             return jsonify(json.load(f))
@@ -2093,680 +2449,10 @@ def api_status():
     return jsonify(payload)
 
 
-PAGE_HTML = """<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<title>谷歌客户开发工具</title>
-<style>
-* { box-sizing: border-box; }
-body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background:#f5f6f8; margin:0; padding:24px; color:#222; }
-.wrap { max-width: 1100px; margin: 0 auto; }
-h1 { font-size:22px; margin:0 0 4px; }
-.sub { color:#888; font-size:13px; margin-bottom:20px; }
-.grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
-.card { background:#fff; border-radius:10px; padding:18px; box-shadow:0 1px 3px rgba(0,0,0,.08); }
-.card h3 { margin:0 0 12px; font-size:15px; }
-label.cond { display:flex; align-items:center; gap:8px; padding:6px 0; font-size:14px; cursor:pointer; }
-label.cond input { width:16px; height:16px; }
-textarea, input[type=text] { width:100%; border:1px solid #ddd; border-radius:6px; padding:10px; font-size:14px; font-family:inherit; }
-select { width:100%; border:1px solid #ddd; border-radius:6px; padding:10px; font-size:14px; font-family:inherit; background:#fff; cursor:pointer; }
-.btn-row { margin-top:18px; display:flex; gap:12px; align-items:center; }
-button { border:none; border-radius:8px; padding:12px 24px; font-size:15px; cursor:pointer; font-weight:600; }
-.btn-start { background:#1a73e8; color:#fff; }
-.btn-stop { background:#d93025; color:#fff; }
-.btn-export { background:#7c3aed; color:#fff; }
-.btn-open { background:#e8f0fe; color:#1a73e8; border:1px solid #1a73e8; padding:4px 10px; font-size:13px; font-weight:500; border-radius:6px; }
-.kw-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
-.kw-item { display:flex; align-items:center; gap:8px; padding:8px 10px; background:#f7f9fc; border:1px solid #e8edf2; border-radius:6px; font-size:13px; }
-.kw-en { font-family:Consolas,monospace; color:#1a73e8; flex:1; word-break:break-all; }
-.kw-cn { color:#666; min-width:140px; }
-.kw-copy { background:#1a73e8; color:#fff; border:none; border-radius:4px; padding:3px 10px; font-size:12px; cursor:pointer; font-weight:500; }
-.kw-lab { margin:0; }
-.kw-lab input { width:14px; height:14px; }
-.btn-mini { background:#f1f3f4; color:#333; border:1px solid #ccc; border-radius:6px; padding:8px 14px; font-size:13px; cursor:pointer; font-weight:500; }
-button:disabled { background:#ccc; cursor:not-allowed; }
-.status { margin-top:12px; font-size:14px; color:#555; }
-.log { background:#1e1e1e; color:#d4d4d4; border-radius:10px; padding:16px; font-family:Consolas,monospace; font-size:13px; height:420px; overflow-y:auto; white-space:pre-wrap; line-height:1.7; margin-top:16px; }
-.counter { display:inline-block; background:#eef3fe; color:#1a73e8; padding:3px 10px; border-radius:12px; font-size:13px; font-weight:600; }
-.note { color:#b58900; font-size:12px; margin-top:8px; }
-.cmb-sum { font-size:13px; color:#1a73e8; margin-bottom:4px; }
-.cmb-box { max-height:430px; overflow-y:auto; padding-right:4px; }
-.cmb-group { margin-bottom:10px; }
-.cmb-head { font-size:13px; font-weight:600; color:#188038; margin:8px 0 4px; padding-bottom:3px; border-bottom:1px dashed #d6e4d9; }
-.cmb-line { background:#f7f9fc; border:1px solid #e8edf2; border-radius:5px; padding:6px 8px; margin:4px 0;
-  font-family:Consolas,monospace; font-size:12.5px; line-height:1.5; color:#1a73e8; word-break:break-all; }
-.cmb-excl { color:#aaa; }
-.cmb-arg { color:#8c9bab; border-bottom:1px dotted #8c9bab; cursor:help; }
-.cmb-empty { color:#b58900; font-size:13px; }
-.live-wrap { margin-top:16px; }
-.live-head { display:flex; align-items:center; gap:10px; margin-bottom:8px; }
-.live-head h3 { margin:0; font-size:15px; }
-.live-badge { display:inline-block; background:#eef8ee; color:#188038; padding:3px 10px; border-radius:12px; font-size:13px; font-weight:600; }
-.live-scroll { max-height:320px; overflow:auto; border:1px solid #e8edf2; border-radius:8px; }
-table.live { width:100%; border-collapse:collapse; font-size:13px; }
-table.live th { position:sticky; top:0; background:#f7f9fc; color:#555; font-weight:600; text-align:left;
-  padding:8px 10px; border-bottom:1px solid #e3e8ee; white-space:nowrap; }
-table.live td { padding:7px 10px; border-bottom:1px solid #f1f4f7; vertical-align:top; }
-table.live tr:last-child td { border-bottom:none; }
-table.live tr.row-new { animation: rowIn .9s ease-out; }
-@keyframes rowIn { from { background:#fff7e6; } to { background:transparent; } }
-.live-co { color:#1a73e8; text-decoration:none; font-weight:500; }
-.live-co:hover { text-decoration:underline; }
-.live-dom { color:#999; font-size:12px; }
-.live-mail { color:#188038; font-family:Consolas,monospace; font-size:12px; }
-.live-miss { color:#bbb; }
-.live-cell { max-width:210px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.live-sc { font-weight:700; }
-.live-empty { color:#b58900; font-size:13px; padding:14px; }
-.tag-r { display:inline-block; padding:1px 7px; border-radius:9px; font-size:12px; }
-.tag-r1 { background:#fdeceb; color:#d93025; }
-.tag-r2 { background:#eef3fe; color:#1a73e8; }
-.tag-r3 { background:#f1f3f4; color:#777; }
-</style>
-</head>
-<body>
-<div class="wrap">
-  <h1>🔍 谷歌客户开发工具</h1>
-  <div class="sub">本地运行 · 搜到一个网站就立刻抓联系方式 · SQLite 客户库去重 · 导出 Excel / 飞书</div>
-
-  <div class="card" style="margin-bottom:16px;">
-    <h3>1. 目标国家（单选，下拉选择）</h3>
-    <select id="countries" onchange="onCountry()" style="max-width:420px;"></select>
-  </div>
-
-  <div class="card" style="margin-bottom:16px;">
-    <h3>📋 产品关键词库（行业 → 细分品类 → 具体产品 → 关键词，分级选择）</h3>
-    <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; margin:8px 0 12px;">
-      <div><label style="font-size:13px;color:#666;">行业</label><br><select id="kwIndustry" onchange="onIndustry()" style="width:150px;"></select></div>
-      <div><label style="font-size:13px;color:#666;">细分品类</label><br><select id="kwCategory" onchange="onCategory()" style="width:170px;"></select></div>
-      <div><label style="font-size:13px;color:#666;">具体产品</label><br><select id="kwProduct" onchange="onProduct()" style="width:190px;"></select></div>
-      <div><label style="font-size:13px;color:#666;">语言</label><br><select id="kwLang" onchange="onProduct()" style="width:120px;"><option value=""></option><option value="en">英语</option><option value="de">德语</option><option value="fr">法语</option><option value="es">西班牙语</option><option value="ar">阿拉伯语</option><option value="fa">波斯语</option><option value="it">意大利语</option><option value="nl">荷兰语</option><option value="tr">土耳其语</option></select></div>
-      <button class="btn-mini" onclick="copyChecked()">复制勾选</button>
-    </div>
-    <div id="kwList" class="kw-grid"></div>
-    <div class="note">关键词数据在同目录「关键词库.json」里，可直接编辑添加，改完刷新本页即可</div>
-  </div>
-
-  <div class="grid">
-    <div class="card" style="grid-column: span 1;">
-      <h3>2. 产品关键词（一行一个）</h3>
-      <textarea id="products" rows="4" placeholder="Cat Litter Box Liners&#10;Cat Litter Liners"></textarea>
-      <div class="note">每行会自动加英文双引号做精确匹配</div>
-      <div style="margin-top:10px; font-size:13px; color:#444; line-height:1.9;">
-        多个词怎么组合：
-        <label style="margin-right:12px;"><input type="radio" name="match" value="or" checked> OR（任一命中，同义词用）</label>
-        <label style="margin-right:12px;"><input type="radio" name="match" value="and"> AND（同时命中，最精准）</label>
-        <label><input type="radio" name="match" value="each"> 分别搜（各词各搜一遍）</label>
-      </div>
-    </div>
-
-    <div class="card" id="condCard">
-      <h3>3. 搜索条件（勾选要跑的）</h3>
-      <div id="conds"></div>
-      <div class="note" id="condMapsHint" style="display:none;">地图模式只用「<b>第一个勾选条件</b>」的身份词拼进查询词（如法国用 grossiste）。<br>⚠️ 这一步不能省：实测只搜「nouilles」返回的全是餐馆，加上 grossiste 才出现食品批发商。其余条件不参与。</div>
-    </div>
-
-    <div class="card">
-      <h3>4. 参数</h3>
-        <div style="margin:0 0 4px; font-size:14px;">数据源：</div>
-        <label class="cond" style="display:block;"><input type="radio" name="source" value="google" checked onchange="onSource()"> 谷歌网页搜索（按关键词找公司官网）</label>
-        <label class="cond" style="display:block;"><input type="radio" name="source" value="maps" onchange="onSource()"> 谷歌地图名录（找有实体地址的本地商家，带电话）</label>
-        <div id="mapsNote" class="note" style="display:none;">地图名录里只有「有实体地址的真实商家」，所以 B2B 名录站/新闻站/菜谱站不会混进来；电话和地址是地图直接给的，官方有官网的再访问官网补邮箱。<br>⚠️ 单次搜索上限约 120 条；结果受出口 IP 所在地影响，指定城市能明显提高精度。仅用于少量内部研究。</div>
-        <div id="mapsCityWrap" style="display:none; margin:8px 0;">
-          <label style="font-size:14px;">城市 / 地区：</label>
-          <input type="text" id="mapsCity" placeholder="如 Lyon / 里昂，留空只用国家" style="width:180px; margin:6px 0;">
-          <div class="note">城市名会拼进地图搜索词（谷歌官方推荐的位置限定方式），比只选国家精准得多</div>
-        </div>
-        <div id="pagesWrap">
-          <label style="font-size:14px;">每条公式抓几页：</label>
-          <input type="number" id="pages" value="2" min="1" max="5" style="width:80px; margin:6px 0;">
-        </div>
-        <br><label style="font-size:14px;">本次任务采集数量：</label>
-        <input type="number" id="targetCount" value="10" min="10" max="100" step="1" style="width:80px; margin:6px 0;">
-        <div class="note">本轮最多新增多少个新客户（10-100）；按新增个数计，不按是否抓到联系方式计。SQLite 客户库总量不设上限</div>
-        <div style="margin:12px 0 4px; font-size:14px;">搜索方式：</div>
-        <label class="cond"><input type="checkbox" id="autoEnrich" checked> 搜到一个就顺手抓它的联系方式（推荐）</label>
-        <div class="note">勾选：每搜到一个新客户，立刻访问它抓邮箱/电话并评分，抓完（或确认抓不到）再搜下一个，凑够数量即停。每条会多花几秒，但不用等全部搜完；结果文件在整轮结束时一次写出。<br>不勾：只收集网站线索，邮箱电话留空，速度快，适合先铺量，稍后再双击「补历史欠账.py」批量补。<br>（地图模式下：地图本来就给电话和地址，不勾就是不再访问官网补邮箱。）</div>
-      <div id="excludesWrap">
-        <div style="margin:12px 0 4px; font-size:14px;">排除条件（勾选要排除的，默认全排除）</div>
-      <div id="excludes"></div>
-      </div>
-      <div style="margin:12px 0 4px; font-size:14px;">中国商家过滤（默认全部勾选，可逐项关闭）</div>
-      <div style="display:flex; gap:8px; margin-bottom:6px;">
-        <button type="button" class="btn-mini" onclick="toggleChinaFilters(true)">全部勾选</button>
-        <button type="button" class="btn-mini" onclick="toggleChinaFilters(false)">全部取消</button>
-      </div>
-      <div id="chinaMapsHint" class="note" style="display:none;">地图模式没有查询公式，所以「排除 China manufacturer」这类查询词选项不生效；但「中文地址 / +86 电话 / 平台域名」这些在结果上判断的项照常生效</div>
-      <div id="chinaFilters"></div>
-      <div class="note">⚠️ 搜索中会弹出 Chrome 窗口，遇到谷歌验证码请在浏览器里手动通过</div>
-    </div>
-
-    <div class="card">
-      <h3>5. 关键词组合预览（实时）</h3>
-      <div class="cmb-sum" id="comboSummary">…</div>
-      <div class="cmb-box" id="comboList"></div>
-      <div style="margin-top:10px; display:flex; gap:8px; align-items:center;">
-        <button class="btn-mini" onclick="copyCombos()">复制全部组合</button>
-        <span class="note" id="comboHint" style="margin:0;">浅灰＝排除词；末尾的 <code>&amp;gl=..&amp;hl=..</code> 是国家筛选参数（加在搜索 URL 上，不在搜索词里）</span>
-      </div>
-    </div>
-  </div>
-
-  <div class="btn-row">
-    <button class="btn-start" id="btnStart" onclick="start()">▶ 开始搜索</button>
-    <button class="btn-export" id="btnExport" onclick="exportFeishu()">导出到飞书</button>
-    <button class="btn-stop" id="btnStop" onclick="stop()" disabled>■ 停止</button>
-      <span class="counter" id="counter">本轮新增 0 个网站</span>
-      <span class="counter" id="dbCounter" style="background:#eef8ee;color:#188038;">客户库加载中...</span>
-  </div>
-  <div class="status" id="status"></div>
-
-  <div class="card live-wrap">
-    <div class="live-head">
-      <h3>📥 本轮已入库明细（实时）</h3>
-      <span class="live-badge" id="liveCount">0 条</span>
-      <span class="note" style="margin:0;">每搜到一个网站就立刻抓取联系方式并写入 SQLite，写入即在这里出现</span>
-    </div>
-    <div class="live-scroll">
-      <table class="live">
-        <thead>
-          <tr>
-            <th style="width:44px;">#</th>
-            <th>公司名称 / 官网</th>
-            <th style="width:190px;">邮箱</th>
-            <th style="width:140px;">电话</th>
-            <th style="width:60px;">评分</th>
-            <th style="width:84px;">评级</th>
-          </tr>
-        </thead>
-        <tbody id="liveBody"></tbody>
-      </table>
-      <div class="live-empty" id="liveEmpty">等待任务开始…点击「开始搜索」后，每入库一条客户就会实时出现在这里。</div>
-    </div>
-  </div>
-
-  <div class="log" id="log"></div>
-</div>
-
-<script>
-let since = 0, polling = null, renderedRows = 0;
-let RUN_SOURCE = 'google';   // 本轮数据源：google / maps（由 start() 写入，poll() 用来切换文案）
-
-function logBox(msg){
-  const b = document.getElementById('log');
-  b.textContent += msg + '\\n';
-  b.scrollTop = b.scrollHeight;
-}
-
-function esc(s){
-  return String(s == null ? '' : s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-}
-
-function domainOf(url){
-  try { return new URL(url).hostname.replace(/^www\\./, ''); } catch(e){ return url || ''; }
-}
-
-function ratingCls(r){
-  return r === '重点客户' ? 'tag-r1' : r === '普通客户' ? 'tag-r2' : 'tag-r3';
-}
-
-// 实时渲染本轮已入库明细。只追加新增行（增量），避免每秒整体重绘导致滚动位置和 hover 状态丢失。
-function renderRows(rows){
-  const tb = document.getElementById('liveBody');
-  const empty = document.getElementById('liveEmpty');
-  const badge = document.getElementById('liveCount');
-  if (!Array.isArray(rows)) return;
-  if (rows.length < renderedRows){ tb.innerHTML = ''; renderedRows = 0; }   // 新一轮任务，清空重来
-  for (let i = renderedRows; i < rows.length; i++){
-    const r = rows[i] || {};
-    const dom = domainOf(r.url);
-    const mails = (r.emails && r.emails.length) ? r.emails.join(' / ') : '';
-    const phones = (r.phones && r.phones.length) ? r.phones.join(' / ') : '';
-    const tr = document.createElement('tr');
-    tr.className = 'row-new';
-    tr.innerHTML =
-      '<td>' + (r.n || (i + 1)) + '</td>' +
-      '<td><a class="live-co" href="' + esc(r.url) + '" target="_blank" rel="noopener" title="' + esc(r.title) + '">' +
-        esc(r.title) + '</a><br><span class="live-dom">' + esc(dom) + '</span></td>' +
-      '<td class="live-cell" title="' + esc(mails) + '">' +
-        (mails ? '<span class="live-mail">' + esc(mails) + '</span>' : '<span class="live-miss">未抓到</span>') + '</td>' +
-      '<td class="live-cell" title="' + esc(phones) + '">' +
-        (phones ? esc(phones) : '<span class="live-miss">未抓到</span>') + '</td>' +
-      '<td class="live-sc">' + (r.score == null ? '' : r.score) + '</td>' +
-      '<td><span class="tag-r ' + ratingCls(r.rating) + '">' + esc(r.rating) + '</span></td>';
-    tb.appendChild(tr);
-  }
-  renderedRows = rows.length;
-  badge.textContent = rows.length + ' 条';
-  if (empty) empty.style.display = rows.length ? 'none' : 'block';
-  const sc = tb.closest('.live-scroll');
-  if (sc) sc.scrollTop = sc.scrollHeight;   // 有新行时自动滚到底部
-}
-
-async function poll(){
-  const r = await fetch('/api/status?since=' + since);
-  const d = await r.json();
-  if (d.logs && d.logs.length){
-    for (const l of d.logs) logBox(l);
-    since = d.total_logs;
-  }
-  document.getElementById('counter').textContent =
-    '本轮新增 ' + d.result_count + (RUN_SOURCE === 'maps' ? ' 个商家' : ' 个网站');
-  renderRows(d.rows);
-  if (d.db_total != null){
-    document.getElementById('dbCounter').textContent = 'SQLite 已存 ' + d.db_total + ' 条（已评分 ' +
-      (d.db_verified == null ? '-' : d.db_verified) + '）';
-  }
-  if (!d.running && d.done && polling){
-    clearInterval(polling); polling = null;
-    setButtons(false);
-    const s = document.getElementById('status');
-    s.innerHTML = '✅ 完成，结果文件：' + (d.output || '') +
-      ' <button class="btn-open" onclick="openFolder()">📂 打开结果文件夹</button>';
-  } else if (d.running){
-    setButtons(true);
-    const s = document.getElementById('status');
-    s.textContent = d.phase === 'export' ? '导出到飞书…'
-                  : RUN_SOURCE === 'maps'
-                    ? '地图采集 + 就地抓联系方式中（每条要点开详情面板，较慢）…'
-                    : d.phase === 'search' ? '搜索中（每搜到一个网站就同步抓联系方式）…'
-                  : '运行中…';
-  }
-}
-
-async function loadDbStats(){
-  try{
-    const d = await (await fetch('/api/db_stats')).json();
-    if(d.ok) document.getElementById('dbCounter').textContent = 'SQLite 已存 ' + d.total + ' 条（已评分 ' + d.verified + '）';
-  }catch(e){}
-}
-loadDbStats();
-
-function setButtons(running){
-  document.getElementById('btnStart').disabled = running;
-  document.getElementById('btnExport').disabled = running;
-  document.getElementById('btnStop').disabled = !running;
-}
-
-async function start(){
-  const products = document.getElementById('products').value;
-  const conditions = [...document.querySelectorAll('#conds input:checked')].map(i=>i.value);
-    const countries = [document.getElementById('countries').value];
-    const pages = document.getElementById('pages').value;
-    const targetCount = parseInt(document.getElementById('targetCount').value || '10');
-    const exclude = [...document.querySelectorAll('#excludes input:checked')].map(i=>i.value).join(' ');
-    const chinaFilters = [...document.querySelectorAll('#chinaFilters .china-filter:checked')]
-      .map(i => i.dataset.key);
-  const match = (document.querySelector('input[name="match"]:checked') || {}).value || 'or';
-    const industry = document.getElementById('kwIndustry').value || '';   // 行业标签，取自关键词库的行业选择
-    const autoEnrich = document.getElementById('autoEnrich').checked;      // 搜索时是否就地抓联系方式
-    const lang = curLang();                                                // 条件词语言（随后国家自动联动）
-    const source = curSource();                                            // google=网页搜索 / maps=谷歌地图
-    const city = curCity();                                                // 仅地图用
-    if (!products.trim()){ alert('请填写产品关键词'); return; }
-    if (source !== 'maps' && !conditions.length){ alert('请至少勾选一个搜索条件'); return; }
-    if (!Number.isInteger(targetCount) || targetCount < 10 || targetCount > 100){
-      alert('本次任务采集数量只能设置为 10-100 的整数'); return;
-    }
-    const r = await fetch('/api/start', { method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({products, conditions, countries, pages, target_count: targetCount, exclude,
-        china_filters: chinaFilters, match, industry, auto_enrich: autoEnrich, lang, source, city}) });
-  const d = await r.json();
-  if (!d.ok){ alert(d.msg); return; }
-  RUN_SOURCE = source;
-  logBox(source === 'maps' ? '====== 开始谷歌地图采集 ======' : '====== 开始搜索 ======');
-  since = 0;
-  renderedRows = 0;                                     // 清空上一轮的实时明细，等后端 rows 到达后重建
-  document.getElementById('liveBody').innerHTML = '';
-  document.getElementById('liveCount').textContent = '0 条';
-  document.getElementById('liveEmpty').style.display = 'block';
-  document.getElementById('status').textContent = '运行中...';
-  setButtons(true);
-  polling = setInterval(poll, 1000);
-}
-
-async function exportFeishu(){
-  const r = await fetch('/api/export_feishu', { method:'POST' });
-  const d = await r.json();
-  if (!d.ok){ alert(d.msg); return; }
-  logBox('====== 开始导出到飞书 ======');
-  since = 0;
-  document.getElementById('status').textContent = '导出中...';
-  setButtons(true);
-  polling = setInterval(poll, 1000);
-}
-
-async function stop(){
-  await fetch('/api/stop', { method:'POST' });
-  logBox('已请求停止...');
-}
-
-async function openFolder(){
-  await fetch('/api/open_folder', { method:'POST' });
-}
-
-// 渲染条件和国家
-const CONDS = CONDS_PLACEHOLDER;
-const condBox = document.getElementById('conds');
-CONDS.forEach(c => {
-  condBox.insertAdjacentHTML('beforeend',
-    `<label class="cond"><input type="checkbox" value="${c[0]}" ${c[2]?'checked':''}> ${c[1]}</label>`);
-});
-const COUNTS = COUNTS_PLACEHOLDER;
-const countryBox = document.getElementById('countries');
-const COUNTRY_LANG = {};
-const COUNTRY_GL = {};
-COUNTS.forEach(c => {
-  COUNTRY_LANG[c[0]] = c[3] || '';
-  COUNTRY_GL[c[0]] = c[4] || c[0];
-  countryBox.insertAdjacentHTML('beforeend',
-    `<option value="${c[0]}" ${c[2]?'selected':''}>${c[1]}</option>`);
-});
-const MAPS_CENTERS = MAPS_CENTERS_PLACEHOLDER;   // 国家代码 → [纬度, 经度]，与后端 COUNTRY_CENTERS 同源
-const MAPS_ROLES = MAPS_ROLES_PLACEHOLDER;       // 条件 → {语言: 身份词}，与后端 COND_ROLES 同源
-
-// ==================== 数据源切换（谷歌网页搜索 / 谷歌地图） ====================
-function curSource(){
-  return (document.querySelector('input[name="source"]:checked') || {}).value || 'google';
-}
-function curCity(){
-  const el = document.getElementById('mapsCity');
-  return el ? (el.value || '').trim() : '';
-}
-// 地图查询要拼的身份词：取第一个勾选条件的角色词（与后端 maps_role_word 一致）
-// ⚠️ 不带身份词时地图只会返回餐馆/零售店，不是买家
-function mapsRoleWord(){
-  const first = document.querySelector('#conds input:checked');
-  if (!first) return '';
-  const r = MAPS_ROLES[first.value] || {};
-  return r[curLang()] || r.en || '';
-}
-function onSource(){
-  const maps = curSource() === 'maps';
-  document.getElementById('mapsCityWrap').style.display  = maps ? 'block' : 'none';
-  document.getElementById('mapsNote').style.display      = maps ? 'block' : 'none';
-  document.getElementById('pagesWrap').style.display     = maps ? 'none'  : 'block';
-  document.getElementById('excludesWrap').style.display  = maps ? 'none'  : 'block';
-  document.getElementById('condMapsHint').style.display  = maps ? 'block' : 'none';
-  document.getElementById('chinaMapsHint').style.display = maps ? 'block' : 'none';
-  renderCombos();
-}
-// 地图搜索 URL：与后端 maps_search_url() 保持完全一致
-// ① 城市名拼进查询词（谷歌官方推荐的位置限定方式）② @lat,lng 锁视野 ③ hl/gl 挂查询串
-function mapsUrlPreview(query, code, city, hl, gl){
-  const c  = MAPS_CENTERS[code] || MAPS_CENTERS.us || [39.83, -98.58];
-  const q  = [query, city].filter(Boolean).join(' ').trim();
-  const qs = [];
-  if (hl) qs.push('hl=' + hl);
-  if (gl) qs.push('gl=' + gl);
-  return 'https://www.google.com/maps/search/' + encodeURIComponent(q)
-       + '/@' + c[0] + ',' + c[1] + ',11z' + (qs.length ? '?' + qs.join('&') : '');
-}
-// 国家 → 语言联动：该国语言在语言下拉里有选项就自动选中；下拉里没有该语言 → 留空（完全空白，由用户自选）
-function applyCountryLang(){
-  const sel = document.getElementById('kwLang');
-  const want = COUNTRY_LANG[countryBox.value] || '';
-  const exists = [...sel.options].some(o => o.value === want);
-  sel.value = exists ? want : '';
-}
-function onCountry(){
-  applyCountryLang();
-  onProduct();
-  renderCombos();          // 摘要里会显示目标国家，跟着刷新
-}
-const EXCLS = EXCLS_PLACEHOLDER;
-const exclBox = document.getElementById('excludes');
-EXCLS.forEach(e => {
-  exclBox.insertAdjacentHTML('beforeend',
-    `<label class="cond"><input type="checkbox" value="${e[1]}" checked> <b>${e[1]}</b> <span style="color:#888">${e[2]}</span></label>`);
-});
-const CHINA_FILTERS = CHINA_FILTERS_PLACEHOLDER;
-const chinaBox = document.getElementById('chinaFilters');
-CHINA_FILTERS.forEach(e => {
-  chinaBox.insertAdjacentHTML('beforeend',
-    `<label class="cond"><input type="checkbox" class="china-filter" data-key="${e[0]}" value="${e[1]}" checked> <b>${e[2]}</b> <span style="color:#888">${e[3]}</span></label>`);
-});
-function toggleChinaFilters(on){
-  document.querySelectorAll('#chinaFilters .china-filter').forEach(x => x.checked = on);
-  renderCombos();
-}
-let KW_DATA = {};
-async function loadKeywords(){
-  try{ KW_DATA = await (await fetch('/api/keywords')).json(); }
-  catch(e){ KW_DATA = {}; }
-  const ind = document.getElementById('kwIndustry');
-  const inds = Object.keys(KW_DATA);
-  if(!inds.length){
-    ind.innerHTML = '<option value="">（暂无数据，请编辑 关键词库.json）</option>';
-    document.getElementById('kwCategory').innerHTML = '';
-    document.getElementById('kwProduct').innerHTML = '';
-    renderKwList([]);
-    return;
-  }
-  ind.innerHTML = inds.map(n => `<option value="${n}">${n}</option>`).join('');
-  onIndustry();
-}
-// 行业 → 细分品类
-function onIndustry(){
-  applyCountryLang();
-  const box = document.getElementById('kwCategory');
-  const cats = KW_DATA[document.getElementById('kwIndustry').value] || {};
-  const names = Object.keys(cats);
-  box.innerHTML = '<option value="">全部细分品类</option>' + names.map(n => `<option value="${n}">${n}</option>`).join('');
-  onCategory();
-}
-// 细分品类 → 具体产品
-function onCategory(){
-  const i = document.getElementById('kwIndustry').value;
-  const c = document.getElementById('kwCategory').value;
-  const box = document.getElementById('kwProduct');
-  const subs = (KW_DATA[i] || {})[c] || {};
-  const names = Object.keys(subs);
-  box.innerHTML = '<option value="">全部具体产品</option>' + names.map(n => `<option value="${n}">${n}</option>`).join('');
-  onProduct();
-}
-// 三级取词：行业 / 细分品类 / 具体产品
-function onProduct(){
-  const i = document.getElementById('kwIndustry').value;
-  const c = document.getElementById('kwCategory').value;
-  const p = document.getElementById('kwProduct').value;
-  const cats = KW_DATA[i] || {};
-  let list = [];
-  if (!c){
-    list = Object.values(cats).flatMap(subs => Object.values(subs).flat());
-  } else if (!p){
-    list = Object.values(cats[c] || {}).flat();
-  } else {
-    list = (cats[c] || {})[p] || [];
-  }
-  renderKwList(list);
-  renderCombos();          // 「语言」直接决定条件词用哪种语言，改了就刷新预览
-}
-function renderKwList(list){
-  const box = document.getElementById('kwList');
-  const lang = document.getElementById('kwLang').value;
-  box.innerHTML = '';
-  list.forEach(k => {
-    const term = k[lang] || k.en;
-    box.insertAdjacentHTML('beforeend',
-      `<div class="kw-item"><label class="kw-lab"><input type="checkbox" class="kw-chk" value="${term}"></label><span class="kw-en">${term}</span><span class="kw-cn">${k.cn}</span><button class="kw-copy" onclick="copyKw(this)">复制</button></div>`);
-  });
-}
-function copyKw(btn){
-  const text = btn.parentElement.querySelector('.kw-en').textContent;
-  navigator.clipboard.writeText(text).then(()=>{
-    btn.textContent = '已复制';
-    setTimeout(()=>{ btn.textContent = '复制'; }, 1200);
-  });
-}
-function copyChecked(){
-  const picks = [...document.querySelectorAll('#kwList .kw-chk:checked')].map(c => c.value);
-  if(!picks.length){ alert('请先勾选要复制的关键词'); return; }
-  navigator.clipboard.writeText(picks.join('\\n')).then(()=>{
-    alert('已复制 ' + picks.length + ' 个关键词');
-  });
-}
-
-// ==================== 关键词组合预览 ====================
-// COND_TMPL[key] = {语言: 公式模板}；条件词按搜索语言本地化，缺失该语言回落英文
-const COND_TMPL = {};
-CONDS.forEach(c => COND_TMPL[c[0]] = c[3] || {en: '{p}'});
-const LANG_CN = {en:'英语', fr:'法语', de:'德语', es:'西班牙语', it:'意大利语',
-                 nl:'荷兰语', tr:'土耳其语', ar:'阿拉伯语', fa:'波斯语'};
-let COMBO_CACHE = [];       // 当前预览里的完整公式纯文本，供「复制全部组合」使用
-
-// 当前搜索语言：优先用「语言」下拉（它已随国家自动联动），没选则取该国的界面语言，最后回落英语。
-// 必须与后端 run_search 取语言的方式一致。
-function curLang(){
-  const kw = document.getElementById('kwLang').value;
-  if (kw) return kw;
-  const gl = COUNTRY_LANG[document.getElementById('countries').value];
-  return gl || 'en';
-}
-// 当前国家筛选参数（写在 URL 上，不在搜索词里）：&gl=fr&hl=fr
-function countryParams(){
-  const code = document.getElementById('countries').value;
-  const gl = COUNTRY_GL[code] || code;
-  const hl = COUNTRY_LANG[code] || gl;
-  return '&gl=' + gl + '&hl=' + hl;
-}
-
-function esc(s){
-  return String(s).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
-}
-// 产品词 → 查询片段。组合规则与后端 run_search 完全一致：
-// OR → 所有词用 OR 连接；AND → 空格连接；分别搜 → 每词一条
-function productQueries(){
-  const raw = document.getElementById('products').value
-    .split('\\n').map(s => s.trim()).filter(Boolean);
-  if (!raw.length) return [];
-  const pwords = raw.map(p => '"' + p.replace(/^"+|"+$/g, '') + '"');
-  const match = (document.querySelector('input[name="match"]:checked') || {}).value || 'or';
-  if (match === 'and')  return [pwords.join(' ')];
-  if (match === 'each') return pwords;
-  return [pwords.join(' OR ')];
-}
-function renderCombos(){
-  const box = document.getElementById('comboList');
-  const sum = document.getElementById('comboSummary');
-  const pqs   = productQueries();
-  const conds = [...document.querySelectorAll('#conds input:checked')];
-  const excl  = [...document.querySelectorAll('#excludes input:checked, #chinaFilters input:checked')]
-    .map(i => i.value).filter(Boolean).join(' ');
-  const csel  = document.getElementById('countries');
-  const cname = (csel.selectedOptions[0] || {}).textContent || '未选择';
-  const lang  = curLang();
-  const args  = countryParams();
-  box.innerHTML = '';
-  COMBO_CACHE = [];
-  if (curSource() === 'maps'){
-    const co    = document.getElementById('countries');
-    const code  = co.value;
-    const cname = (co.selectedOptions[0] || {}).textContent || '未选择';
-    const city  = curCity();
-    const hl    = curLang() || COUNTRY_LANG[code] || 'en';
-    const gl    = COUNTRY_GL[code] || code;
-    if (!pqs.length){
-      sum.textContent = '请先填写「2. 产品关键词」';
-      box.innerHTML = '<div class="cmb-empty">暂无可预览的地图查询</div>';
-      return;
-    }
-    const role  = mapsRoleWord();
-    const urls  = pqs.map(pq => mapsUrlPreview(
-      [pq.replace(/^"+|"+$/g, ''), role].filter(Boolean).join(' '), code, city, hl, gl));
-    COMBO_CACHE.push(...urls);
-    sum.innerHTML = '<b>' + urls.length + '</b> 条地图查询 · 目标国家：' + esc(cname)
-                  + (city ? ' · 城市：' + esc(city) : ' · 未指定城市（只用国家中心视野，精度较低）')
-                  + (role ? ' · 身份词：' + esc(role) : ' · ⚠️ 没勾搜索条件，没有身份词，结果会以餐馆/零售店为主');
-    box.insertAdjacentHTML('beforeend',
-      '<div class="cmb-group"><div class="cmb-head">谷歌地图搜索（点链接可直接打开验证）</div>'
-      + urls.map(u => '<div class="cmb-line"><a href="' + esc(u) + '" target="_blank" rel="noopener">'
-          + esc(u) + '</a></div>').join('')
-      + '</div>');
-    return;
-  }
-  if (!pqs.length || !conds.length){
-    sum.textContent = '请先填写「2. 产品关键词」，并至少勾选一个「3. 搜索条件」';
-    box.innerHTML = '<div class="cmb-empty">暂无可预览的组合</div>';
-    return;
-  }
-  sum.innerHTML = '<b>' + pqs.length + '</b> 个产品组合 × <b>' + conds.length + '</b> 个条件 = <b>'
-                + (pqs.length * conds.length) + '</b> 条查询 · 目标国家：' + esc(cname)
-                + ' · 条件词语言：' + esc(LANG_CN[lang] || lang);
-  conds.forEach(c => {
-    const label = c.parentElement.textContent.trim();
-    const tmplMap = COND_TMPL[c.value] || {};
-    const tmpl  = tmplMap[lang] || tmplMap.en || '{p}';
-    const lines = pqs.map(pq => {
-      const core = tmpl.replace('{p}', pq);
-      return { core: core, full: (core + (excl ? ' ' + excl : '')).trim() };
-    });
-    COMBO_CACHE.push(...lines.map(l => l.full));
-    box.insertAdjacentHTML('beforeend',
-      '<div class="cmb-group"><div class="cmb-head">' + esc(label) + '</div>'
-      + lines.map(l => '<div class="cmb-line">' + esc(l.core)
-          + (excl ? ' <span class="cmb-excl">' + esc(excl) + '</span>' : '')
-          + ' <span class="cmb-arg" title="这两个参数加在搜索 URL 上，决定谷歌按哪个国家/语言给结果，不写进搜索词">'
-          + esc(args) + '</span></div>').join('')
-      + '</div>');
-  });
-}
-function copyCombos(){
-  if (!COMBO_CACHE.length){ alert('暂无可复制的组合'); return; }
-  navigator.clipboard.writeText(COMBO_CACHE.join('\\n')).then(()=>{
-    alert('已复制 ' + COMBO_CACHE.length + ' 条完整公式');
-  });
-}
-// 任何影响组合的输入都实时刷新预览
-document.getElementById('products').addEventListener('input', renderCombos);
-document.getElementById('mapsCity').addEventListener('input', renderCombos);
-document.querySelectorAll('input[name="match"]').forEach(r => r.addEventListener('change', renderCombos));
-document.addEventListener('change', e => {
-  if (e.target.closest && e.target.closest('#conds, #excludes, #chinaFilters')) renderCombos();
-});
-onSource();   // 初始化：按默认数据源摆好界面，并渲染一次预览
-
-loadKeywords();
-</script>
-</body>
-</html>
-"""
-
-# 填充页面里的条件和国家（用 Python 注入，避免 JS 里写中文 JSON 出问题）
-def _build_page():
-    # (key, 名称, 是否默认勾选, {语言: 公式模板}) —— 模板给前端做「关键词组合预览」，
-    # 按当前选择的搜索语言取，保证预览与实际查询（run_search 里 cond_template）一致
-    tmpl_map = {k: {lg: cond_template(k, lg) for lg in COND_LANGS} for k, _ in CONDITIONS}
-    default_on = ('wholesale', 'importer')
-    conds_js = [(k, name, k in default_on, tmpl_map.get(k, {'en': '{p}'}))
-                for k, name in CONDITIONS]
-    # 默认勾选美国；(代码, 名称, 是否默认勾选, 该国语言 hl, gl) —— hl/gl 用于「国家→语言」联动
-    # 和预览里显示国家筛选参数（gl=fr&hl=fr）
-    counts_js = [(k, name, k == 'us', hl, gl) for k, name, gl, hl in COUNTRIES]
-    excls_js = [(k, v, d) for k, v, d in EXCLUDE_OPTIONS]
-    china_js = [(k, q, label, desc) for k, q, label, desc in CHINA_FILTER_OPTIONS]
-    # 国家代码 → [纬度, 经度]：给前端拼地图搜索 URL 用，与后端 COUNTRY_CENTERS 同源
-    centers_js = {k: [lat, lng] for k, (lat, lng) in COUNTRY_CENTERS.items()}
-    # 条件 → {语言: 该条件角色词的第一个词}：地图模式要把它拼进查询词，前端预览必须与后端一致
-    roles_js = {k: {lg: (v.get(lg) or v.get('en') or '').split(' OR ')[0].strip().strip('"')
-                    for lg in COND_LANGS}
-                for k, v in COND_ROLES.items()}
-    import json as _json
-    html = PAGE_HTML.replace('CONDS_PLACEHOLDER', _json.dumps(conds_js, ensure_ascii=False))
-    html = html.replace('COUNTS_PLACEHOLDER', _json.dumps(counts_js, ensure_ascii=False))
-    html = html.replace('EXCLS_PLACEHOLDER', _json.dumps(excls_js, ensure_ascii=False))
-    html = html.replace('CHINA_FILTERS_PLACEHOLDER', _json.dumps(china_js, ensure_ascii=False))
-    html = html.replace('MAPS_CENTERS_PLACEHOLDER', _json.dumps(centers_js))
-    html = html.replace('MAPS_ROLES_PLACEHOLDER', _json.dumps(roles_js, ensure_ascii=False))
-    return html
-
-
-PAGE_HTML = _build_page()
-
-
 # 启动端口候选：优先保持原来的 5000，被系统保留/占用就往后面顺延
+# ⚠️ Chrome 扩展（extension/ports.js 的 DP_PREFERRED_PORTS）按同一批候选逐个试 /api/ping。
+#    改这里就必须改那边，两边都留了指向对方的注释；.workbuddy/_check_ext.py 的 C 组会把
+#    「两边是否一致」当成硬断言 —— 一旦漂了，回归会直接红。
 PREFERRED_PORTS = (5000, 8000, 8080, 8765, 9000, 7000, 6500, 5800, 5555)
 
 
@@ -2809,8 +2495,11 @@ if __name__ == '__main__':
         print(f'⚠️ 首选端口 {PREFERRED_PORTS[0]} 不能用：{PORT_REASON}')
         print(f'   已自动改用端口 {PORT}。'
               f'（Windows 把成片端口保留给 Hyper-V/WinNAT，属正常现象，不影响使用）')
+    # 回填真实端口：/api/ping 会把它告诉 Chrome 扩展（扩展靠它发现该连哪个端口）
+    _RUN_PORT = PORT
     url = f'http://{HOST}:{PORT}/'
     print(f'启动本地网页服务：{url}')
+    print(f'  手动采集页：{url}manual      页面右上角扩展请连端口 {PORT}')
     print('请在浏览器中打开（若未自动打开请手动访问）')
     webbrowser.open(url)
     app.run(host=HOST, port=PORT, threaded=True, debug=False)

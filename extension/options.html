@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>设置 · 外贸客户采集助手</title>
+<link rel="stylesheet" href="options.css">
+</head>
+<body>
+<div class="wrap">
+  <h1>外贸客户采集助手 · 设置</h1>
+  <div class="sub">这里的默认值会在点「采集」时带上；也可以在采集面板上临时改（勾「记住」即写回这里）。</div>
+
+  <div class="card">
+    <h3>连接</h3>
+    <div class="row">
+      <span class="lbl">本机「谷歌客户开发工具」</span>
+      <span class="pill" id="connState">检测中…</span>
+      <button class="btn" id="btnTest">测试连接</button>
+      <button class="btn" id="btnReprobe">重新探测端口</button>
+    </div>
+    <div class="note" id="connNote">
+      本工具的端口每次启动都可能不一样（Windows 会把成片端口保留给 Hyper-V/WinNAT，
+      保留段每次开机漂移），所以扩展是逐个试候选端口、用 <code>/api/ping</code> 确认身份的。
+    </div>
+    <div class="row" style="margin-top:10px;">
+      <label class="radio"><input type="radio" name="portMode" value="auto" id="pmAuto">
+        自动探测（推荐）</label>
+      <label class="radio"><input type="radio" name="portMode" value="fixed" id="pmFixed">
+        固定端口</label>
+      <input type="number" id="portFixed" min="1024" max="65535" placeholder="如 8000">
+    </div>
+    <div class="note">只有在自动探测被什么拦住时才需要填固定端口；填了也会先试它、不行再回退到自动探测。</div>
+  </div>
+
+  <div class="card">
+    <h3>采集默认值</h3>
+    <div class="row">
+      <div><span class="lbl">默认行业</span>
+        <select id="industry"><option value="">自动判断</option></select></div>
+      <div><span class="lbl">默认国家 / 地区</span>
+        <input type="text" id="country" placeholder="可留空，如 法国"></div>
+    </div>
+    <label class="chk"><input type="checkbox" id="upgrade">
+      抓不到邮箱时升级到浏览器（开 Chromium 完整抓一遍，更全但单条要几秒）</label>
+    <label class="chk"><input type="checkbox" id="fabEnabled">
+      在网页右下角显示「采集本页」悬浮按钮（关掉后仍有右键菜单和工具栏面板）</label>
+  </div>
+
+  <div class="card">
+    <h3>已隐藏悬浮按钮的网站</h3>
+    <div class="note">在网页上点悬浮按钮旁的 <b>×</b> 就会往这里加一条。清空后刷新网页按钮就回来了。</div>
+    <div class="pillbox" id="hideList">（空）</div>
+    <button class="btn" id="btnClearHide">清空列表</button>
+  </div>
+
+  <div class="card">
+    <h3>用法速查</h3>
+    <ol class="steps">
+      <li>先双击项目里的 <code>启动客户开发工具.bat</code>，让它跑起来。</li>
+      <li>随便打开一个客户网站，右下角出现蓝色「采集本页」→ 点一下即入库。</li>
+      <li>也可以在页面任意处右键 →「采集本页为客户」；<b>在链接上右键</b>可以不用点进去直接采。</li>
+      <li>点工具栏图标打开面板：采集当前页、临时改行业/国家、跳转「手动采集页」。</li>
+      <li>采集是追加到本轮的 <code>output/</code> 结果 Excel 里的，并会记进客户库（按网址去重）。</li>
+    </ol>
+  </div>
+
+  <div class="bar">
+    <button class="btn primary" id="btnSave">保存设置</button>
+    <span class="saved" id="savedMsg"></span>
+  </div>
+</div>
+<script src="options.js"></script>
+</body>
+</html>

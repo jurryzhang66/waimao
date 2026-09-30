@@ -1,0 +1,1062 @@
+{
+  "宠物用品": {
+    "猫砂垫": {
+      "猫砂盆内衬垫（通用）": [
+        {
+          "en": "Cat Litter Box Liners",
+          "cn": "猫砂盆内衬垫（完整全称，搜索最准）",
+          "de": "Katzentoiletten-Einlagen",
+          "fr": "Doublures pour bac à litière",
+          "es": "Forros para caja de arena para gatos",
+          "ar": "بطانات صندوق فضلات القطط",
+          "it": "rivestimenti per lettiera per gatti",
+          "nl": "voeringen voor kattenbak",
+          "tr": "kedi tuvaleti astarı"
+        },
+        {
+          "en": "Litter Box Liners",
+          "cn": "猫砂盆衬垫（美式最常用说法）",
+          "de": "Katzenklo-Einlagen",
+          "fr": "Doublures de bac à litière",
+          "es": "Forros para arenero",
+          "ar": "بطانات صندوق الفضلات",
+          "it": "rivestimenti per lettiera",
+          "nl": "kattenbak voeringen",
+          "tr": "kedi tuvaleti poşeti"
+        },
+        {
+          "en": "Cat Litter Liners",
+          "cn": "猫砂垫（简化说法）",
+          "de": "Katzenstreu-Einlagen",
+          "fr": "Doublures de litière pour chat",
+          "es": "Forros de arena para gatos",
+          "ar": "بطانات فضلات القطط",
+          "it": "rivestimenti per lettiera gatto",
+          "nl": "kattenbak voering",
+          "tr": "kedi kumu astarı"
+        },
+        {
+          "en": "Litter Tray Liners",
+          "cn": "猫砂托盘衬垫（英式/欧洲说法）",
+          "de": "Katzentoiletten-Schalen-Einlagen",
+          "fr": "Doublures pour plateau à litière",
+          "es": "Forros para bandeja de arena",
+          "ar": "بطانات صينية الفضلات",
+          "it": "rivestimenti per vassoio lettiera",
+          "nl": "inlegvellen voor kattenbak",
+          "tr": "kedi tuvaleti tepsisi astarı"
+        },
+        {
+          "en": "Litter Pan Liners",
+          "cn": "猫砂盘衬垫",
+          "de": "Katzentoiletten-Pfannen-Einlagen",
+          "fr": "Doublures pour bac de litière",
+          "es": "Forros para bandeja de gato",
+          "ar": "بطانات وعاء الفضلات",
+          "it": "rivestimenti per vaschetta lettiera",
+          "nl": "voering voor kattenbak lade",
+          "tr": "kedi tuvaleti küveti astarı"
+        },
+        {
+          "en": "Cat Pan Liners",
+          "cn": "猫砂盘衬垫（简写）",
+          "de": "Katzenpfannen-Einlagen",
+          "fr": "Doublures pour bac à litière pour chat",
+          "es": "Forros para bandeja de gato",
+          "ar": "بطانات وعاء القطط",
+          "it": "rivestimenti per vaschetta gatto",
+          "nl": "kattenbak lade voering",
+          "tr": "kedi küveti astarı"
+        }
+      ],
+      "一次性猫砂垫": [
+        {
+          "en": "Disposable Litter Box Liners",
+          "cn": "一次性猫砂盆衬垫",
+          "de": "Einweg-Katzenklo-Einlagen",
+          "fr": "Doublures jetables pour bac à litière",
+          "es": "Forros desechables para caja de arena",
+          "ar": "بطانات صندوق فضلات للاستعمال مرة واحدة",
+          "it": "rivestimenti usa e getta per lettiera",
+          "nl": "wegwerp voeringen voor kattenbak",
+          "tr": "tek kullanımlık kedi tuvaleti astarı"
+        },
+        {
+          "en": "Litter Box Liner Bags",
+          "cn": "猫砂盆衬垫袋",
+          "de": "Katzenklo-Einlagen-Beutel",
+          "fr": "Sacs doublure pour bac à litière",
+          "es": "Bolsas forro para caja de arena",
+          "ar": "أكياس بطانات صندوق الفضلات",
+          "it": "sacchetti per lettiera per gatti",
+          "nl": "kattenbakzakken",
+          "tr": "kedi tuvaleti poşetleri"
+        },
+        {
+          "en": "bulk litter box liners",
+          "cn": "散装猫砂盆内衬垫（整柜批发）",
+          "de": "Katzenklo-Einlagen in Großpackung",
+          "fr": "doublures bac à litière en gros",
+          "es": "forros para caja de arena al por mayor",
+          "ar": "بطانات صندوق فضلات القطط بالجملة",
+          "it": "rivestimenti per lettiera all'ingrosso",
+          "nl": "voeringen voor kattenbak in bulk",
+          "tr": "toptan kedi tuvaleti astarı"
+        },
+        {
+          "en": "litter box liner refills",
+          "cn": "猫砂盆内衬垫补充装",
+          "de": "Nachfüll-Einlagen für Katzenklo",
+          "fr": "recharges de doublures bac à litière",
+          "es": "recambios de forros para caja de arena",
+          "ar": "عبوات إعادة تعبئة بطانات صندوق الفضلات",
+          "it": "ricambi rivestimenti per lettiera",
+          "nl": "navullingen kattenbak voeringen",
+          "tr": "yedek kedi tuvaleti astarı"
+        },
+        {
+          "en": "extra large litter box liners",
+          "cn": "加大号猫砂盆内衬垫",
+          "de": "extra große Katzenklo-Einlagen",
+          "fr": "doublures grand format pour bac à litière",
+          "es": "forros extragrandes para caja de arena",
+          "ar": "بطانات صندوق فضلات كبيرة الحجم",
+          "it": "rivestimenti per lettiera extra grandi",
+          "nl": "extra grote voeringen voor kattenbak",
+          "tr": "ekstra büyük kedi tuvaleti astarı"
+        }
+      ],
+      "自动猫砂盆内衬垫": [
+        {
+          "en": "Self-Cleaning Litter Box Liners",
+          "cn": "自动清洁猫砂盆衬垫",
+          "de": "Einlagen für selbstreinigende Katzenklos",
+          "fr": "Doublures pour bac à litière autonettoyant",
+          "es": "Forros para arenero autolimpiante",
+          "ar": "بطانات صندوق فضلات ذاتي التنظيف",
+          "it": "rivestimenti per lettiera autopulente",
+          "nl": "voeringen voor zelfreinigende kattenbak",
+          "tr": "kendini temizleyen kedi tuvaleti astarı"
+        },
+        {
+          "en": "Litter Box Replacement Liners",
+          "cn": "猫砂盆替换/备用衬垫",
+          "de": "Ersatz-Einlagen für Katzenklo",
+          "fr": "Doublures de remplacement pour bac à litière",
+          "es": "Forros de repuesto para caja de arena",
+          "ar": "بطانات بديلة لصندوق الفضلات",
+          "it": "rivestimenti di ricambio per lettiera",
+          "nl": "vervangende voeringen voor kattenbak",
+          "tr": "yedek astar kedi tuvaleti"
+        }
+      ]
+    }
+  },
+  "LED照明": {
+    "LED灯": {
+      "LED灯具（通用）": [
+        {
+          "en": "led light",
+          "cn": "LED灯（核心词）",
+          "de": "LED-Leuchte",
+          "fr": "lampe LED",
+          "es": "luz LED",
+          "ar": "مصباح LED",
+          "it": "luce LED",
+          "nl": "led licht",
+          "tr": "led ışık"
+        },
+        {
+          "en": "led lighting",
+          "cn": "LED照明（同义/行业词）",
+          "de": "LED-Beleuchtung",
+          "fr": "éclairage LED",
+          "es": "iluminación LED",
+          "ar": "إضاءة LED",
+          "it": "illuminazione LED",
+          "nl": "led verlichting",
+          "tr": "led aydınlatma"
+        },
+        {
+          "en": "led lamp",
+          "cn": "LED灯/灯具（同义）",
+          "de": "LED-Lampe",
+          "fr": "lampe à LED",
+          "es": "lámpara LED",
+          "ar": "مصباح LED",
+          "it": "lampada LED",
+          "nl": "led lampen",
+          "tr": "led lamba"
+        },
+        {
+          "en": "led bulb",
+          "cn": "LED灯泡",
+          "de": "LED-Glühbirne",
+          "fr": "ampoule LED",
+          "es": "bombilla LED",
+          "ar": "لمبة LED",
+          "it": "lampadina LED",
+          "nl": "led peer",
+          "tr": "led ampul"
+        },
+        {
+          "en": "led strip light",
+          "cn": "LED灯带",
+          "de": "LED-Streifenlicht",
+          "fr": "ruban LED",
+          "es": "tira LED",
+          "ar": "شريط إضاءة LED",
+          "it": "striscia LED",
+          "nl": "led strip",
+          "tr": "led şerit"
+        },
+        {
+          "en": "commercial led lighting",
+          "cn": "商用LED照明",
+          "de": "gewerbliche LED-Beleuchtung",
+          "fr": "éclairage LED professionnel",
+          "es": "iluminación LED comercial",
+          "ar": "إضاءة LED تجارية",
+          "it": "illuminazione LED commerciale",
+          "nl": "commerciële led verlichting",
+          "tr": "ticari led aydınlatma"
+        }
+      ],
+      "LED路灯": [
+        {
+          "en": "led street light",
+          "cn": "LED路灯（细分品类）",
+          "de": "LED-Straßenleuchte",
+          "fr": "lampadaire LED",
+          "es": "farola LED",
+          "ar": "مصباح شارع LED",
+          "it": "lampione LED",
+          "nl": "led straatlantaarn",
+          "tr": "led sokak lambası"
+        }
+      ],
+      "LED面板灯": [
+        {
+          "en": "led panel light",
+          "cn": "LED面板灯（细分品类）",
+          "de": "LED-Panelleuchte",
+          "fr": "panneau LED",
+          "es": "panel de luz LED",
+          "ar": "لوحة إضاءة LED",
+          "it": "pannello LED",
+          "nl": "led paneel",
+          "tr": "led panel"
+        }
+      ]
+    }
+  },
+  "家具": {
+    "家具": {
+      "通用家具": [
+        {
+          "en": "furniture",
+          "cn": "家具（核心词）",
+          "de": "Möbel",
+          "fr": "meubles",
+          "es": "muebles",
+          "ar": "أثاث",
+          "it": "arredamento",
+          "nl": "meubels",
+          "tr": "mobilya"
+        },
+        {
+          "en": "home furniture",
+          "cn": "家用家具（细分）",
+          "de": "Wohnmöbel",
+          "fr": "mobilier de maison",
+          "es": "muebles de hogar",
+          "ar": "أثاث منزلي",
+          "it": "mobili per la casa",
+          "nl": "meubels voor thuis",
+          "tr": "ev mobilyası"
+        },
+        {
+          "en": "living room furniture",
+          "cn": "客厅家具",
+          "de": "Wohnzimmermöbel",
+          "fr": "mobilier de salon",
+          "es": "muebles de salón",
+          "ar": "أثاث غرفة المعيشة",
+          "it": "mobili per soggiorno",
+          "nl": "woonkamer meubels",
+          "tr": "oturma odası mobilyası"
+        }
+      ],
+      "办公家具": [
+        {
+          "en": "office furniture",
+          "cn": "办公家具（细分）",
+          "de": "Büromöbel",
+          "fr": "mobilier de bureau",
+          "es": "mobiliario de oficina",
+          "ar": "أثاث مكتبي",
+          "it": "mobili per ufficio",
+          "nl": "kantoormeubels",
+          "tr": "ofis mobilyası"
+        }
+      ],
+      "沙发": [
+        {
+          "en": "sofa",
+          "cn": "沙发（品类）",
+          "de": "Sofa",
+          "fr": "canapé",
+          "es": "sofá",
+          "ar": "أريكة",
+          "it": "divano",
+          "nl": "bank",
+          "tr": "kanepe"
+        },
+        {
+          "en": "divan sofa",
+          "cn": "迪万沙发（中东/北非长椅沙发）",
+          "de": "Divan-Sofa",
+          "fr": "divan",
+          "es": "sofá diván",
+          "ar": "أريكة ديوان",
+          "it": "divano orientale",
+          "nl": "divan bank",
+          "tr": "divan kanepe"
+        }
+      ],
+      "餐桌": [
+        {
+          "en": "dining table",
+          "cn": "餐桌（品类）",
+          "de": "Esstisch",
+          "fr": "table à manger",
+          "es": "mesa de comedor",
+          "ar": "طاولة طعام",
+          "it": "tavolo da pranzo",
+          "nl": "eettafel",
+          "tr": "yemek masası"
+        }
+      ]
+    }
+  },
+  "服装": {
+    "服装": {
+      "通用服装": [
+        {
+          "en": "clothing",
+          "cn": "服装（核心词）",
+          "de": "Kleidung",
+          "fr": "vêtements",
+          "es": "ropa",
+          "ar": "ملابس",
+          "it": "abbigliamento",
+          "nl": "kleding",
+          "tr": "giyim"
+        },
+        {
+          "en": "apparel",
+          "cn": "服装/成衣（同义·美式）",
+          "de": "Bekleidung",
+          "fr": "habillement",
+          "es": "prendas de vestir",
+          "ar": "ملابس جاهزة",
+          "it": "vestiario",
+          "nl": "confectiekleding",
+          "tr": "konfeksiyon"
+        },
+        {
+          "en": "garment",
+          "cn": "服装/成衣（同义·通用）",
+          "de": "Kleidungsstück",
+          "fr": "vêtement",
+          "es": "prenda",
+          "ar": "قطعة ملابس",
+          "it": "indumento",
+          "nl": "kledingstuk",
+          "tr": "giysi"
+        },
+        {
+          "en": "ready to wear clothing",
+          "cn": "成衣/高级成衣",
+          "de": "Konfektionskleidung",
+          "fr": "prêt-à-porter",
+          "es": "ropa prêt-à-porter",
+          "ar": "ملابس جاهزة للارتداء",
+          "it": "prêt-à-porter",
+          "nl": "prêt-à-porter",
+          "tr": "hazır giyim"
+        },
+        {
+          "en": "textile garment",
+          "cn": "纺织成衣",
+          "de": "Textilbekleidung",
+          "fr": "textile habillement",
+          "es": "prendas textiles",
+          "ar": "ملابس نسيجية",
+          "it": "abbigliamento tessile",
+          "nl": "textiele kleding",
+          "tr": "tekstil giyim"
+        },
+        {
+          "en": "wholesale clothing",
+          "cn": "批发服装",
+          "de": "Großhandel Bekleidung",
+          "fr": "vêtements en gros",
+          "es": "ropa al por mayor",
+          "ar": "ملابس بالجملة",
+          "it": "abbigliamento all'ingrosso",
+          "nl": "kleding groothandel",
+          "tr": "toptan giyim"
+        }
+      ],
+      "女装": [
+        {
+          "en": "women's clothing",
+          "cn": "女装（细分）",
+          "de": "Damenbekleidung",
+          "fr": "vêtements pour femmes",
+          "es": "ropa de mujer",
+          "ar": "ملابس نسائية",
+          "it": "abbigliamento da donna",
+          "nl": "dameskleding",
+          "tr": "kadın giyim"
+        }
+      ],
+      "运动服": [
+        {
+          "en": "sportswear",
+          "cn": "运动服（细分）",
+          "de": "Sportbekleidung",
+          "fr": "vêtements de sport",
+          "es": "ropa deportiva",
+          "ar": "ملابس رياضية",
+          "it": "abbigliamento sportivo",
+          "nl": "sportkleding",
+          "tr": "spor giyim"
+        }
+      ]
+    }
+  },
+  "机械零部件": {
+    "机械零部件": {
+      "通用机械零件": [
+        {
+          "en": "mechanical parts",
+          "cn": "机械零件（核心词）",
+          "de": "Maschinenteile",
+          "fr": "pièces mécaniques",
+          "es": "piezas mecánicas",
+          "ar": "قطع ميكانيكية",
+          "it": "parti meccaniche",
+          "nl": "mechanische onderdelen",
+          "tr": "mekanik parçalar"
+        },
+        {
+          "en": "machined parts",
+          "cn": "机加工件（细分）",
+          "de": "bearbeitete Teile",
+          "fr": "pièces usinées",
+          "es": "piezas mecanizadas",
+          "ar": "قطع مشغولة",
+          "it": "parti lavorate",
+          "nl": "bewerkte onderdelen",
+          "tr": "işlenmiş parçalar"
+        },
+        {
+          "en": "spare parts",
+          "cn": "备件/配件",
+          "de": "Ersatzteile",
+          "fr": "pièces détachées",
+          "es": "piezas de repuesto",
+          "ar": "قطع غيار",
+          "it": "ricambi",
+          "nl": "reserveonderdelen",
+          "tr": "yedek parça"
+        },
+        {
+          "en": "mechanical components",
+          "cn": "机械组件/部件",
+          "de": "mechanische Komponenten",
+          "fr": "composants mécaniques",
+          "es": "componentes mecánicos",
+          "ar": "مكونات ميكانيكية",
+          "it": "componenti meccanici",
+          "nl": "mechanische componenten",
+          "tr": "mekanik bileşenler"
+        }
+      ],
+      "CNC加工件": [
+        {
+          "en": "cnc parts",
+          "cn": "CNC加工件（细分）",
+          "de": "CNC-Teile",
+          "fr": "pièces CNC",
+          "es": "piezas CNC",
+          "ar": "قطع CNC",
+          "it": "parti CNC",
+          "nl": "cnc onderdelen",
+          "tr": "cnc parçaları"
+        },
+        {
+          "en": "precision machining",
+          "cn": "精密加工",
+          "de": "Präzisionsbearbeitung",
+          "fr": "usinage de précision",
+          "es": "mecanizado de precisión",
+          "ar": "تشغيل آلي دقيق",
+          "it": "lavorazioni di precisione",
+          "nl": "precisiebewerking",
+          "tr": "hassas işleme"
+        }
+      ],
+      "轴承": [
+        {
+          "en": "bearings",
+          "cn": "轴承（品类）",
+          "de": "Lager",
+          "fr": "roulements",
+          "es": "rodamientos",
+          "ar": "محامل",
+          "it": "cuscinetti",
+          "nl": "lagers",
+          "tr": "rulmanlar"
+        }
+      ],
+      "汽车零部件": [
+        {
+          "en": "auto parts",
+          "cn": "汽车零部件（品类）",
+          "de": "Autoteile",
+          "fr": "pièces automobiles",
+          "es": "piezas de automóvil",
+          "ar": "قطع غيار السيارات",
+          "it": "ricambi auto",
+          "nl": "auto-onderdelen",
+          "tr": "oto yedek parça"
+        }
+      ]
+    }
+  },
+  "户外用品": {
+    "户外装备": {
+      "通用户外装备": [
+        {
+          "en": "outdoor gear",
+          "cn": "户外装备（核心词）",
+          "de": "Outdoor-Ausrüstung",
+          "fr": "équipement de plein air",
+          "es": "equipo de exterior",
+          "ar": "معدات خارجية",
+          "it": "attrezzatura da esterno",
+          "nl": "outdoor uitrusting",
+          "tr": "outdoor ekipman"
+        },
+        {
+          "en": "outdoor clothing",
+          "cn": "户外服装",
+          "de": "Outdoor-Bekleidung",
+          "fr": "vêtements de plein air",
+          "es": "ropa de exterior",
+          "ar": "ملابس خارجية",
+          "it": "abbigliamento da esterno",
+          "nl": "outdoor kleding",
+          "tr": "outdoor giyim"
+        }
+      ],
+      "露营装备": [
+        {
+          "en": "camping equipment",
+          "cn": "露营装备（细分）",
+          "de": "Campingausrüstung",
+          "fr": "matériel de camping",
+          "es": "equipo de camping",
+          "ar": "معدات التخييم",
+          "it": "attrezzatura da campeggio",
+          "nl": "campinguitrusting",
+          "tr": "kamp ekipmanları"
+        },
+        {
+          "en": "tent",
+          "cn": "帐篷（品类）",
+          "de": "Zelt",
+          "fr": "tente",
+          "es": "tienda de campaña",
+          "ar": "خيمة",
+          "it": "tenda",
+          "nl": "tent",
+          "tr": "çadır"
+        },
+        {
+          "en": "survival gear",
+          "cn": "生存装备",
+          "de": "Survival-Ausrüstung",
+          "fr": "équipement de survie",
+          "es": "equipo de supervivencia",
+          "ar": "معدات البقاء",
+          "it": "attrezzatura di sopravvivenza",
+          "nl": "survivaluitrusting",
+          "tr": "hayatta kalma ekipmanı"
+        }
+      ],
+      "徒步装备": [
+        {
+          "en": "hiking gear",
+          "cn": "徒步装备（细分）",
+          "de": "Wanderausrüstung",
+          "fr": "équipement de randonnée",
+          "es": "equipo de senderismo",
+          "ar": "معدات المشي",
+          "it": "attrezzatura da trekking",
+          "nl": "wandeluitrusting",
+          "tr": "yürüyüş ekipmanı"
+        },
+        {
+          "en": "backpack",
+          "cn": "背包（品类）",
+          "de": "Rucksack",
+          "fr": "sac à dos",
+          "es": "mochila",
+          "ar": "حقيبة ظهر",
+          "it": "zaino",
+          "nl": "rugzak",
+          "tr": "sırt çantası"
+        },
+        {
+          "en": "hiking equipment",
+          "cn": "徒步装备",
+          "de": "Wanderausstattung",
+          "fr": "matériel de randonnée",
+          "es": "material de senderismo",
+          "ar": "عتاد المشي",
+          "it": "attrezzatura per escursioni",
+          "nl": "trekkinguitrusting",
+          "tr": "trekking ekipmanı"
+        }
+      ]
+    }
+  },
+  "食品": {
+    "挂面": {
+      "挂面（通用长面）": [
+        {
+          "en": "dried noodles",
+          "cn": "挂面（核心词，最准）",
+          "de": "getrocknete Nudeln",
+          "fr": "nouilles séchées",
+          "es": "fideos secos",
+          "ar": "نودلز مجففة",
+          "fa": "رشته خشک",
+          "it": "noodles secchi",
+          "nl": "gedroogde noedels",
+          "tr": "kuru erişte"
+        },
+        {
+          "en": "noodles",
+          "cn": "面条（通用大词，铺量用）",
+          "de": "Nudeln",
+          "fr": "nouilles",
+          "es": "fideos",
+          "ar": "نودلز",
+          "fa": "رشته",
+          "it": "noodles",
+          "nl": "noedels",
+          "tr": "erişte"
+        },
+        {
+          "en": "chinese noodles",
+          "cn": "中国面条",
+          "de": "chinesische Nudeln",
+          "fr": "nouilles chinoises",
+          "es": "fideos chinos",
+          "ar": "نودلز صينية",
+          "fa": "رشته چینی",
+          "it": "noodles cinesi",
+          "nl": "Chinese noedels",
+          "tr": "Çin eriştesi"
+        },
+        {
+          "en": "asian noodles",
+          "cn": "亚洲面条",
+          "de": "asiatische Nudeln",
+          "fr": "nouilles asiatiques",
+          "es": "fideos asiáticos",
+          "ar": "نودلز آسيوية",
+          "fa": "رشته آسیایی",
+          "it": "noodles asiatici",
+          "nl": "Aziatische noedels",
+          "tr": "Asya eriştesi"
+        },
+        {
+          "en": "long noodles",
+          "cn": "长面条",
+          "de": "lange Nudeln",
+          "fr": "nouilles longues",
+          "es": "fideos largos",
+          "ar": "نودلز طويلة",
+          "fa": "رشته بلند",
+          "it": "noodles lunghi",
+          "nl": "lange noedels",
+          "tr": "uzun erişte"
+        },
+        {
+          "en": "macaroni",
+          "cn": "通心粉/干面条（中东通用）",
+          "de": "Makkaroni",
+          "fr": "macaroni",
+          "es": "macarrones",
+          "ar": "مكرونة",
+          "fa": "ماکارونی",
+          "it": "maccheroni",
+          "nl": "macaroni",
+          "tr": "makarna"
+        }
+      ],
+      "细挂面/龙须面": [
+        {
+          "en": "fine dried noodles",
+          "cn": "细挂面（出口报关常用说法）",
+          "de": "feine getrocknete Nudeln",
+          "fr": "nouilles fines séchées",
+          "es": "fideos finos secos",
+          "ar": "نودلز رفيعة مجففة",
+          "fa": "رشته نازک",
+          "it": "noodles fini secchi",
+          "nl": "fijne gedroogde noedels",
+          "tr": "ince kuru erişte"
+        },
+        {
+          "en": "vermicelli",
+          "cn": "细面条/粉丝（中东最常见的叫法）",
+          "de": "Fadennudeln",
+          "fr": "vermicelles",
+          "es": "fideos finos",
+          "ar": "شعيرية",
+          "fa": "ورمیشل",
+          "it": "vermicelli",
+          "nl": "vermicelli",
+          "tr": "tel şehriye"
+        }
+      ],
+      "鸡蛋面": [
+        {
+          "en": "egg noodles",
+          "cn": "鸡蛋面（细分品类）",
+          "de": "Eiernudeln",
+          "fr": "nouilles aux œufs",
+          "es": "fideos con huevo",
+          "ar": "نودلز بالبيض",
+          "fa": "رشته تخممرغی",
+          "it": "noodles all'uovo",
+          "nl": "eiernoedels",
+          "tr": "yumurtalı erişte"
+        }
+      ],
+      "小麦面条": [
+        {
+          "en": "wheat noodles",
+          "cn": "小麦面条（按原料）",
+          "de": "Weizennudeln",
+          "fr": "nouilles de blé",
+          "es": "fideos de trigo",
+          "ar": "نودلز القمح",
+          "fa": "رشته گندم",
+          "it": "noodles di grano",
+          "nl": "tarwenoedels",
+          "tr": "buğday eriştesi"
+        }
+      ],
+      "阿什汤面": [
+        {
+          "en": "ash noodles",
+          "cn": "阿什汤专用面（伊朗传统）",
+          "de": "Ash-Nudeln",
+          "fr": "nouilles pour ash",
+          "es": "fideos para ash",
+          "ar": "نودلز الآش",
+          "fa": "رشته آشی",
+          "it": "noodles per ash",
+          "nl": "noedels voor ash",
+          "tr": "aş eriştesi"
+        },
+        {
+          "en": "reshteh polo noodles",
+          "cn": "伊朗抓饭用面",
+          "de": "Reshteh-Polo-Nudeln",
+          "fr": "nouilles pour riz polo",
+          "es": "fideos para arroz polo",
+          "ar": "نودلز بولو",
+          "fa": "رشته پلویی",
+          "it": "noodles reshteh polo",
+          "nl": "reshteh polo noedels",
+          "tr": "reşte polo eriştesi"
+        }
+      ]
+    },
+    "食用油": {
+      "芝麻油": [
+        {
+          "en": "sesame oil",
+          "cn": "芝麻油（核心词，最准）",
+          "de": "Sesamöl",
+          "fr": "huile de sésame",
+          "es": "aceite de sésamo",
+          "ar": "زيت السمسم",
+          "fa": "روغن کنجد",
+          "it": "olio di sesamo",
+          "nl": "sesamolie",
+          "tr": "susam yağı"
+        },
+        {
+          "en": "roasted sesame oil",
+          "cn": "香油/焙炒芝麻油（风味油）",
+          "de": "geröstetes Sesamöl",
+          "fr": "huile de sésame torréfiée",
+          "es": "aceite de sésamo tostado",
+          "ar": "زيت السمسم المحمص",
+          "fa": "روغن کنجد بوداده",
+          "it": "olio di sesamo tostato",
+          "nl": "geroosterde sesamolie",
+          "tr": "kavrulmuş susam yağı"
+        },
+        {
+          "en": "refined sesame oil",
+          "cn": "精炼芝麻油（大宗贸易说法）",
+          "de": "raffiniertes Sesamöl",
+          "fr": "huile de sésame raffinée",
+          "es": "aceite de sésamo refinado",
+          "ar": "زيت السمسم المكرر",
+          "fa": "روغن کنجد تصفیهشده",
+          "it": "olio di sesamo raffinato",
+          "nl": "geraffineerde sesamolie",
+          "tr": "rafine susam yağı"
+        },
+        {
+          "en": "cold pressed sesame oil",
+          "cn": "冷压芝麻油",
+          "de": "kaltgepresstes Sesamöl",
+          "fr": "huile de sésame pressée à froid",
+          "es": "aceite de sésamo prensado en frío",
+          "ar": "زيت السمسم المعصور على البارد",
+          "fa": "روغن کنجد سرد فشرده",
+          "it": "olio di sesamo pressato a freddo",
+          "nl": "koudgeperste sesamolie",
+          "tr": "soğuk sıkım susam yağı"
+        },
+        {
+          "en": "organic sesame oil",
+          "cn": "有机芝麻油",
+          "de": "Bio-Sesamöl",
+          "fr": "huile de sésame bio",
+          "es": "aceite de sésamo ecológico",
+          "ar": "زيت السمسم العضوي",
+          "fa": "روغن کنجد ارگانیک",
+          "it": "olio di sesamo biologico",
+          "nl": "biologische sesamolie",
+          "tr": "organik susam yağı"
+        },
+        {
+          "en": "bulk sesame oil",
+          "cn": "散装芝麻油（整柜贸易）",
+          "de": "Sesamöl in Großpackung",
+          "fr": "huile de sésame en vrac",
+          "es": "aceite de sésamo a granel",
+          "ar": "زيت السمسم بالجملة",
+          "fa": "روغن کنجد فله",
+          "it": "olio di sesamo sfuso",
+          "nl": "sesamolie in bulk",
+          "tr": "dökme susam yağı"
+        }
+      ],
+      "食用油（通用）": [
+        {
+          "en": "edible oil",
+          "cn": "食用油（行业大词）",
+          "de": "Speiseöl",
+          "fr": "huile alimentaire",
+          "es": "aceite comestible",
+          "ar": "زيت صالح للأكل",
+          "fa": "روغن خوراکی",
+          "it": "olio alimentare",
+          "nl": "eetbare olie",
+          "tr": "yemeklik yağ"
+        },
+        {
+          "en": "vegetable oil",
+          "cn": "植物油（同义/大类）",
+          "de": "Pflanzenöl",
+          "fr": "huile végétale",
+          "es": "aceite vegetal",
+          "ar": "زيت نباتي",
+          "fa": "روغن نباتی",
+          "it": "olio vegetale",
+          "nl": "plantaardige olie",
+          "tr": "bitkisel yağ"
+        },
+        {
+          "en": "cooking oil",
+          "cn": "烹调油（零售端叫法）",
+          "de": "Kochöl",
+          "fr": "huile de cuisson",
+          "es": "aceite de cocina",
+          "ar": "زيت طهي",
+          "fa": "روغن پختوپز",
+          "it": "olio da cucina",
+          "nl": "kookolie",
+          "tr": "pişirme yağı"
+        },
+        {
+          "en": "bulk edible oil",
+          "cn": "散装食用油（大宗贸易）",
+          "de": "Speiseöl in Großpackung",
+          "fr": "huile alimentaire en vrac",
+          "es": "aceite comestible a granel",
+          "ar": "زيت طعام بالجملة",
+          "fa": "روغن خوراکی فله",
+          "it": "olio alimentare sfuso",
+          "nl": "eetbare olie in bulk",
+          "tr": "dökme yemeklik yağ"
+        },
+        {
+          "en": "frying oil",
+          "cn": "煎炸油",
+          "de": "Frittieröl",
+          "fr": "huile de friture",
+          "es": "aceite de fritura",
+          "ar": "زيت القلي",
+          "fa": "روغن سرخکردنی",
+          "it": "olio per frittura",
+          "nl": "frituurolie",
+          "tr": "kızartma yağı"
+        }
+      ]
+    },
+    "调味酱": {
+      "花生酱": [
+        {
+          "en": "peanut butter",
+          "cn": "花生酱（核心词，最准）",
+          "de": "Erdnussbutter",
+          "fr": "beurre de cacahuète",
+          "es": "crema de cacahuete",
+          "ar": "زبدة الفول السوداني",
+          "fa": "کره بادام زمینی",
+          "it": "burro di arachidi",
+          "nl": "pindakaas",
+          "tr": "fıstık ezmesi"
+        },
+        {
+          "en": "peanut paste",
+          "cn": "花生酱/花生膏（工业原料叫法，找厂家用）",
+          "de": "Erdnusspaste",
+          "fr": "pâte de cacahuète",
+          "es": "pasta de cacahuete",
+          "ar": "معجون الفول السوداني",
+          "fa": "خمیر بادام زمینی",
+          "it": "pasta di arachidi",
+          "nl": "pindapasta",
+          "tr": "fıstık pastası"
+        },
+        {
+          "en": "groundnut paste",
+          "cn": "花生膏（西非/马格里布叫法）",
+          "de": "Erdnussmus",
+          "fr": "pâte d'arachide",
+          "es": "pasta de maní",
+          "ar": "معجون الفول السوداني الطبيعي",
+          "fa": "خمیر بادام زمینی طبیعی",
+          "it": "pasta di arachidi naturale",
+          "nl": "aardnootpasta",
+          "tr": "yer fıstığı ezmesi"
+        }
+      ],
+      "芝麻酱": [
+        {
+          "en": "tahini",
+          "cn": "中东芝麻酱（中东市场高频词，必加）",
+          "de": "Tahini",
+          "fr": "tahini",
+          "es": "tahini",
+          "ar": "طحينة",
+          "fa": "ارده",
+          "it": "tahina",
+          "nl": "tahini",
+          "tr": "tahin"
+        },
+        {
+          "en": "sesame paste",
+          "cn": "芝麻酱（中式/通用说法）",
+          "de": "Sesampaste",
+          "fr": "pâte de sésame",
+          "es": "pasta de sésamo",
+          "ar": "معجون السمسم",
+          "fa": "خمیر کنجد",
+          "it": "pasta di sesamo",
+          "nl": "sesampasta",
+          "tr": "susam ezmesi"
+        },
+        {
+          "en": "sesame butter",
+          "cn": "芝麻酱（同义）",
+          "de": "Sesammus",
+          "fr": "beurre de sésame",
+          "es": "mantequilla de sésamo",
+          "ar": "زبدة السمسم",
+          "fa": "کره کنجد",
+          "it": "burro di sesamo",
+          "nl": "sesamboter",
+          "tr": "susam püresi"
+        },
+        {
+          "en": "tahini paste",
+          "cn": "芝麻酱（酱体叫法）",
+          "de": "Tahinipaste",
+          "fr": "pâte de tahini",
+          "es": "pasta de tahini",
+          "ar": "معجون الطحينة",
+          "fa": "خمیر ارده",
+          "it": "pasta di tahina",
+          "nl": "tahinipasta",
+          "tr": "tahin ezmesi"
+        }
+      ],
+      "通用酱料": [
+        {
+          "en": "seasoning sauce",
+          "cn": "调味酱（细分/通用）",
+          "de": "Würzsauce",
+          "fr": "sauce d'assaisonnement",
+          "es": "salsa para condimentar",
+          "ar": "صلصة التوابل",
+          "fa": "سس چاشنی",
+          "it": "salsa per condire",
+          "nl": "kruidensaus",
+          "tr": "çeşni sosu"
+        },
+        {
+          "en": "sauce",
+          "cn": "酱/沙司（通用大词，铺量用）",
+          "de": "Sauce",
+          "fr": "sauce",
+          "es": "salsa",
+          "ar": "صلصة",
+          "fa": "سس",
+          "it": "salsa",
+          "nl": "saus",
+          "tr": "sos"
+        },
+        {
+          "en": "nut butter",
+          "cn": "坚果酱",
+          "de": "Nussmus",
+          "fr": "beurre de noix",
+          "es": "mantequilla de frutos secos",
+          "ar": "زبدة المكسرات",
+          "fa": "کره آجیلی",
+          "it": "burro di frutta secca",
+          "nl": "notenpasta",
+          "tr": "kuruyemiş ezmesi"
+        }
+      ]
+    }
+  }
+}

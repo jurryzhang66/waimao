@@ -1,0 +1,144 @@
+/* 扩展 popup 的样式。扩展页面不受任何站点 CSP 约束，也不与页面样式冲突，所以正常写 .css。 */
+
+* { box-sizing: border-box; }
+
+body {
+  width: 340px;
+  /* Chrome popup 高度上限约 600px；加了「本轮采集明细」卡后可能贴边，这里兜底整体滚动 */
+  max-height: 600px;
+  overflow-y: auto;
+  margin: 0;
+  padding: 14px;
+  background: #f7f9fc;
+  color: #202124;
+  font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- 顶部 ---------- */
+.head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.logo {
+  width: 38px; height: 38px; flex: 0 0 38px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 11px; background: #e8f0fe; font-size: 19px;
+}
+.htext { min-width: 0; }
+h1 { margin: 0; font-size: 15px; font-weight: 700; letter-spacing: .3px; }
+.conn { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #5f6368; margin-top: 2px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: #bdc1c6; flex: 0 0 8px; }
+.dot.on   { background: #188038; box-shadow: 0 0 0 3px rgba(24,128,56,.15); }
+.dot.off  { background: #d93025; box-shadow: 0 0 0 3px rgba(217,48,37,.15); }
+.dot.busy { background: #f9ab00; }
+
+/* ---------- 卡片 ---------- */
+.card {
+  background: #fff;
+  border: 1px solid #e8edf2;
+  border-radius: 10px;
+  padding: 11px 12px;
+  margin-bottom: 10px;
+}
+
+/* ---------- 主按钮 ---------- */
+.primary {
+  width: 100%;
+  height: 40px;
+  border: 0;
+  border-radius: 8px;
+  background: #1a73e8;
+  color: #fff;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s;
+}
+.primary:hover { background: #1765cc; }
+.primary:disabled { background: #9aa0a6; cursor: default; }
+.hint { margin-top: 8px; font-size: 12px; color: #80868b; line-height: 1.6; }
+
+/* ---------- 表单 ---------- */
+.fields { display: flex; gap: 10px; margin-bottom: 9px; }
+.f { flex: 1; min-width: 0; }
+.f span { display: block; font-size: 12px; color: #5f6368; margin-bottom: 4px; }
+select, input[type="text"] {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid #dbe2e8;
+  border-radius: 7px;
+  background: #fff;
+  color: #202124;
+  font: inherit;
+  font-size: 13px;
+}
+select:focus, input[type="text"]:focus { outline: 2px solid rgba(26,115,232,.35); border-color: #1a73e8; }
+
+.chk {
+  display: flex; align-items: flex-start; gap: 7px;
+  font-size: 12px; color: #3c4043; line-height: 1.5; margin-top: 6px; cursor: pointer;
+}
+.chk input { margin: 2px 0 0; flex: 0 0 auto; }
+
+/* ---------- 结果 ---------- */
+.result { border-color: #d2e3fc; background: #f8fbff; }
+.rTitle { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+.rTitle.ok  { color: #188038; }
+.rTitle.dup { color: #5f6368; }
+.rTitle.err { color: #d93025; }
+.rBody { font-size: 12.5px; color: #3c4043; line-height: 1.75; word-break: break-word; }
+.rBody b { color: #202124; font-weight: 600; }
+.rBody .miss { color: #9aa0a6; }
+
+/* ---------- 本轮采集明细 ---------- */
+.live { border-color: #e3eaf3; }
+.live-head { display: flex; align-items: center; gap: 8px; margin-bottom: 7px; }
+.live-head h3 { margin: 0; font-size: 13px; font-weight: 700; }
+.live-badge {
+  background: #e8f0fe; color: #1a73e8;
+  border-radius: 9px; padding: 1px 7px; font-size: 12px; line-height: 1.6;
+}
+.live-status { font-size: 12px; color: #5f6368; margin-left: auto; text-align: right; min-width: 0; }
+.live-status.err { color: #d93025; }
+
+/* 列表自己滚（Chrome popup 整体高度有限，正文别把页脚顶出去） */
+.live-scroll { max-height: 176px; overflow-y: auto; }
+.live-list:empty { display: none; }
+.li { padding: 5px 0; border-top: 1px solid #eef2f6; font-size: 12.5px; line-height: 1.5; }
+.li:first-child { border-top: 0; }
+.li-top { display: flex; align-items: baseline; gap: 6px; }
+.li-idx { color: #9aa0a6; font-size: 11px; flex: 0 0 auto; }
+.li-site { color: #202124; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.li-score { margin-left: auto; color: #5f6368; flex: 0 0 auto; }
+/* 每行的 ✕（明细 + 客户库双删）。.li-score 有 margin-left:auto，所以它自然贴在 score 右边。
+   面板固定宽 340px、可用约 292px，✕ 只占 ~16px；.li-site 已可 ellipsis，挤压安全。 */
+.li-del { flex: 0 0 auto; margin-left: 6px; padding: 0 3px; color: #9aa0a6;
+  font-size: 12px; line-height: 1.4; cursor: pointer; border-radius: 4px; }
+.li-del:hover { color: #d93025; background: #fdeceb; }
+.li-sub { display: flex; gap: 8px; margin-top: 1px; }
+.li-phone { color: #3c4043; }
+.li-old { opacity: .72; }
+
+.mail { color: #188038; font-family: ui-monospace, Consolas, "Courier New", monospace; word-break: break-all; }
+.miss { color: #9aa0a6; }
+
+.live-empty { color: #9aa0a6; font-size: 12px; padding: 10px 0; text-align: center; }
+
+.finish {
+  width: 100%; height: 34px; margin-top: 9px;
+  border: 0; border-radius: 8px;
+  background: #f1f3f4; color: #202124;
+  font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: background .15s;
+}
+.finish:hover:not(:disabled) { background: #e4e8ec; }
+.finish:disabled { color: #9aa0a6; cursor: default; }
+.note { margin-top: 6px; font-size: 12px; color: #5f6368; word-break: break-all; }
+
+/* ---------- 底部链接 ---------- */
+.foot {
+  display: flex; flex-wrap: wrap; gap: 4px 12px;
+  font-size: 12px; padding: 2px 2px 0;
+}
+.foot a { color: #1a73e8; text-decoration: none; }
+.foot a:hover { text-decoration: underline; }
+.foot a.right { margin-left: auto; }
