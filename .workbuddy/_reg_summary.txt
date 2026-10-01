@@ -1,110 +1,227 @@
-# 全量回归验收记录 — 2026-09-30（第二轮：本轮明细「每行 ✕ 删除」）
+# 全量回归验收记录 — 2026-10-01（第四轮：客户库查询页 /db + Excel 导出）
 # 命令：D:\Users\admin\AppData\Local\Programs\Python\Python313\python.exe .workbuddy/_run_all_reg.py
-# 最终结果：**19 项全部 EXIT=0**（用时 238.2s；驱动脚本把每项输出写到 .workbuddy/_reg__<名字>.log）
-# 上一次（本轮会话 + popup 补明细）的记录在同名文件的历史版本里，19 项不变，只增了不少用例。
+# 最终结果：**22 项全部 EXIT=0**（用时 68.2s；驱动脚本把每项输出写到 .workbuddy/_reg__<名字>.log）
+# 上一轮（计数口径拆开报 + 去重键不变量）的记录是同名文件的历史版本：20 项 107.4s。
+# 本轮的起点是用户需求：「做一个数据库查询页面 + 导出功能：筛选国家/行业等条件 → 看结果 → 导出 Excel」。
+#   AskUserQuestion 拍板 4 项：① 全套实用筛选（关键词/行业/国家/来源/评级/评分区间/有无邮箱电话联系页/
+#   采集时间/排序分页）② 导出「客户库全字段」而非结果表 10 列 ③ 存档 + 浏览器下载 ④ 飞书暂时不用。
 
-EXIT=0  _check_page             页面文案/占位符/JS 语法/标签配对/数据源切换/端口避让 + R1–R7
-                               （R7 新增 6 条：class="row-del" / data-rid / onSessionBodyClick /
-                                deleteSessionRow / /api/manual/session/delete / 事件委托挂在
-                                #sessionBody / .row-del 样式；R5 两处 sha256 仍原样未动）
+EXIT=0  _check_page             页面文案/占位符/JS 语法/标签配对/数据源切换/端口避让 + R1–R7 + ★新★ R9
+                               （R9 = `/db` 查询页静态断言：QUERY_HTML 成品、共享样式注入、控件 id、
+                                5 个逻辑函数、/api/db 三接口、`const EMPTY = '{QUERY_EMPTY}'` 前后端一致、
+                                **页面零硬编码行业名**、`len(QUERY_EXPORT_COLUMNS)==14`、
+                                `len(EXCEL_HEADER_10)==10`（10 列契约未被动）、路由已注册、
+                                `QUERY_EXPORT_DIRNAME=='查询导出'`、`dirname(query_export_dir())==output_dir()`）
 EXIT=0  _check_startup          pick_port 单测 + 子进程真机启动 e2e
 EXIT=0  _kwlib_check            词库字节约定/规模/键序/行业内部唯一/deep-diff/语言覆盖看板
 EXIT=0  _check_industry_rules   回填行业.py 规则：必须挡住的误判 + 既有行业回归 + 逐条 diff
 EXIT=0  _verify_maps_base       国家坐标/地图 URL/去重键
 EXIT=0  _smoke_search           run_search 闭环打桩（临时库）
 EXIT=0  _smoke_maps             run_maps 闭环打桩（临时库）
-EXIT=0  _smoke_collect          手动采集核心 **8 组**（新增 ⑧）：
-                                ① 秒级命中入库 + 采集阶段不碰结果文件 + 自动开轮
-                                ①b 产品词 +10（65→75）② 去重跳过且明细留痕 ③ 升级恰 1 次
-                                ④ 结束本轮 → 新建一份 10 列/降序/不污染上一轮的结果文件
-                                ⑤ 落盘失败保留数据可重试 ⑥ 库内校验 ⑦ /api/collect 403
-                                ⑧ ★新★ 删除单条：明细+客户库双删 / 删前自动备份（校验备份文件可打开
-                                  且含被删那条）/ 计数回退 / 删不存在与不带 rid 都被拒 / 300 秒节流 /
-                                  被删条目不进 Excel / 删空后本轮不误关 + 空轮不落盘
-EXIT=0  _smoke_manual_session   **11 组 128 项**（原 10 组 88 项）：
-                                新增 ⑪ 删除单条 —— 删前备份落临时 backups 目录且可打开、
-                                按 rid 精确删（同 url 的 added/existed 不会连坐）、added 计数回退、
-                                /api/manual/state 反映新长度、删不存在 rid / 不带 rid 都被拒、
-                                300 秒节流、结束落盘不含被删行、删空后 session_active 仍 True、
-                                护栏新增 `_under_tmp(m.db._backups_dir())`（防测试备份写进真实 DB/backups/）
+EXIT=0  _smoke_collect          手动采集核心 8 组
+EXIT=0  _smoke_manual_session   12 组 144 项（去重键自愈 / dry-run / apply / 冲突不硬改）
+EXIT=0  _smoke_query            ★新★ **10 组 126 项**（全部跑在 tempfile 临时库 + 临时 output）
+                               （打桩：m.db_path / m.db.db_path / m.paths.output_dir / m.paths.ENRICH_FILE
+                                全部关进临时目录 + _under_tmp() 护栏）
+                               ① 分面统计 db_facet_counts：四维度 distinct+count、*_blank 空值条数、
+                                  contact 六个口径、score/date 的 min·max（跳过 NULL）
+                               ② 各维度筛选：关键词 9 字段 LIKE、多选 + 空值哨兵、评分区间、
+                                  有无邮箱/电话/联系页、采集时间范围
+                               ③ 排序白名单 QUERY_ORDER_SQL：score IS NULL 沉底、非法值静默回落默认
+                               ④ 分页与 limit 钳制（QUERY_MAX_LIMIT=500）、offset 越界
+                               ⑤ 非法输入：非整数评分抛 ValueError、注入串 `x'; DROP TABLE customers; --`
+                                  查不到且表完好（参数化只防注入、**不转义 LIKE 通配符**，`%` 仍匹配全部）
+                               ⑥ 导出 14 列 + 列序 + 文件名含条数
+                               ⑦ **隔离性反证**：把查询导出放到 output/ 根下会立刻劫持 find_latest_result
+                                  （占位结果表刻意写 `食品-20000101_1200-德国.xlsx` —— 比导出**旧**，
+                                   否则「取最新」会选中结果文件、反证失效）
+                               ⑧ HTTP 路由层：/db 打开第三页、三接口契约、非法条件回 ok=False 而非 500、
+                                  空 body / 非 JSON body 不崩
+                               ⑨ 下载路由：`os.path.basename` 挡穿越（`../客户开发工具.py`、
+                                  `..%2F..%2F客户开发工具.py`、不存在的名字）、send_file 响应要先 close()
+                                  才能删文件（否则 WinError 32）
+                               ⑩ 导出边界：命中 0 条拒绝导出（不产空表）、超上限明确拒绝并给出条数
 EXIT=0  _check_feishu_records   飞书导出：来源渠道按网址回库查、50 分门槛对 [手动采集] 豁免、
                                 空评分行不崩、国家映射、邮箱只取第一个（19 项）
-EXIT=0  _check_maps_ui          地图模式真机 UI + 预览 URL 与后端逐字一致（整页截图改为「尽力而为」）
+EXIT=0  _check_maps_ui          地图模式真机 UI + 预览 URL 与后端逐字一致（整页截图「尽力而为」）
 EXIT=0  _check_kwlib_ui         关键词库三级联动真机校验
 EXIT=0  _check_live_ui          主界面真机 UI 截图
-EXIT=0  _check_manual_ui        /manual 真机 UI：A–F 六项 + ★新★「点行尾 ✕ 删除」子用例
-                                （confirm 覆盖为 true → 真点 → 行数 4→3、徽章变 3、库里那条真消失、
-                                 backups/客户库_删除前_* 出现、剩下那条仍在表里）
-                                ⚠️ 本脚本原来「不碰真实客户库」，本轮起**必须**把 db_path 打桩到临时目录：
-                                删除会走 backup_db_before_delete() + db_delete_customer()，
-                                两者都按 core.db.db_path() 定位真实库
-EXIT=0  _check_ext              扩展静态校验 **67 项**（原 64）：新增后端路由 /api/manual/session/delete
-                                在位、popup.js 发 DP_SESSION_DELETE、background.js 路由它且打真实路径、
-                                popup 与 manual.html 都带 data-rid
+EXIT=0  _check_manual_ui        /manual 真机 UI：A–F 六项 + ✕ 删除子用例 + 计数口径断言
+EXIT=0  _check_query_ui         ★新★ `/db` 真机 UI 校验 A–G（真 Flask + 真 Playwright Chromium，
+                                `page.set.download_path()` 指到临时目录防污染用户下载目录）
+                               ① 结构与共享样式（`.btn-start` 实测 = rgb(26, 115, 232)，证明
+                                  PAGE_CSS_PLACEHOLDER 注入生效）② facets 由接口动态生成（出现历史行业名
+                                  `家具家居`/`汽配` 与 `__empty__` 哨兵项）③ 首次进页自动查询
+                               ④ 多维筛选交互 ⑤ 排序与分页（每页 3 条要**动态注入 option**，
+                                  因为 `<select>` 里没有 value=3 时程序化赋值会被浏览器忽略）
+                               ⑥ 重置 ⑦ 导出真实落盘；`wait_text()` 轮询等目标态（不 sleep 固定时长）
+                               截图输出 .workbuddy/_query_ui.png（142181 bytes）
+EXIT=0  _check_ext              扩展静态校验 67 项（路由在位、DP_SESSION_DELETE 全链路、popup.js 零 fetch）
 EXIT=0  _smoke_ext_content      content.js 运行时（Node + 最小 DOM 桩）51 项
-EXIT=0  _smoke_ext_popup        popup.js 运行时（Node + 最小 DOM 桩）**93 项**（原 80）：
-                                新增 ⑪ 段落 —— 每行带 data-rid 与 .li-del / confirm 取消不发请求 /
-                                确认后发 DP_SESSION_DELETE / 回执与徽章 / 后端拒绝与后台无应答的原因
-                                留在 sessFile（不被随后的 refreshSession 吃掉）/ 点无 rid 处不动作
-                                （原 ⑪ 轮询纪律顺延为 ⑫）
-EXIT=0  _smoke_ext_live         扩展↔工具 端到端（真 Flask + 真 HTTP）41×2 + 9 + 9 项；
-                                ⑨ 段起多了一步「先删 1 条再结束」→ 库里剩 1 条、Excel 也只 1 行
+EXIT=0  _smoke_ext_popup        popup.js 运行时（Node + 最小 DOM 桩）96 项
+EXIT=0  _smoke_ext_live         扩展↔工具 端到端（真 Flask + 真 HTTP）41×2 + 9 + 9 项
+EXIT=0  _check_db_keys          真实库只读体检：db_path 指向项目 DB/、normalize_domain 6 样例、
+                                全库 website_key == normalize_domain(website)（fixed=0 conflict=0）、
+                                source 分组求和 == 总条数
 EXIT=0  补历史欠账.py --dry      欠账清单（只列不写）
 
 # 真实客户库复核（防打桩失效写脏数据）
-# DB/客户库.sqlite3 → 总条数 247（本次回归跑完那一刻；不是基线，用户在持续使用）
-#   source：谷歌搜索 214 / 手动采集 26 / 谷歌地图 7
-#   ⚠️ 手动采集从 6 涨到 26 是**用户自己在用扩展**（09-30 13:33~14:26 采了一批墨西哥食品
-#      供应商、ramen/泡面站、以及 1 条 Google 地图 place），不是测试写入。
-#      测试域名残留 = 0（plasticbagpc.com 是 09-26 谷歌搜索留下的真记录；ltpimpex.com 是
-#      "x.com" 子串误匹配；leasidepets.com 是用户 09-30 00:55 自己采的）。
-#   → 以后跑完回归别再拿固定数字当基线（227 → 247 → 253 …），先按 source 分布看一遍再说。
-#     2026-09-30 15:30 打 V1.4 备份时是 253（手动采集 32，且用户已成功用过一次 ✕ 删除）。
-# DB/backups/ 里没有「客户库_删除前_*」→ 删除路径的打桩全部有效（备份只落在临时目录）。
+# DB/客户库.sqlite3 → 总条数 292（本轮回归跑完那一刻）
+#   source：谷歌搜索 214 / 手动采集 71 / 谷歌地图 7    有邮箱 187 / 有电话 100
+#   website_key 错位 = 0（不变量未破）；测试域名残留 = 0
+#   ⚠️ 手动采集仍是最活跃的一路（6 → 26 → 32 → 56 → 69 → 71 全是用户自己在用扩展采，不是测试写入）。
+#   → 别再拿固定数字当基线（227 → 247 → 253 → 277 → 290 → 292），按 source 分布 + 测试域名残留复核。
+# output/ 根 20 份 xlsx（最新 `食品-20261001_0814-墨西哥.xlsx` 是用户今早自己采的，非测试产物）；
+# output/查询导出/ = 空目录（临时导出表已在回归里清掉，且已 gitignore，不进版本库）。
+# DB/backups/ 5 份，全是真操作留下的，无测试垃圾：
+#   客户库_20260928_0905_清理前 / 客户库_污染前_20260930_000940 / 客户库_删除前_20260930_151356 /
+#   客户库_修键前_20260930_180617 / 客户库_删除前_20261001_073507（用户自己点 ✕ 建的）
 
-# ⚠️⚠️ 本轮修掉的 4 个「回归脚本自身的脆弱点」（都不是产品 bug，但都会让全量回归假红）
-# 1) _check_startup：把换端口原因写死成 '10013'。5000 绑不上的成因会漂移 ——
-#    落在 Windows 保留段 → 10013（权限不允许）；有别的进程真占着它（比如用户自己开着的工具）
-#    → 10048（地址已被使用）。改为「只要拿到 WinError/权限 字样就通过」，
-#    并且把 `assert reason` 改成「首位候选绑不上时才要求有原因」。
-# 2) _check_manual_ui 心跳断言：原来 `loadManualState()` 后只 sleep 1.2s 就读 heart.className，
-#    机器忙时 async fetch 还没回来 → 读到 HTML 初始态 class="heart off" 假红。改成轮询等 'heart on'。
-# 3) _check_maps_ui / _check_manual_ui 的整页截图：3838px 的 full_page 截图 Chrome 偶尔 CDP 超时
-#    （实测 TimeoutError），而截图只是给人看的证据、不是断言 → 改成 try/except 尽力而为。
-# 4) _smoke_ext_live 两遍共用 core.db 模块对象 → `_last_delete_backup_at` 会跨遍残留，
-#    第二遍的删除被 300 秒节流成 backup='' → 断言莫名红。改为 load_tool() 里显式清零。
+# ============ 本轮最关键的三条技术判定（写死在这里，别再重新推导）============
+# 1) ⛔ 查询导出**必须**落 output/查询导出/ 子目录 —— 因为 find_latest_result() 只 glob output/ 一层、
+#    且靠文件名里的 8 位日期筛候选。查询导出表名天然带日期，一旦落根下就会被当成「最新结果文件」，
+#    把飞书导出的目标劫持到一份查询结果上。_smoke_query.py ⑦ 已把这个场景做成反证断言。
+# 2) 🔒 查询 / 导出链路是**纯读链路**：刻意完全不碰 STATE_LOCK / STATE / paths.ENRICH_FILE。
+#    STATE_LOCK 是非可重入 Lock、log() 内部也抢它 → 长查询若占锁会卡死采集、落盘、轮询；
+#    导出另用独立的 EXCEL_LOCK。改这块代码时不要「顺手」去读 STATE。
+# 3) 🏷️ 筛选选项必须读**真实库** distinct（db_facet_counts），页面**零硬编码行业名**。
+#    库里混着历史行业名（家具家居 18 条 / 汽配 5 条），硬编码关键词库那 8 个规范值会让这些数据
+#    「怎么选都筛不出来」。空值用哨兵 `QUERY_EMPTY='__empty__'`（前端 `const EMPTY` 与后端一字不差，
+#    _check_page.py R9 有断言）—— 否则「勾了未填写却筛不出东西」是静默失效。
 
-# ⚠️⚠️ 仍然必须记住的两个大坑（上一轮踩到的，结论不变）
-# A) 扩展 ↔ 本工具联调必须遮蔽「环境里别的实例」（DP_SHADOW_PORTS）：
-#    扩展按 PREFERRED_PORTS 顺序扫 /api/ping，用户自己开着的那个实例常排在测试端口之前，
-#    会被优先选中 → 测试假网址真写进真实客户库（实测踩过）。修法见 _smoke_ext_live.py::shadow_ports()。
+# 本轮改动的产物
+#   core/db.py                   +「客户库查询」整段（QUERY_SELECT_COLS / QUERY_ORDER_SQL /
+#                                QUERY_EMPTY / _QUERY_CONTACT_SQL / _query_where / db_query_customers /
+#                                db_facet_counts）；顶部补 import re
+#   core/paths.py                +QUERY_EXPORT_DIRNAME / query_export_dir() / build_query_export_name /
+#                                ts_query_export_path（同秒重名自动 _2/_3）
+#   core/ui.py                   +_page_style() / _read_sub_template() / _inject_page_style()
+#                                （/manual 与 /db 共用 page.html 的样式，page.html 一字节不动）
+#                                +_read_query_template() / _build_query_page() / QUERY_HTML
+#   ui/query.html                ★新建★（约 470 行）：筛选条件卡 + 结果表卡；collect/loadFacets/
+#                                runQuery/renderResult/doExport/resetForm/openFolder/init
+#   ui/manual.html               `<div class="sub">` 里加「📊 客户库查询」入口链接（唯一入口，
+#                                因为 page.html 不能动）
+#   客户开发工具.py              +5 个路由：/db、/api/db/facets、/api/db/query(POST)、
+#                                /api/db/export(POST)、/api/db/download/<name>、/api/db/open_folder
+#                                +QUERY_EXPORT_COLUMNS(14) / QUERY_EXPORT_WIDTHS / QUERY_EXPORT_MAX(5000)
+#                                +_save_query_excel(rows, path)；import 补 send_file
+#                                ⚠️ import 区刻意分两行（R4 是字符串级 glue 断言，不许合并）
+#   .gitignore                   +output/查询导出/
+#   .workbuddy/_smoke_query.py   ★新建★（126 项）
+#   .workbuddy/_check_query_ui.py ★新建★（真机 A–G，截图 _query_ui.png）
+#   .workbuddy/_check_page.py    +R9；末尾提示改为「…第二页 R7 / 第三页 R9」
+#   .workbuddy/_run_all_reg.py   清单 20 → 22 项（_smoke_query 插在 _smoke_manual_session 后、
+#                                _check_query_ui 插在 _check_manual_ui 后）
+#   AI_PROJECT_CONTEXT.md        §1.4 / §2 / §3(新增 M13 客户库查询与导出) / §4.1 / §5 / §8 / 附录 全部同步
+
+# ⚠️ 交付时必须告诉用户的两件事（否则会以为功能没做）
+# A) 改 ui/*.html 与新增路由都**必须重启工具**才生效（PAGE_HTML / MANUAL_HTML / QUERY_HTML 都是
+#    import 期构建一次）。用户跑着的旧实例打 /db 会 404 —— 自检口令：curl 那个路由，404 = 后端旧。
+# B) 入口在 /manual 页面顶部的「📊 客户库查询」链接（page.html 被 sha256 锁死，不能加导航）。
+
+# ⚠️ 仍然必须记住的两个大坑（结论不变）
+# A) 扩展 ↔ 本工具联调必须遮蔽「环境里别的实例」（DP_SHADOW_PORTS），否则测试假网址真写进真实库。
 # B) 改 extension/ 后不点「重新加载」会出现「popup 新 / service worker 旧」分裂态：
-#    症状是 popup 显示「0 条 + 未知消息：DP_MANUAL_STATE」、结束按钮灰着，但采集其实成功了。
-#    诊断：浏览器打开 http://127.0.0.1:<端口>/api/manual/state —— 有 JSON = 后端是新的；
-#    404/HTML = 后端也旧，得重启工具。_smoke_ext_popup.js ⑤ 段已把这一幕固化成断言。
+#    症状是 popup 显示「0 条 + 未知消息：DP_MANUAL_STATE」，但采集其实成功了。
 
-# 本轮改动的产物（每行 ✕ 删除：明细 + 客户库双删）
-#   客户开发工具.py   +POST /api/manual/session/delete（锁纪律：锁内定位 → 锁外备份+删库 → 锁内改内存 → 锁外 log）
-#                     +_next_rid() 发号器；collect_from_html 两条 append 都带 kind+rid；
-#                     _ensure_manual_session / api_manual_session_start 都清零 session_rid_seq
-#   core/state.py     MANUAL_STATE +'session_rid_seq'
-#   core/db.py        +_backups_dir() / backup_db_before_delete()（sqlite3 在线 backup，WAL 安全，
-#                     300 秒节流，失败不阻断）/ db_delete_customer()（key 为空直接返回 0，绝不退化成清库）
-#   ui/manual.html    表头 +第 9 列；renderSession 末列输出 .row-del[data-rid]；
-#                     +onSessionBodyClick（事件委托到 #sessionBody）/ +deleteSessionRow（confirm + fetch）；
-#                     .row-del 样式只写进本页自带的第二个 <style>（page.html 被 sha256 锁死）
-#   extension/background.js  +deleteManualSessionRow() + case 'DP_SESSION_DELETE'
-#   extension/popup.js       sessRowHtml 加 .li-del[data-rid]；+onSessionListClick / +deleteSessionRow
-#   extension/popup.css      +.li-del / .li-del:hover
-#   extension/README.md      ✕ 的用法与「双删 + 删前备份 + 5 分钟节流」说明；§七 加了重启工具的提示
-#   8 个回归脚本同步修订（_smoke_manual_session / _check_manual_ui / _check_ext / _smoke_ext_popup /
-#   _smoke_ext_bg / _smoke_ext_live / _smoke_collect / _check_page）
+# ============ 后续小轮（同日稍后）：扩展面板加「客户库查询」入口 ============
+# 起因：用户问「你这个页面在哪里？我怎么没看到？」→ 实测取证：用户跑着的实例（5000 端口）
+#   /api/ping=200、/manual=200、**/db=404** —— 那是改动**之前**启动的进程；三个页面的 HTML 与路由
+#   都是「工具启动那一刻」构建的，所以它里面根本没有 /db。
+# 同时暴露一个结构性缺口：主页 ui/page.html 上**没有**通往 /manual、/db 的链接（该文件被
+#   _check_page.py R5 用 sha256 锁死），两个副页面只能靠「启动日志」或「扩展面板」进去
+#   → 用户选择了「在扩展面板加入口」。
 
-# 本轮最关键的技术判定（写死在这里，别再重新推导）
-# 1) 采集即落库：_commit_candidate 在采集那一刻就 db_upsert_customer 了 → 「本轮明细」只是内存里
-#    决定 **Excel 有哪些行** 的清单。所以「只删明细」是假删除：库里那条还在 → 下次采到同一个站
-#    会被 db_has_customer 判「已在客户库」跳过、永远采不回来，飞书导出也仍会带它。
-# 2) 删除必须按 **rid** 定位，不能按 url：同一个 url 在同一轮里可能既有一条 added 又有一条 existed。
-# 3) 备份必须用 sqlite3 的在线 backup()，**禁止 shutil.copy2** —— 库是 WAL 模式，裸拷贝会漏掉
-#    -wal 里未 checkpoint 的写入。备份目录由 db_path() 推导（_backups_dir()），于是回归脚本只要
-#    打桩了 m.db.db_path，备份就自动落进临时目录、护栏零改动。
+# 改动（4 个代码文件 + 1 个文档，全是极小增量）
+#   extension/popup.html      .foot 里加 <a href="#" id="lnkDb">📊 客户库查询</a>
+#                             （必须 href="#"、禁内联 onclick —— _check_ext.py 第 100–115 行会拦）
+#   extension/popup.js        init() 里加 lnkDb 监听（照抄 lnkHome：toolUrls() → openUrl(u.db)）
+#   extension/background.js   urlsReply() 返回体加 db: `${base}/db`（复用 DP_URLS，不新增消息类型）
+#   extension/README.md       第 29 行面板能力那句补「跳『客户库查询页』」
+#   .workbuddy/_smoke_ext_popup.js  DP_URLS 桩返回体补 db；⑨ 段标题改「五个链接」
+#                                   + 加一条「「客户库查询」→ /db」断言
+
+# 明确**没动**（避免误伤）
+#   extension/manifest.json   host_permissions 是 http://127.0.0.1/*（不含端口与路径），
+#                             /db 与 /manual 完全等价；且 chrome.tabs.create 连它都不依赖
+#   extension/ports.js        本次不动端口。C 组逐字比对两边端口表，别顺手改
+#   .workbuddy/_check_ext.py  全文不检查 popup 元素 id / 按钮数量 / openUrl( 调用次数；DP_URLS 也无断言
+#   客户开发工具.py            /db 路由早已在位（第 2425 行），后端零改动
+#   ui/page.html              sha256 锁死
+
+# 验证
+#   _check_ext.py          全部通过
+#   _smoke_ext_popup.js    ALL PASS **97 checks**（原 96，新增那条已计入；checks 是运行时自增，
+#                          没有任何硬编码总数需要同步）
+#   _run_all_reg.py        **22 项全 EXIT=0，116.4s**（本次机器较忙；上一次同套件 68.2s）
+
+# 真实客户库复核（跑完那一刻）
+#   306 条（谷歌搜索 214 / **手动采集 85** / 谷歌地图 7）—— 手动采集 71 → 85、output 根 20 → 22 份，
+#   是**用户此刻正在用扩展自己采**（不是测试写入）。website_key 错位 0。
+#   测试域名残留 = 0：唯一被宽口径 query 捞到的两条（id=255 `127.0.0.1`、id=267 `megazone.mx`）
+#   都是**用户自己的真实记录**，前者是已知误采、待用户拍板是否清理。
+#   output/查询导出/ = 空；DB/backups/ 5 份（无测试垃圾）。
+
+# ⚠️ 交付时必须说的两句（比上次多了一句）
+#   1) 先点「🏁 结束并生成 Excel」**再**重启工具 —— STATE 是内存态，重启会丢掉「本轮明细」清单
+#      （采集的行早已落库，但本轮结果 Excel 就生成不了了）。
+#   2) chrome://extensions 点「重新加载」+ 刷新已开网页；否则 popup 新 / SW 旧 → 点新链接没反应。
+
+# ============ 后续小轮（同日 11:00 前后）：主页顶栏加 /manual 与 /db 导航 ============
+# 用户需求（原话）：「http://127.0.0.1:5000/，在这个主页，加两个导航按钮，分别到 …/manual、…/db」。
+# 前提冲突：主页模板 ui/page.html 的 sha256 被 _check_page.py R5 锁死（模板文本 + _build_page()
+#   结果，两条基线）—— 上一轮刚因为「主页加不了导航」而绕道扩展面板。→ AskUserQuestion 给两条路，
+#   用户选「**直接改 page.html，重算哈希基线**」。
+
+# ⚠️⚠️ 本轮最重要的一条判定（旧说明作废，别再照着旧说法干活）：
+#   ui/page.html 从「**冻结**」降级为「**有基线**」——
+#     · 它**可以改**；故意改就必须**同时**重算 R5 的两条哈希（_TMPL_SHA + _BUILT_SHA，漏一条就红）。
+#     · 基线剩余的价值 =「误格式化 / 误翻译把模板转义改变形时，立刻被抓到」。
+#     · 取新值的口径：前者 = 文本模式读 ui/page.html 的 sha256；
+#       后者 = core.ui._build_page() 结果的 sha256。
+#       （本机 core.autocrlf=true，但文本模式读会把 CRLF 归一化成 LF → 与磁盘换行风格无关。）
+#     · 本轮重算后：_TMPL_SHA  = f90082ea1d375eaec7dcef1c187d7f73ded020e4d5bfd3d21954e45796e9478d
+#                   _BUILT_SHA = 563818c65670d8a38a2606d0e2bec20a19757551b70b2e8e6f7cffe1f69b0e11
+#   ⚠️ 另一条**不变**：给某个副页面加「专有」样式仍要写进 manual.html / query.html 自带的第二个
+#     <style> —— page.html 那一份会被 _page_style() 注入到**全部三个页面**，往里加东西会连坐。
+
+# 改动
+#   ui/page.html               639 → 651 行（仍是纯 LF，0 个 CRLF）：
+#                              · <style> 末尾加 .nav / .nav-a / .nav-a:hover（白色圆角胶囊链接，
+#                                字色沿用主题蓝 #1a73e8）
+#                              · .sub 之后、第一张卡之前插
+#                                <div class="nav"><a class="nav-a" href="/manual">📝 手动采集页</a>
+#                                                    <a class="nav-a" href="/db">📊 客户库查询</a></div>
+#   _check_page.py R5           两处字面量 → 命名常量 _TMPL_SHA / _BUILT_SHA 并重算；注释从
+#                               「与 V1.3 基线一字不差」改为「防误格式化；故意改要同步重算」
+#   _check_page.py R6           ★新增★ 断言 PAGE_HTML 里有 href="/manual"、href="/db"、.nav-a
+#                               —— 理由是「href 写错或被删**不会有任何运行时报错**，只静默少个入口」
+#   _check_page.py R7/R9        注释里「page.html 零改动所以基线不用改」的措辞同步改写
+#   _check_live_ui.py           ★新增 C 段★ 真机断言：.nav a.nav-a 的 href 顺序 = ['/manual','/db']、
+#                               文案、computed color == rgb(26,115,232)（证明共享 <style> 生效）、
+#                               text-decoration-line == none、.nav 排在第一个 .card 之前
+#   _check_live_ui.py 结构      顶部 import json（用 JSON.stringify 回传，绕开驱动对复杂对象的
+#                               marshalling 差异）；模块 docstring 从「两块」改「三块」
+#   过期说明同步（8 处）         客户开发工具.py 的 /manual 与 /db 两个 docstring（原写「首页刻意不放
+#                               链接」）、ui/manual.html 的样式注释、core/ui.py 的注入注释、
+#                               AI_PROJECT_CONTEXT.md §1.4/§3(M11,M13)/§4.1/§6.2/§9.1/§9.2/附录、
+#                               memory/MEMORY.md 硬不变量 #3
+
+# 验证
+#   _check_page.py         R1–R9 全绿（R5 新基线 + R6 新断言均通过）
+#   _check_live_ui.py      真机 EXIT=0；实测回传
+#                          [{'href':'/manual','text':'📝 手动采集页','color':'rgb(26, 115, 232)','deco':'none'},
+#                           {'href':'/db','text':'📊 客户库查询','color':'rgb(26, 115, 232)','deco':'none'}]
+#                          截图 .workbuddy/_live_ui.png（381879 bytes，顶栏可见）
+#   _run_all_reg.py        **22 项全 EXIT=0**（改完代码先跑一次 113.6s；随后又改了 _check_live_ui.py
+#                          自身，为「最终树也有全绿证据」在终态上复跑一次 109.2s，两次均 22/22）
+
+# 真实客户库复核（跑完那一刻）
+#   306 条（谷歌搜索 214 / 手动采集 85 / 谷歌地图 7）、有邮箱 200 / 有电话 100、
+#   website_key 错位 0、测试域名残留 0。
+#   output/ 根 21 份 xlsx（最新一份仍是 08:47 用户自己采的表）；**专门查过：回归窗口内
+#   output/ 零新增文件**；output/查询导出/ 空；DB/backups/ 5 份。
+
+# ⚠️ 交付时必须说的：改 ui/*.html 后**必须重启工具**才生效（PAGE_HTML 是 import 期构建一次）。
+#   用户跑着的旧实例（5000）打 /db 仍是 404；重启后首页顶栏才会出现那两个按钮。

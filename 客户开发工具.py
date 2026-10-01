@@ -31,7 +31,7 @@ from urllib.parse import quote, parse_qs, urlparse, urljoin
 from DrissionPage import ChromiumPage, ChromiumOptions
 from DrissionPage.common import Keys
 from openpyxl import Workbook, load_workbook
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 # requests 是 DrissionPage 的依赖，实际一定装得上；但仍软导入并留降级路径，
 # 免得万一缺了它整个工具都起不来（手动采集的第②级会跳过，直接走 Chromium 升级）。
 try:
@@ -61,6 +61,7 @@ from core.config import (CONDITIONS, COND_TEMPLATE, COND_ROLES, COND_LANGS, cond
 from core.paths import (LEGACY_RESULT_FILES, RESULT_DATE_RE, OUTPUT_DIRNAME, MAPS_PLACE_ID_RE,
                         _app_dir, output_dir, _safe_name_part, build_result_name,
                         ts_result_path, _result_time_key, find_latest_result,
+                        query_export_dir, ts_query_export_path, QUERY_EXPORT_DIRNAME,
                         DB_DIR, DB_FILE)
 # ⚠️ 刻意**不**写 `from core.paths import ENRICH_FILE` —— 它是会被重新赋值的活变量，
 #    那样导入只能拿到快照。读写一律走 `paths.ENRICH_FILE`。
@@ -69,12 +70,15 @@ from core.state import (BASE_TOKEN, TABLE_ID, LARK_CLI, IMPORT_JSON, COUNTRY_STA
                         STATE, STATE_LOCK, MANUAL_STATE, log)
 from core.db import (db_path, maps_place_key, normalize_domain, normalize_email,
                      db_connect, init_customer_db, db_upsert_customer, db_stats,
-                     backup_db_before_delete, db_delete_customer)
+                     backup_db_before_delete, db_delete_customer, db_fix_website_keys,
+                     db_query_customers, db_facet_counts, QUERY_MAX_LIMIT)
 from core import db          # 模块对象：回归脚本要靠 m.db.db_path 才能把打桩打到 core.db 内部
 # 页面模板本体在独立文件 ui/page.html（改样式/文案不用再碰 Python），
 # 这里只把构建结果与构建函数拉回来：路由 `return PAGE_HTML` 与老脚本 `kf._build_page()` 都靠它。
 # 手动采集页同理在 ui/manual.html（它复用 page.html 的样式块，样式只维护一份）。
 from core.ui import PAGE_HTML, _build_page, MANUAL_HTML, _build_manual_page
+# 第三页：客户库查询 /db（同样复用 page.html 的样式块）。
+from core.ui import QUERY_HTML, _build_query_page
 
 
 def __getattr__(name):
@@ -2082,8 +2086,10 @@ def index():
 def manual_page():
     """手动采集页：扩展连接状态 + 批量粘贴 + 最近记录 + 关闭采集浏览器。
 
-    ⚠️ 首页刻意**不放**指向本页的链接 —— 那样就得改 ui/page.html，而它的 sha256 被
-       `_check_page.py` 第 6 节 R5 硬校验着。本页入口是扩展 popup 的按钮 + 直接敲地址。
+    ⚠️ 首页顶栏有指向本页的导航（V1.5 加，见 `ui/page.html` 的 `.nav`）。
+       改主页那两个链接会连带改 page.html 的 sha256 → 必须同步重算 `_check_page.py`
+       R5 的 `_TMPL_SHA` / `_BUILT_SHA`：前者 = 文本模式读 page.html 的 sha256，
+       后者 = `core.ui._build_page()` 结果的 sha256。
     """
     return MANUAL_HTML
 
@@ -2411,6 +2417,147 @@ def api_keywords():
 def api_db_stats():
     try:
         return jsonify({'ok': True, **db_stats()})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': str(e)})
+
+
+# ================= 客户库查询页 /db 与导出 =================
+# 纯读链路：**不占 STATE_LOCK、不改 paths.ENRICH_FILE / STATE['output']**（原因见 core/db.py
+# 「客户库查询」一节）。所以这里的查询再慢也不会把采集/落盘/页面轮询卡住。
+@app.route('/db')
+def query_page():
+    """客户库查询页：按行业/国家/来源/评级/评分/联系方式筛客户，满意后导出 Excel。
+
+    与 /manual 一样，首页顶栏已有指向本页的导航。入口共三处：扩展面板底部按钮 /
+    首页顶栏 / `/manual` 页顶部链接。
+    """
+    return QUERY_HTML
+
+
+@app.route('/api/db/facets')
+def api_db_facets():
+    """筛选面板的勾选项：库里**真实存在**的取值 + 各自条数（不是硬编码的行业枚举）。"""
+    try:
+        return jsonify({'ok': True, **db_facet_counts()})
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': f'{type(e).__name__}: {e}'})
+
+
+def _query_payload(src):
+    """从 POST 的 JSON body 取筛选条件与分页参数（前端固定用 JSON 传，因为多选是数组）。"""
+    d = src if isinstance(src, dict) else {}
+    filters = d.get('filters')
+    return {
+        'filters': filters if isinstance(filters, dict) else {},
+        'order': d.get('order') or '',
+        'limit': d.get('limit', 50),
+        'offset': d.get('offset', 0),
+    }
+
+
+@app.route('/api/db/query', methods=['POST'])
+def api_db_query():
+    """按条件分页查询。条件非法（例如评分区间填了字母）时返回 ok=False 并说明原因。"""
+    p = _query_payload(request.get_json(silent=True))
+    try:
+        total, rows, limit = db_query_customers(p['filters'], order=p['order'],
+                                                limit=p['limit'], offset=p['offset'])
+        offset = max(0, int(p['offset'] or 0))
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': f'{type(e).__name__}: {e}'})
+    return jsonify({'ok': True, 'total': total, 'rows': rows,
+                    'limit': limit, 'offset': offset})
+
+
+# 查询导出的列（客户库全字段）。**刻意不复用结果 Excel 的 10 列硬契约**：
+# 那是「本轮采集结果」的格式，飞书导出与启动迁移都按**下标**读它；查询导出是另一类产物，
+# 多带行业 / 来源渠道 / 采集时间这些跟进客户时真正用得上的字段，两边互不影响。
+QUERY_EXPORT_COLUMNS = (
+    ('company_name', '公司名称'), ('website', '网站网址'), ('email', '邮箱'),
+    ('phone', '电话'), ('contact_url', '联系页'), ('country', '国家'),
+    ('industry', '行业'), ('score', '评分'), ('rating', '评级'),
+    ('source', '来源渠道'), ('snippet', '摘要'), ('search_formula', '搜索公式'),
+    ('first_seen_at', '首次采集时间'), ('last_seen_at', '最近更新时间'),
+)
+QUERY_EXPORT_WIDTHS = (34, 42, 30, 20, 34, 12, 14, 8, 10, 12, 50, 40, 20, 20)
+QUERY_EXPORT_MAX = 5000          # 单次导出的硬上限：再多就提示收窄条件，别把内存撑爆
+
+
+def _save_query_excel(rows, path):
+    """把查询结果写成 Excel（14 列，见 QUERY_EXPORT_COLUMNS）。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = '查询结果'
+    ws.append([title for _, title in QUERY_EXPORT_COLUMNS])
+    for r in rows:
+        ws.append([r.get(col, '') for col, _ in QUERY_EXPORT_COLUMNS])
+    for i, w in enumerate(QUERY_EXPORT_WIDTHS):      # 14 列 < 26，chr 够用
+        ws.column_dimensions[chr(ord('A') + i)].width = w
+    wb.save(path)
+    return path
+
+
+@app.route('/api/db/export', methods=['POST'])
+def api_db_export():
+    """按当前条件导出**全部命中行**（不受分页影响），返回可下载的文件名与 URL。
+
+    ⚠️ 落盘位置是 output/查询导出/**子目录**：output/ 根下的 *.xlsx 会被
+       `find_latest_result()` 选中当「最新结果文件」，把飞书导出的目标劫持到查询表上。
+    ⚠️ 本函数**绝不**碰 paths.ENRICH_FILE 与 STATE['output'] —— 那两个指针归「本轮采集」用。
+    """
+    p = _query_payload(request.get_json(silent=True))
+    try:
+        total, _, _ = db_query_customers(p['filters'], order=p['order'], limit=1, offset=0)
+    except Exception as e:
+        return jsonify({'ok': False, 'msg': f'{type(e).__name__}: {e}'})
+    if total <= 0:
+        return jsonify({'ok': False, 'msg': '当前条件没有命中任何客户，没有可导出的内容'})
+    if total > QUERY_EXPORT_MAX:
+        return jsonify({'ok': False, 'msg': f'命中 {total} 条，超过单次导出上限 '
+                                            f'{QUERY_EXPORT_MAX} 条，请再加点筛选条件'})
+    rows, offset = [], 0
+    while len(rows) < total:                        # 分页拉完，避免一次 SELECT 太大
+        _, page, _ = db_query_customers(p['filters'], order=p['order'],
+                                        limit=QUERY_MAX_LIMIT, offset=offset)
+        if not page:
+            break
+        rows.extend(page)
+        offset += len(page)
+    path = ts_query_export_path(len(rows))
+    try:
+        with EXCEL_LOCK:                            # 与其它 Excel 写盘互斥，写盘一律串行
+            _save_query_excel(rows, path)
+    except Exception as e:
+        log(f'⚠️ 查询导出失败（可能被 Excel 占用）：{type(e).__name__}: {e}')
+        return jsonify({'ok': False, 'msg': f'写入 Excel 失败：{type(e).__name__}: {e}'})
+    name = os.path.basename(path)
+    log(f'📤 客户库查询导出 {len(rows)} 条 → {OUTPUT_DIRNAME}/{QUERY_EXPORT_DIRNAME}/{name}')
+    return jsonify({'ok': True, 'rows': len(rows), 'name': name,
+                    'url': '/api/db/download/' + quote(name)})
+
+
+@app.route('/api/db/download/<path:name>')
+def api_db_download(name):
+    """下载查询导出的 Excel。
+
+    ⚠️ 必须挡路径穿越：只允许下载「查询导出目录里的那一个文件」，
+       basename 之后还要再确认解析出来的目录就是导出目录本身。
+    """
+    d = query_export_dir()
+    safe = os.path.basename(name or '')
+    path = os.path.join(d, safe)
+    if not safe or not os.path.isfile(path) \
+            or os.path.dirname(os.path.abspath(path)) != os.path.abspath(d):
+        return jsonify({'ok': False, 'msg': '文件不存在或已被移走'}), 404
+    return send_file(path, as_attachment=True, download_name=safe)
+
+
+@app.route('/api/db/open_folder', methods=['POST'])
+def api_db_open_folder():
+    """打开查询导出目录（与首页的「打开结果目录」分开，免得用户找不到导出的表）。"""
+    try:
+        os.startfile(query_export_dir())
+        return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
 

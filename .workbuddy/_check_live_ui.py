@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-"""真机校验两块前端改动：
+"""真机校验三块前端改动：
   A. 「5. 关键词组合预览」——选法国 + 输入 nouilles，确认条件词切法语、并显示 &gl=fr&hl=fr
   B. 「本轮已入库明细」——注入假数据，确认行数/徽章/空态/不撑破容器
+  C. 首页顶栏导航（V1.5 加）——两个链接的 href / 文案 / 样式真的生效
 起临时 Flask 实例 + Chrome，不联网、不碰真实客户库。"""
 import importlib.util
+import json
 import os
 import sys
 import threading
@@ -106,7 +108,32 @@ try:
     page.get_screenshot(path=PNG_LIVE, full_page=True)
     print('截图：', PNG_LIVE, os.path.getsize(PNG_LIVE), 'bytes')
 
-    print('\n✅ 预览 + 实时明细表 真机校验全部通过')
+    # ---------- C. 首页顶栏导航（V1.5 加）----------
+    # ⚠️ 这条非真机测不出来：href 写错 / 被删掉 / `.nav-a` 样式没生效，都**不会**报任何错，
+    #    只表现为「首页少了两个入口」或「导航退化成两条带下划线的裸链接」。
+    nav = json.loads(page.run_js(r"""
+      return JSON.stringify([...document.querySelectorAll('.nav a.nav-a')].map(a => {
+        const cs = getComputedStyle(a);
+        return {href: a.getAttribute('href'), text: a.textContent.trim(),
+                color: cs.color, deco: cs.textDecorationLine};
+      }));
+    """))
+    print('顶栏导航：', nav)
+    assert [d['href'] for d in nav] == ['/manual', '/db'], \
+        '首页顶栏导航应依次指向 /manual 与 /db，实际 %s' % [d['href'] for d in nav]
+    assert '手动采集页' in nav[0]['text'] and '客户库查询' in nav[1]['text'], \
+        '导航文案不对：%s' % [d['text'] for d in nav]
+    assert all(d['color'] == 'rgb(26, 115, 232)' for d in nav), \
+        '导航没拿到 .nav-a 的样式（共享 <style> 没注入？）：%s' % [d['color'] for d in nav]
+    assert all(d['deco'] == 'none' for d in nav), '导航链接还带着下划线（.nav-a 没生效）'
+    order = page.run_js(r"""
+      const n = document.querySelector('.nav'), c = document.querySelector('.card');
+      return (n.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING) ? 'before' : 'after';
+    """)
+    assert order == 'before', '顶栏导航应排在第一张卡之前，实际 %s' % order
+    print('  ✓ 首页顶栏两个导航就位（/manual、/db）且样式已生效')
+
+    print('\n✅ 预览 + 实时明细表 + 顶栏导航 真机校验全部通过')
 finally:
     if page:
         try:

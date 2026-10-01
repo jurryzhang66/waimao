@@ -83,6 +83,45 @@ def ts_result_path(industry='', country=''):
     return path
 
 
+# ================= 客户库查询的导出（/db 页用，与「本轮结果」完全隔离）=================
+QUERY_EXPORT_DIRNAME = '查询导出'
+
+
+def query_export_dir():
+    """查询导出目录 = output/查询导出/。
+
+    ⚠️⚠️ 必须是**子目录**，不能直接落 output/ 根下：
+        `find_latest_result()` 只 glob output/ 一层，并且靠「文件名里有 8 位日期」
+        筛候选 —— 查询导出表的名字天然带日期，一旦落在根下就会被它选中当
+        「最新结果文件」，把飞书导出的目标劫持到一份查询结果上。
+        放进子目录后 glob 扫不到，两条链路彻底隔离。
+    """
+    d = os.path.join(output_dir(), QUERY_EXPORT_DIRNAME)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        return output_dir()          # 建不出子目录时退回 output/，保证仍能出文件
+    return d
+
+
+def build_query_export_name(count=0):
+    """查询导出文件名：查询导出-日期_时间-共N条.xlsx（精确到秒，避免连续导出互相覆盖）。"""
+    stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    return f'查询导出-{stamp}-共{int(count)}条.xlsx'
+
+
+def ts_query_export_path(count=0):
+    """查询导出文件的绝对路径；同秒重名时自动加 _2/_3。"""
+    d = query_export_dir()
+    stem = build_query_export_name(count)[:-len('.xlsx')]
+    path = os.path.join(d, stem + '.xlsx')
+    n = 2
+    while os.path.exists(path):
+        path = os.path.join(d, f'{stem}_{n}.xlsx')
+        n += 1
+    return path
+
+
 def _result_time_key(path):
     """结果文件的排序键：优先取文件名里的日期+时间（如 宠物用品-20260928_0145-加拿大.xlsx
     -> 202609280145）。文件名开头是行业名，所以不能用整个文件名排序；用 mtime 又会被

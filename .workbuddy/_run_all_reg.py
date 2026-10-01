@@ -4,6 +4,10 @@
 清单就是 .workbuddy 里那一组「回归验证脚本」，加上项目根的 补历史欠账.py --dry。
 每项都是独立子进程，退出码 0 才算过；任何一项非 0，整个驱动最后返回 1。
 
+⚠️ 其中 `_check_db_keys` 与 `补历史欠账 --dry` 是**刻意扫真实客户库**的（其余项都把
+   `core.db.db_path` 打进临时目录）→ 它们只读、不写库；红了多半是真实数据需要人工修，
+   别顺手把断言改松。
+
 用法：python .workbuddy/_run_all_reg.py
 """
 import os
@@ -29,15 +33,19 @@ ITEMS = [
     ('_smoke_maps',            PY,   '.workbuddy/_smoke_maps.py',            []),
     ('_smoke_collect',         PY,   '.workbuddy/_smoke_collect.py',         []),
     ('_smoke_manual_session',  PY,   '.workbuddy/_smoke_manual_session.py',  []),
+    ('_smoke_query',           PY,   '.workbuddy/_smoke_query.py',           []),
     ('_check_feishu_records',  PY,   '.workbuddy/_check_feishu_records.py',  []),
     ('_check_maps_ui',         PY,   '.workbuddy/_check_maps_ui.py',         []),
     ('_check_kwlib_ui',        PY,   '.workbuddy/_check_kwlib_ui.py',        []),
     ('_check_live_ui',         PY,   '.workbuddy/_check_live_ui.py',         []),
     ('_check_manual_ui',       PY,   '.workbuddy/_check_manual_ui.py',       []),
+    ('_check_query_ui',        PY,   '.workbuddy/_check_query_ui.py',        []),
     ('_check_ext',             PY,   '.workbuddy/_check_ext.py',             []),
     ('_smoke_ext_content',     NODE, '.workbuddy/_smoke_ext_content.js',     []),
     ('_smoke_ext_popup',       NODE, '.workbuddy/_smoke_ext_popup.js',       []),
     ('_smoke_ext_live',        PY,   '.workbuddy/_smoke_ext_live.py',        []),
+    # ⚠️ 这两项是刻意扫**真实库**的（其它项都把 db_path 打进临时目录）→ 只读、失败要人工处理
+    ('_check_db_keys',         PY,   '.workbuddy/_check_db_keys.py',         []),
     ('补历史欠账 --dry',        PY,   '补历史欠账.py',                        ['--dry']),
 ]
 

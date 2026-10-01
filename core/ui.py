@@ -20,8 +20,12 @@ from core.paths import _app_dir
 _PAGE_TEMPLATE_PATH = os.path.join(_app_dir(), 'ui', 'page.html')
 # 第二个页面（手动采集）的模板：<项目根>/ui/manual.html
 _MANUAL_TEMPLATE_PATH = os.path.join(_app_dir(), 'ui', 'manual.html')
-# 从 page.html 里抽 <style>…</style> 注入 manual 页 —— 这样两页共用一份 CSS，
-# 且 page.html **一个字节都不用改**（_check_page.py 第 6 节 R5 的模板哈希基线因此保持成立）。
+# 第三个页面（客户库查询）的模板：<项目根>/ui/query.html
+_QUERY_TEMPLATE_PATH = os.path.join(_app_dir(), 'ui', 'query.html')
+# 从 page.html 里抽 <style>…</style> 注入副页面 —— 多页共用一份 CSS，样式只维护一处。
+# ⚠️ 这也意味着往 page.html 的 <style> 里加规则会**连带影响** /manual 与 /db 两页；
+#    副页面自己专有的样式请写进它们自带的第二个 <style>。
+#    （page.html 自身另有 _check_page.py R5 的 sha256 基线：故意改它要同步重算基线。）
 _STYLE_RE = re.compile(r'<style>(.*?)</style>', re.S)
 PAGE_CSS_PLACEHOLDER = 'PAGE_CSS_PLACEHOLDER'
 
@@ -36,6 +40,39 @@ def _read_page_template():
             '页面模板读取失败：{}\n原因：{}\n'
             '（ui/page.html 随程序一起分发，请确认它没被删除或改名）'.format(
                 _PAGE_TEMPLATE_PATH, e)) from e
+
+
+def _page_style():
+    """取出 page.html 的 <style> 块，供 manual / query 两个副页面注入。
+
+    ⚠️ 用**文本模式**读再正则抽块（和 R5 的 sha256 校验同一口径）——
+       本机 core.autocrlf=true 会让 git 检出成 CRLF，但文本模式读会把 CRLF 归一化成 LF，
+       所以这里的抽取结果与哈希基线和换行符无关。
+    """
+    m = _STYLE_RE.search(_read_page_template())
+    if not m:
+        raise RuntimeError(f'ui/page.html 里找不到 <style> 块，无法给副页面注入样式：'
+                           f'{_PAGE_TEMPLATE_PATH}')
+    return m.group(1)
+
+
+def _read_sub_template(path, name):
+    """读副页面模板（manual / query 共用同一套「缺文件要显式报错」的处理）。"""
+    try:
+        with open(path, encoding='utf-8') as f:
+            return f.read()
+    except OSError as e:
+        raise RuntimeError(
+            '{}模板读取失败：{}\n原因：{}\n'
+            '（它随程序一起分发，请确认没被删除或改名）'.format(name, path, e)) from e
+
+
+def _inject_page_style(html, path, name):
+    """把 page.html 的样式注入副页面模板的 PAGE_CSS_PLACEHOLDER 位置。"""
+    if PAGE_CSS_PLACEHOLDER not in html:
+        raise RuntimeError(f'{path} 里没有 {PAGE_CSS_PLACEHOLDER} 占位符，'
+                           f'{name}的样式无法注入（模板是不是被改坏了？）')
+    return html.replace(PAGE_CSS_PLACEHOLDER, _page_style())
 
 
 # 填充页面里的条件和国家（用 Python 注入，避免 JS 里写中文 JSON 出问题）
@@ -76,28 +113,26 @@ PAGE_HTML = _build_page()
 
 def _read_manual_template():
     """读手动采集页模板。缺文件时同样抛带绝对路径的错误（不要静默发个空页面出去）。"""
-    try:
-        with open(_MANUAL_TEMPLATE_PATH, encoding='utf-8') as f:
-            return f.read()
-    except OSError as e:
-        raise RuntimeError(
-            '手动采集页模板读取失败：{}\n原因：{}\n'
-            '（ui/manual.html 随程序一起分发，请确认它没被删除或改名）'.format(
-                _MANUAL_TEMPLATE_PATH, e)) from e
+    return _read_sub_template(_MANUAL_TEMPLATE_PATH, '手动采集页')
 
 
 def _build_manual_page():
     """构建手动采集页：把 page.html 的 <style> 整块注入，样式只维护一份。"""
-    m = _STYLE_RE.search(_read_page_template())
-    if not m:
-        raise RuntimeError(f'ui/page.html 里找不到 <style> 块，无法给手动采集页注入样式：'
-                           f'{_PAGE_TEMPLATE_PATH}')
-    tmpl = _read_manual_template()
-    if PAGE_CSS_PLACEHOLDER not in tmpl:
-        raise RuntimeError(f'ui/manual.html 里没有 {PAGE_CSS_PLACEHOLDER} 占位符，'
-                           f'样式无法注入（模板是不是被改坏了？）')
-    return tmpl.replace(PAGE_CSS_PLACEHOLDER, m.group(1))
+    return _inject_page_style(_read_manual_template(), _MANUAL_TEMPLATE_PATH, '手动采集页')
 
 
 # ⚠️ 同样必须放文件最后：_build_manual_page() 依赖 _read_manual_template 与 page.html 的样式块
 MANUAL_HTML = _build_manual_page()
+
+
+def _read_query_template():
+    """读客户库查询页模板。缺文件时同样抛带绝对路径的错误。"""
+    return _read_sub_template(_QUERY_TEMPLATE_PATH, '客户库查询页')
+
+
+def _build_query_page():
+    """构建客户库查询页：同样复用 page.html 的 <style> 块，样式只维护一份。"""
+    return _inject_page_style(_read_query_template(), _QUERY_TEMPLATE_PATH, '客户库查询页')
+
+
+QUERY_HTML = _build_query_page()

@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>客户库查询 · 谷歌客户开发工具</title>
+<style>PAGE_CSS_PLACEHOLDER</style>
+<style>
+/* 本页专属样式（公共部分由 PAGE_CSS_PLACEHOLDER 从 ui/page.html 注入，保持单一来源） */
+.sub a { color:#1a73e8; }
+.row { display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end; }
+.row > div { min-width:0; }
+.lbl { font-size:13px; color:#666; display:block; margin-bottom:4px; }
+.inline { display:flex; align-items:center; gap:6px; }
+.inline .dash { color:#999; }
+input[type=number], input[type=date] { border:1px solid #ddd; border-radius:6px;
+  padding:8px 10px; font-size:14px; font-family:inherit; background:#fff; }
+/* 四个多选面板：自适应列宽，每格内部自己滚，不把整页撑长 */
+.facet-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));
+  gap:12px; margin-top:14px; }
+.facet { border:1px solid #e8edf2; border-radius:8px; background:#fbfcfe; }
+.facet-h { font-size:13px; font-weight:600; color:#444; padding:8px 10px;
+  border-bottom:1px solid #eef2f6; }
+.facet-body { padding:7px 10px; max-height:158px; overflow:auto; }
+.ck { display:flex; align-items:center; gap:6px; font-size:13px; color:#333;
+  padding:2px 0; cursor:pointer; }
+.ck input { margin:0; flex:0 0 auto; }
+.ck-n { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ck b { color:#9aa0a6; font-weight:400; font-size:12px; }
+.ck-blank .ck-n { color:#999; }
+/* 结果表 10 列：窄了横向滚动，而不是挤成一团；高度比首页那张明细表高一些 */
+#resTable { min-width:980px; }
+.result-scroll { max-height:560px; }
+.pager { display:flex; align-items:center; gap:12px; margin-top:12px; }
+.pageinfo { font-size:13px; color:#555; }
+.res-src { font-size:12px; color:#666; white-space:nowrap; }
+.res-time { font-size:12px; color:#888; white-space:nowrap; }
+.res-idx { color:#aaa; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📊 客户库查询</h1>
+  <div class="sub">从客户库里按条件筛人，确认没问题再导出 Excel ·
+    <a href="/manual">← 手动采集</a> · <a href="/">← 自动搜索主页</a></div>
+
+  <!-- ① 筛选条件 -->
+  <div class="card" style="margin-bottom:16px;">
+    <h3>① 筛选条件</h3>
+    <div class="row">
+      <div style="flex:1; min-width:280px;">
+        <label class="lbl" for="kw">关键词（公司名 / 网址 / 邮箱 / 电话 / 行业 / 国家 / 摘要 模糊匹配）</label>
+        <input type="text" id="kw" placeholder="如 trash bag、plasticbagpc.com、@gmail.com">
+      </div>
+      <div>
+        <label class="lbl" for="order">排序</label>
+        <select id="order" style="width:170px;">
+          <option value="score_desc">评分 高 → 低</option>
+          <option value="score_asc">评分 低 → 高</option>
+          <option value="newest">采集时间 新 → 旧</option>
+          <option value="oldest">采集时间 旧 → 新</option>
+          <option value="updated">最近更新优先</option>
+          <option value="name">公司名 A → Z</option>
+        </select>
+      </div>
+      <div>
+        <label class="lbl" for="pagesize">每页</label>
+        <select id="pagesize" style="width:96px;">
+          <option value="50">50 条</option>
+          <option value="100">100 条</option>
+          <option value="200">200 条</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- 行业 / 国家 / 来源 / 评级：全部由 /api/db/facets 按**真实库里的取值**生成，
+         不在这里硬编码行业枚举 —— 库里还留着早期版本写入的历史行业名，
+         硬编码就会让那批数据「怎么选都筛不出来」。 -->
+    <div class="facet-grid" id="facetGrid"></div>
+
+    <div class="row" style="margin-top:14px;">
+      <div>
+        <label class="lbl">评分区间</label>
+        <div class="inline">
+          <input type="number" id="scoreMin" min="0" max="100" style="width:86px;" placeholder="最低">
+          <span class="dash">–</span>
+          <input type="number" id="scoreMax" min="0" max="100" style="width:86px;" placeholder="最高">
+        </div>
+      </div>
+      <div>
+        <label class="lbl" for="contact">联系方式</label>
+        <select id="contact" style="width:200px;">
+          <option value="">不限</option>
+          <option value="has_any">有邮箱或电话</option>
+          <option value="has_both">邮箱和电话都有</option>
+          <option value="has_email">有邮箱</option>
+          <option value="has_phone">有电话</option>
+          <option value="no_email">缺邮箱（待补全）</option>
+          <option value="no_phone">缺电话</option>
+          <option value="no_contact">完全没有联系方式</option>
+        </select>
+      </div>
+      <div>
+        <label class="lbl">采集时间</label>
+        <div class="inline">
+          <input type="date" id="seenAfter" style="width:150px;">
+          <span class="dash">–</span>
+          <input type="date" id="seenBefore" style="width:150px;">
+        </div>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn-start" id="btnQuery">🔍 查询</button>
+      <button class="btn-export" id="btnExport">⬇️ 导出 Excel</button>
+      <button class="btn-mini" id="btnReset">重置条件</button>
+      <button class="btn-open" id="btnOpen">📂 打开导出文件夹</button>
+      <span class="counter" id="counter">—</span>
+    </div>
+    <div class="note" id="hint">正在读取客户库概览…</div>
+  </div>
+
+  <!-- ② 查询结果 -->
+  <div class="card live-wrap">
+    <div class="live-head">
+      <h3>② 查询结果</h3>
+      <span class="live-badge" id="resCount">—</span>
+      <span class="status" id="resStatus" style="margin-top:0;"></span>
+    </div>
+    <div class="live-scroll result-scroll">
+      <table class="live" id="resTable">
+        <thead><tr>
+          <th>#</th><th>公司 / 官网</th><th>邮箱</th><th>电话</th><th>评分</th>
+          <th>评级</th><th>行业</th><th>国家</th><th>来源</th><th>采集时间</th>
+        </tr></thead>
+        <tbody id="resBody"></tbody>
+      </table>
+      <div class="live-empty" id="resEmpty">还没有查询结果…</div>
+    </div>
+    <div class="pager">
+      <button class="btn-mini" id="btnPrev">‹ 上一页</button>
+      <span class="pageinfo" id="pageInfo">—</span>
+      <button class="btn-mini" id="btnNext">下一页 ›</button>
+    </div>
+    <div class="note" id="resNote"></div>
+  </div>
+
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+'use strict';
+const EMPTY = '__empty__';          // 与后端 core/db.py 的 QUERY_EMPTY 必须一致
+const PAGE = { total: 0, limit: 50, offset: 0 };
+
+function esc(s){
+  return String(s == null ? '' : s)
+    .replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function logBox(msg){
+  const b = document.getElementById('log');
+  b.textContent += msg + '\n';
+  b.scrollTop = b.scrollHeight;
+}
+function domainOf(url){
+  try { return new URL(url).hostname.replace(/^www\./, ''); } catch(e){ return url || ''; }
+}
+function ratingCls(r){
+  return r === '重点客户' ? 'tag-r1' : r === '普通客户' ? 'tag-r2' : 'tag-r3';
+}
+
+// ---------- 收集条件 ----------
+function checkedValues(name){
+  const out = [];
+  document.querySelectorAll('input[name="' + name + '"]:checked').forEach(x => out.push(x.value));
+  return out;
+}
+function curLimit(){ return parseInt(document.getElementById('pagesize').value, 10) || 50; }
+function curOrder(){ return document.getElementById('order').value || 'score_desc'; }
+function collect(){
+  return {
+    kw:           document.getElementById('kw').value.trim(),
+    industries:   checkedValues('industries'),
+    countries:    checkedValues('countries'),
+    sources:      checkedValues('sources'),
+    ratings:      checkedValues('ratings'),
+    score_min:    document.getElementById('scoreMin').value || null,
+    score_max:    document.getElementById('scoreMax').value || null,
+    contact:      document.getElementById('contact').value || '',
+    seen_after:   document.getElementById('seenAfter').value || '',
+    seen_before:  document.getElementById('seenBefore').value || ''
+  };
+}
+
+// ---------- ① 筛选面板（取值来自真实库）----------
+async function loadFacets(){
+  let f = null;
+  try { f = await (await fetch('/api/db/facets')).json(); }
+  catch(e){ document.getElementById('hint').textContent = '⚠️ 读不到客户库概览：' + e; return; }
+  if (!f || f.ok === false){
+    document.getElementById('hint').textContent = '⚠️ 读不到客户库概览：' + ((f && f.msg) || '未知原因');
+    return;
+  }
+  const groups = [
+    ['industries', '行业',        f.industries_blank, '未标注'],
+    ['countries',  '国家/地区',   f.countries_blank,  '未填写'],
+    ['sources',    '来源渠道',    f.sources_blank,    '未填写'],
+    ['ratings',    '评级',        f.ratings_blank,    '未填写']
+  ];
+  document.getElementById('facetGrid').innerHTML = groups.map(function(g){
+    const key = g[0], label = g[1], blank = g[2] || 0, blankLabel = g[3];
+    const items = (f[key] || []).map(function(o){
+      return '<label class="ck"><input type="checkbox" name="' + key + '" value="' + esc(o.value) + '">' +
+             '<span class="ck-n" title="' + esc(o.value) + '">' + esc(o.value) + '</span>' +
+             '<b>' + o.count + '</b></label>';
+    }).join('');
+    const blankItem = blank
+      ? '<label class="ck ck-blank"><input type="checkbox" name="' + key + '" value="' + EMPTY + '">' +
+        '<span class="ck-n">' + blankLabel + '</span><b>' + blank + '</b></label>'
+      : '';
+    return '<div class="facet"><div class="facet-h">' + esc(label) + '</div>' +
+           '<div class="facet-body">' + items + blankItem + '</div></div>';
+  }).join('');
+  // 评分/日期的取值范围，直接取库里的真实极值当提示
+  const sc = f.score || {}, dt = f.date || {};
+  document.getElementById('scoreMin').placeholder = sc.min == null ? '最低' : ('最低 ' + sc.min);
+  document.getElementById('scoreMax').placeholder = sc.max == null ? '最高' : ('最高 ' + sc.max);
+  if (dt.min){
+    ['seenAfter', 'seenBefore'].forEach(function(id){
+      document.getElementById(id).min = dt.min;
+      document.getElementById(id).max = dt.max || '';
+    });
+  }
+  const ct = f.contact || {};
+  document.getElementById('hint').textContent =
+    '客户库共 ' + f.total + ' 条 · 有邮箱 ' + (ct.has_email || 0) + ' 条、有电话 ' + (ct.has_phone || 0) +
+    ' 条、还没有任何联系方式 ' + (ct.no_contact || 0) + ' 条。';
+}
+
+// ---------- ② 查询 ----------
+async function runQuery(offset){
+  const limit = curLimit();
+  PAGE.limit = limit;
+  PAGE.offset = Math.max(0, offset || 0);
+  const status = document.getElementById('resStatus');
+  status.style.color = '';
+  status.textContent = '查询中…';
+  document.getElementById('btnQuery').disabled = true;
+  let d = null;
+  try {
+    d = await (await fetch('/api/db/query', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({filters: collect(), order: curOrder(), limit: limit, offset: PAGE.offset})
+    })).json();
+  } catch(e){
+    status.style.color = '#d93025';
+    status.textContent = '⚠️ 查询请求失败：' + e;
+    document.getElementById('btnQuery').disabled = false;
+    return;
+  }
+  document.getElementById('btnQuery').disabled = false;
+  if (!d || d.ok === false){
+    status.style.color = '#d93025';
+    status.textContent = '⚠️ 查询失败：' + ((d && d.msg) || '未知原因');
+    return;
+  }
+  // 翻过头了（比如删了数据、或条件变窄）→ 回到最后一个有内容的页
+  if (PAGE.offset >= d.total && d.total > 0){
+    return runQuery(Math.floor((d.total - 1) / limit) * limit);
+  }
+  PAGE.total = d.total;
+  status.textContent = '';
+  renderResult(d);
+}
+
+function renderResult(d){
+  const rows = d.rows || [];
+  const tb = document.getElementById('resBody');
+  tb.innerHTML = rows.map(function(r, i){
+    const idx = PAGE.offset + i + 1;
+    const mails = r.email
+      ? '<span class="live-mail">' + esc(r.email) + '</span>'
+      : '<span class="live-miss">未抓到</span>';
+    const phones = r.phone ? esc(r.phone) : '<span class="live-miss">未抓到</span>';
+    const rating = r.rating
+      ? '<span class="tag-r ' + ratingCls(r.rating) + '">' + esc(r.rating) + '</span>'
+      : '<span class="live-miss">—</span>';
+    const link = r.website
+      ? '<a class="live-co" href="' + esc(r.website) + '" target="_blank" rel="noopener" title="' +
+        esc(r.company_name || r.website) + '">' + esc(r.company_name || domainOf(r.website)) + '</a><br>' +
+        '<span class="live-dom">' + esc(domainOf(r.website)) + '</span>'
+      : '<span class="live-miss">' + esc(r.company_name || '(无)') + '</span>';
+    return '<tr>' +
+      '<td class="res-idx">' + idx + '</td>' +
+      '<td>' + link + '</td>' +
+      '<td class="live-cell">' + mails + '</td>' +
+      '<td class="live-cell">' + phones + '</td>' +
+      '<td class="live-sc">' + (r.score == null ? '<span class="live-miss">—</span>' : r.score) + '</td>' +
+      '<td>' + rating + '</td>' +
+      '<td>' + esc(r.industry || '') + '</td>' +
+      '<td>' + esc(r.country || '') + '</td>' +
+      '<td class="res-src">' + esc(r.source || '') + '</td>' +
+      '<td class="res-time">' + esc((r.first_seen_at || '').slice(0, 16)) + '</td>' +
+      '</tr>';
+  }).join('');
+
+  document.getElementById('resCount').textContent = d.total + ' 条';
+  document.getElementById('resCount').title = '当前条件下客户库命中的总条数（不是本页行数）';
+  document.getElementById('resEmpty').style.display = rows.length ? 'none' : 'block';
+  if (!rows.length) document.getElementById('resEmpty').textContent = '没有符合条件的客户，换个条件试试。';
+
+  const from = d.total ? (PAGE.offset + 1) : 0;
+  const to = Math.min(PAGE.offset + rows.length, d.total);
+  const pages = Math.max(1, Math.ceil(d.total / PAGE.limit));
+  const cur = Math.floor(PAGE.offset / PAGE.limit) + 1;
+  document.getElementById('pageInfo').textContent =
+    '第 ' + from + '–' + to + ' 条 / 共 ' + d.total + ' 条（第 ' + cur + ' / ' + pages + ' 页）';
+  document.getElementById('counter').textContent = '命中 ' + d.total + ' 条';
+  document.getElementById('btnPrev').disabled = PAGE.offset <= 0;
+  document.getElementById('btnNext').disabled = (PAGE.offset + rows.length) >= d.total;
+}
+
+// 翻页 / 排序 / 每页条数变了，都回到第 1 页重查
+function requery(){
+  return runQuery(0);
+}
+
+// ---------- ③ 导出 ----------
+async function doExport(){
+  const btn = document.getElementById('btnExport');
+  btn.disabled = true;
+  logBox('正在按当前条件导出…');
+  let d = null;
+  try {
+    d = await (await fetch('/api/db/export', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({filters: collect(), order: curOrder()})
+    })).json();
+  } catch(e){
+    logBox('⚠️ 导出请求失败：' + e);
+    btn.disabled = false;
+    return;
+  }
+  btn.disabled = false;
+  if (!d || d.ok === false){
+    logBox('⚠️ 导出失败：' + ((d && d.msg) || '未知原因'));
+    document.getElementById('resNote').textContent = '⚠️ 导出失败：' + ((d && d.msg) || '未知原因');
+    return;
+  }
+  logBox('✅ 已导出 ' + d.rows + ' 条 → ' + d.name);
+  document.getElementById('resNote').textContent =
+    '已导出 ' + d.rows + ' 条到 output/查询导出/' + d.name + '（浏览器同时开始下载）';
+  window.location.href = d.url;      // 响应带 Content-Disposition: attachment，页面不会跳走
+}
+
+// ---------- ④ 其它 ----------
+function resetForm(){
+  document.getElementById('kw').value = '';
+  document.querySelectorAll('#facetGrid input[type=checkbox]').forEach(function(x){ x.checked = false; });
+  ['scoreMin', 'scoreMax', 'seenAfter', 'seenBefore'].forEach(function(id){
+    document.getElementById(id).value = '';
+  });
+  document.getElementById('contact').value = '';
+  document.getElementById('order').value = 'score_desc';
+  document.getElementById('pagesize').value = '50';
+  document.getElementById('resNote').textContent = '';
+  requery();
+}
+async function openFolder(){
+  try {
+    const d = await (await fetch('/api/db/open_folder', {method: 'POST'})).json();
+    logBox(d && d.ok ? '📂 已打开导出文件夹' : ('⚠️ 打不开文件夹：' + ((d && d.msg) || '未知原因')));
+  } catch(e){ logBox('⚠️ 打不开文件夹：' + e); }
+}
+
+(async function init(){
+  document.getElementById('btnQuery').addEventListener('click', requery);
+  document.getElementById('btnExport').addEventListener('click', doExport);
+  document.getElementById('btnReset').addEventListener('click', resetForm);
+  document.getElementById('btnOpen').addEventListener('click', openFolder);
+  document.getElementById('btnPrev').addEventListener('click', function(){
+    runQuery(Math.max(0, PAGE.offset - PAGE.limit));
+  });
+  document.getElementById('btnNext').addEventListener('click', function(){
+    runQuery(PAGE.offset + PAGE.limit);
+  });
+  document.getElementById('order').addEventListener('change', requery);
+  document.getElementById('pagesize').addEventListener('change', requery);
+  document.getElementById('kw').addEventListener('keydown', function(e){
+    if (e.key === 'Enter') requery();
+  });
+  await loadFacets();
+  await runQuery(0);
+})();
+</script>
+</body>
+</html>

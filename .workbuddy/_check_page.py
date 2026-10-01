@@ -283,20 +283,31 @@ for _need in ('from core.ui import PAGE_HTML, _build_page', 'from core import db
     assert _need in _src2, f'入口缺少拆包 glue：{_need}'
 print('  ✓ R4 入口已无任何已搬迁的模块级定义（AST 扫描 19 个函数 + 30 个常量）')
 
-# --- R5 模板与构建结果哈希必须与 V1.3 基线一字不差 ---
+# --- R5 模板与构建结果哈希必须与基线一致（防误格式化 / 转义静默变形）---
+# ⚠️ 基线在 V1.5 推进过一次：主页顶栏加了「手动采集页 / 客户库查询」两个导航链接。
+#    那是**故意**改的；以后凡是故意动 page.html，下面两个字面量必须**一起**重算（漏一个就红）。
+#    这条断言剩余的价值 = 「哪次误格式化/误翻译把模板改变形，立刻能被抓到」。
+#    ⛔ 如果只是改了别的东西却发现这里红：先看 diff，别顺手把基线改掉。
+_TMPL_SHA = 'f90082ea1d375eaec7dcef1c187d7f73ded020e4d5bfd3d21954e45796e9478d'
+_BUILT_SHA = '563818c65670d8a38a2606d0e2bec20a19757551b70b2e8e6f7cffe1f69b0e11'
 import hashlib as _hl
 _raw = open(os.path.join(_root, 'ui', 'page.html'), encoding='utf-8').read()
-assert _hl.sha256(_raw.encode('utf-8')).hexdigest() == \
-    '85207b10bef4f636ebfb12ed39e1501759f080a3a6a8ed3821afc178649ba4d5', \
-    'ui/page.html 与原始模板不一致（可能被误格式化，转义会静默变形）'
-assert _hl.sha256(m._build_page().encode('utf-8')).hexdigest() == \
-    'd2afeab91c0369d64bcd770a1bac565fdc6d2a373f1a296eedaecf00a15b808d', \
-    '构建后页面与重构前不一致'
+assert _hl.sha256(_raw.encode('utf-8')).hexdigest() == _TMPL_SHA, \
+    'ui/page.html 与基线不一致（可能被误格式化，转义会静默变形；若是故意改的，' \
+    '就把本节的 _TMPL_SHA 与 _BUILT_SHA 一起重算）'
+assert _hl.sha256(m._build_page().encode('utf-8')).hexdigest() == _BUILT_SHA, \
+    '构建后页面与基线不一致（动了模板却忘了重算 _BUILT_SHA？）'
 print('  ✓ R5 模板与构建结果哈希均与基线一致（转义没被破坏）')
 
 # --- R6 页面必须是已构建的成品 ---
 assert m.PAGE_HTML == m._build_page()
 assert 'PLACEHOLDER' not in m.PAGE_HTML
+# 主页顶栏的两个导航（V1.5 加）：href 写错/被删掉**不会**有任何运行时报错，只会静默少个入口。
+# （两个路由自身的注册分别由 R7 / R9 断言，这里只管主页确实指过去了。）
+for _href in ('/manual', '/db'):
+    assert f'href="{_href}"' in m.PAGE_HTML, f'主页缺少指向 {_href} 的导航链接'
+assert 'class="nav-a"' in m.PAGE_HTML and '.nav-a' in m.PAGE_HTML, \
+    '主页导航的样式类 .nav-a 不在页面上（导航会退化成一条带下划线的裸链接）'
 # 模板缺文件必须显式报错（带绝对路径），而不是静默发出空页面
 import core.ui as _cu
 assert os.path.isabs(_cu._PAGE_TEMPLATE_PATH), '模板路径不是绝对路径'
@@ -313,8 +324,8 @@ finally:
 print('  ✓ R6 页面为已构建成品；模板缺失会显式报错（带绝对路径）')
 
 # --- R7 第二个页面（手动采集 /manual）---
-# ⚠️ 刻意设计成「page.html 零改动 + 复用它的 <style> 块」，
-#    所以上面 R5 的两处 sha256 字面量**不需要**跟着改 —— 这正是这样设计的收益。
+# ⚠️ 设计成「副页面用 PAGE_CSS_PLACEHOLDER 复用 page.html 的 <style> 块」→ 公共样式只维护一份。
+#    所以加/改本页**不影响** R5 的基线（R5 只管 page.html 自身）。
 assert m.MANUAL_HTML == m._build_manual_page(), 'MANUAL_HTML 不是 _build_manual_page() 的成品'
 assert 'PLACEHOLDER' not in m.MANUAL_HTML, 'MANUAL_HTML 里有占位符没被替换'
 assert os.path.isabs(_cu._MANUAL_TEMPLATE_PATH), 'manual 模板路径不是绝对路径'
@@ -343,8 +354,17 @@ assert 'onSessionBodyClick' in m.MANUAL_HTML and 'deleteSessionRow' in m.MANUAL_
 assert '/api/manual/session/delete' in m.MANUAL_HTML, '页面没打删除接口'
 assert "getElementById('sessionBody').addEventListener('click'" in m.MANUAL_HTML, \
     '删除没做事件委托（应挂在 #sessionBody 上）'
-# 删除按钮的样式只能写在本页自带的第二个 <style> 里：page.html 被 R5 的 sha256 锁死
+# 删除按钮的样式写在本页自带的第二个 <style> 里：公共样式统一从 page.html 注入，
+# 本页专有的样式别混进那一份（混进去会顺带影响 / 与 /manual 两页）
 assert '.row-del' in m.MANUAL_HTML, '删除按钮的样式没写进 manual 页自己的 <style>'
+# 计数口径必须拆开报：「已采 N 条」＝ 新增 + 已在库，而结果 Excel **只写「新增」**。
+# 只报一个数，就是用户最容易误判成「表漏写了」的地方（实测踩过：已采 17 条、表里 13 行）。
+for _need in ('function breakdownText(', 'function roundTally(',
+              "'新增 ' + (st.added || 0) + ' · 已在库 ' + (st.existed || 0)",
+              "'已采 ' + n + ' 条 = 新增 '",
+              '只写「新增」的 ',
+              'renderSession(st.session_rows, st)'):
+    assert _need in m.MANUAL_HTML, f'计数口径拆分的实现不在页面上：{_need}'
 # 路由已注册
 assert 'manual_page' in m.app.view_functions, '/manual 路由没注册'
 # share 的行业下拉必须是动态取的，不能在页面里再硬编码一份行业枚举
@@ -364,6 +384,69 @@ finally:
     _cu._MANUAL_TEMPLATE_PATH = _save_m
 print('  ✓ R7 手动采集页 /manual：成品、共享样式已注入、四张卡齐全、行业枚举未硬编码、每行 ✕ 删除就位')
 
-print('  ✓ 拆包防护断言全部通过（程序根 / 单例 / 动态 ENRICH_FILE / 残留定义 / 模板哈希 / 第二页）')
+# --- R9 第三个页面（客户库查询 /db）---
+# 与 /manual 同一套设计：用 PAGE_CSS_PLACEHOLDER 复用 page.html 的 <style> 块
+# → 加/改本页同样不动 R5 的基线。
+assert m.QUERY_HTML == m._build_query_page(), 'QUERY_HTML 不是 _build_query_page() 的成品'
+assert 'PLACEHOLDER' not in m.QUERY_HTML, 'QUERY_HTML 里有占位符没被替换'
+assert os.path.isabs(_cu._QUERY_TEMPLATE_PATH), 'query 模板路径不是绝对路径'
+assert '.btn-start' in m.QUERY_HTML and 'table.live' in m.QUERY_HTML, \
+    '查询页没拿到 page.html 注入的共享样式'
+# 两张卡与关键控件都在
+for _need in ('id="facetGrid"', 'id="resBody"', 'id="resCount"', 'id="resEmpty"',
+              'id="resStatus"', 'id="pageInfo"', 'id="resNote"',
+              'id="kw"', 'id="order"', 'id="pagesize"', 'id="scoreMin"', 'id="scoreMax"',
+              'id="contact"', 'id="seenAfter"', 'id="seenBefore"',
+              'id="btnQuery"', 'id="btnExport"', 'id="btnReset"', 'id="btnOpen"',
+              'id="btnPrev"', 'id="btnNext"', 'id="log"'):
+    assert _need in m.QUERY_HTML, f'客户库查询页缺少 {_need}'
+for _fn in ('function collect(', 'function runQuery(', 'function renderResult(',
+            'function loadFacets(', 'function doExport(', 'function resetForm('):
+    assert _fn in m.QUERY_HTML, f'查询页缺少逻辑函数：{_fn}'
+assert '/api/db/facets' in m.QUERY_HTML and '/api/db/query' in m.QUERY_HTML \
+    and '/api/db/export' in m.QUERY_HTML and '/api/db/open_folder' in m.QUERY_HTML, \
+    '查询页没打开全部新接口'
+# ⚠️⚠️ 前端 JS 里那个「未填写」哨兵值必须与后端 core.db.QUERY_EMPTY 一字不差。
+#    写错不会报错，只会让「勾了未填写却筛不出任何东西」——最典型的静默失效。
+assert f"const EMPTY = '{m.db.QUERY_EMPTY}'" in m.QUERY_HTML, \
+    '查询页的 EMPTY 哨兵值与 core.db.QUERY_EMPTY 不一致（「未填写」筛选会静默失效）'
+# 行业/国家/来源/评级 必须全部由接口动态生成，页面里不许出现行业名（库里还有历史行业名）
+for _ind in ('塑料包装袋', '宠物用品', '家具家居', 'LED照明'):
+    assert _ind not in m.QUERY_HTML, \
+        f'客户库查询页硬编码了行业名「{_ind}」——应从 /api/db/facets 动态生成'
+assert 'QUERY_ORDER_SQL' not in m.QUERY_HTML, '排序白名单是后端的事，不该出现在页面里'
+# 导出列是**另一套**契约（14 列客户库全字段），不能误用结果 Excel 的 10 列硬契约
+assert len(m.QUERY_EXPORT_COLUMNS) == 14, f'查询导出应 14 列，实际 {len(m.QUERY_EXPORT_COLUMNS)}'
+assert m.QUERY_EXPORT_COLUMNS[0][1] == '公司名称', '查询导出首列应是「公司名称」'
+assert '行业' in [t for _, t in m.QUERY_EXPORT_COLUMNS] \
+    and '来源渠道' in [t for _, t in m.QUERY_EXPORT_COLUMNS], \
+    '查询导出应带行业与来源渠道（这是它与结果 Excel 10 列契约的区别）'
+assert len(m.EXCEL_HEADER_10) == 10, '结果 Excel 的 10 列硬契约被改坏了'
+# 路由已注册
+assert 'query_page' in m.app.view_functions, '/db 路由没注册'
+for _api in ('api_db_facets', 'api_db_query', 'api_db_export', 'api_db_download', 'api_db_open_folder'):
+    assert _api in m.app.view_functions, f'查询接口没注册：{_api}'
+# ⚠️ 导出必须落 output/查询导出/**子目录**：落 output/ 根下会被 find_latest_result()
+#    选中当「最新结果文件」，把飞书导出的目标劫持到一份查询表上。
+assert m.QUERY_EXPORT_DIRNAME == '查询导出', '查询导出子目录名被改了'
+assert os.path.basename(m.query_export_dir()) == '查询导出', 'query_export_dir 不在 output 子目录下'
+assert os.path.dirname(m.query_export_dir()) == m.output_dir(), \
+    '查询导出目录必须是 output/ 的直接子目录（否则可能被 find_latest_result 扫到）'
+assert '查询导出' in m.ts_query_export_path(1), '查询导出文件名没带标识'
+# query 模板缺文件同样要显式报错
+try:
+    _save_q = _cu._QUERY_TEMPLATE_PATH
+    _cu._QUERY_TEMPLATE_PATH = os.path.join(_root, 'ui', '__不存在__.html')
+    try:
+        _cu._read_query_template()
+        raise AssertionError('query 模板缺失时没有报错')
+    except RuntimeError as e:
+        assert '__不存在__.html' in str(e), 'query 模板报错信息里没有绝对路径'
+finally:
+    _cu._QUERY_TEMPLATE_PATH = _save_q
+print('  ✓ R9 客户库查询页 /db：成品、共享样式已注入、控件齐全、行业枚举未硬编码、'
+      '哨兵值与后端一致、导出落 output/查询导出/ 子目录')
+
+print('  ✓ 拆包防护断言全部通过（程序根 / 单例 / 动态 ENRICH_FILE / 残留定义 / 模板哈希 / 第二页 R7 / 第三页 R9）')
 
 print('\n✅ 页面静态检查通过')

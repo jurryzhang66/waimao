@@ -202,7 +202,8 @@ setHandler('DP_STATE', () => ({
 setHandler('DP_KEYWORDS', () => ({ ok: true, names: ['塑料包装袋', '宠物用品'] }));
 setHandler('DP_MANUAL_STATE', () => STATE);
 setHandler('DP_URLS', () => ({ ok: true, base: 'http://127.0.0.1:8000',
-  manual: 'http://127.0.0.1:8000/manual', home: 'http://127.0.0.1:8000/' }));
+  manual: 'http://127.0.0.1:8000/manual', home: 'http://127.0.0.1:8000/',
+  db: 'http://127.0.0.1:8000/db' }));
 setHandler('DP_FORGET_PORT', () => ({ ok: true, online: true, port: 8000, tool: {} }));
 setHandler('DP_SETTINGS_SET', () => ({ ok: true }));
 setHandler('DP_COLLECT_TAB', () => ({
@@ -257,6 +258,13 @@ setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: '
         && /行业 宠物用品/.test(el('sessStatus').textContent)
         && /国家 德国/.test(el('sessStatus').textContent),
         '状态行=进行中+条数+口径', el('sessStatus').textContent);
+  // ⚠️ 「已采 N 条」必须同时报出「新增 X · 已在库 Y」：明细行数 = 新增 + 已在库，
+  //    而结果 Excel 只写「新增」。只报一个数会让人以为表漏写了（实测踩过：已采 17 条、表 13 行）。
+  check(/新增 2 · 已在库 1/.test(el('sessStatus').textContent),
+        '状态行把「新增 / 已在库」拆开报（差额就是 Excel 少的那部分）',
+        el('sessStatus').textContent);
+  check(/已采 3 条 = 新增 2 \+ 已在库 1/.test(String(el('sessCount').title || '')),
+        '徽章悬停给出「已采 = 新增 + 已在库」的算式', String(el('sessCount').title));
   check(el('sessStatus').className === 'live-status', '状态行不是错误态', el('sessStatus').className);
   check(el('btnFinish').disabled === false, '本轮进行中 → 结束按钮可用');
   check(el('sessFile').textContent === '', '还没有结果文件/提示时该行为空', el('sessFile').textContent);
@@ -325,10 +333,14 @@ setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: '
   // 7a 成功：后端关轮 + 记下文件名 → 状态行与结果行都指向这份文件
   setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: XLSX }));
   el('btnFinish').emit('click');
-  STATE = mkState({ session_active: false, session_excel: XLSX, session_rows: [] });
+  STATE = mkState({ session_active: false, session_excel: XLSX, session_rows: [],
+                    added: 5, existed: 2 });
   await settle();
   check(el('sessFile').textContent.includes(XLSX), '结束后显示生成的 Excel 文件名',
         el('sessFile').textContent);
+  check(/本轮写入 5 行新客户/.test(el('sessFile').textContent)
+        && /另有 2 条已在客户库/.test(el('sessFile').textContent),
+        '结果行说清「表里写了几行、为什么比已采数少」', el('sessFile').textContent);
   check(/✅ 上一轮已生成结果文件/.test(el('sessStatus').textContent), '状态行转「上一轮已生成」',
         el('sessStatus').textContent);
   check(el('btnFinish').textContent === FINISH_LABEL, '按钮文案已还原',
@@ -417,7 +429,7 @@ setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: '
           '状态行分支：' + String(re).replace(/[/^$\\]/g, ''), el('sessStatus').textContent);
   }
 
-  section('⑨ 四个链接的去向');
+  section('⑨ 五个链接的去向');
   setHandler('DP_MANUAL_STATE', () => mkState({ session_active: true, session_rows: [R1] }));
   el('lnkManual').emit('click');
   await tick(40);
@@ -425,6 +437,10 @@ setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: '
   el('lnkHome').emit('click');
   await tick(40);
   check(CREATED.includes('http://127.0.0.1:8000/'), '「自动搜索主页」→ /', CREATED.join(','));
+  // /db 客户库查询页：走的是与上面两个链接同一条 toolUrls() 路径（popup 里零 fetch）
+  el('lnkDb').emit('click');
+  await tick(40);
+  check(CREATED.includes('http://127.0.0.1:8000/db'), '「客户库查询」→ /db', CREATED.join(','));
   el('lnkOptions').emit('click');
   await tick(10);
   check(optionsOpened === 1, '「设置」→ 打开选项页', String(optionsOpened));

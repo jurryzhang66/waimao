@@ -21,8 +21,8 @@
 .steps code { background:#f1f3f4; padding:1px 6px; border-radius:4px; font-family:Consolas,monospace; }
 .warn { background:#fff8e6; border:1px solid #f0d9a0; border-radius:8px; padding:10px 12px;
   font-size:13px; color:#8a6d1f; margin-top:10px; line-height:1.7; }
-/* ③ 本轮明细每行的删除按钮。⚠️ 只能写在本页这个 <style> 里 ——
-   ui/page.html 的 <style> 被 _check_page.py R5 的 sha256 锁死，动它回归立刻红。 */
+/* ③ 本轮明细每行的删除按钮。⚠️ 写在本页这个 <style> 里，别混进 page.html 那份公共样式 ——
+   那份被 _page_style() 注入到全部三个页面，往里头加本页专有的事会顺带影响 / 与 /db。 */
 .live-del-th, .live-del { width:38px; text-align:center; }
 .row-del { border:0; background:transparent; color:#9aa0a6; cursor:pointer;
   font-size:13px; padding:2px 6px; border-radius:4px; line-height:1.4; }
@@ -33,6 +33,7 @@
 <div class="wrap">
   <h1>🖐️ 手动采集</h1>
   <div class="sub">浏览时看到目标客户网站就点一下采集 · 也可批量粘贴网址 ·
+    <a href="/db">📊 客户库查询</a> ·
     <a href="/">← 返回自动搜索主页</a></div>
 
   <!-- ① 扩展连接状态 -->
@@ -173,7 +174,30 @@ function renderHeart(st){
 // 与自动搜索页的 renderRows() 同一套写法（那边渲染 STATE['rows']，表头少两列）。
 let renderedSession = 0;
 
-function renderSession(rows){
+// ==================== 计数口径：为什么「已采条数」≠「Excel 行数」 ====================
+// 这是最容易被当成 bug 的地方，两个口径必须一起报：
+//   · 「已采 / 明细行数」＝ session_rows 的长度 ＝ 新增 + 已在库（每条点过都留一行痕）
+//   · 结果 Excel 只写「新增」—— 已在客户库的老客户刻意不重复进表（否则导飞书会重复推送）
+// 所以 Excel 行数天然小于「已采条数」，差额就是「已在库」那部分。
+function breakdownText(st, n){
+  if (!st || (st.added == null && st.existed == null)) return '';
+  const a = st.added || 0, e = st.existed || 0;
+  return '已采 ' + n + ' 条 = 新增 ' + a + ' + 已在库 ' + e +
+         '；结果 Excel 只写「新增」的 ' + a + ' 条';
+}
+
+// 轮已结束时，把「这份表里到底写了几行」直接说在结果文件那行上。
+// ⚠️ 只在 !session_active 时显示：新一轮开起来之后 added/existed 已清零，
+//    而 session_excel 还挂着上一份文件名，配上新计数会误导。
+function roundTally(st){
+  if (!st || st.session_active) return '';
+  if (st.added == null && st.existed == null) return '';
+  const a = st.added || 0, e = st.existed || 0;
+  return '；本轮写入 ' + a + ' 行新客户' +
+         (e ? '，另有 ' + e + ' 条已在客户库、未重复写入' : '');
+}
+
+function renderSession(rows, st){
   const tb = document.getElementById('sessionBody');
   const empty = document.getElementById('sessionEmpty');
   rows = Array.isArray(rows) ? rows : [];
@@ -210,7 +234,11 @@ function renderSession(rows){
     tb.appendChild(tr);
   }
   renderedSession = rows.length;
-  document.getElementById('sessionCount').textContent = rows.length + ' 条';
+  const badge = document.getElementById('sessionCount');
+  badge.textContent = rows.length + ' 条';
+  // 徽章数的是「明细行数」＝ 新增 + 已在库；而结果 Excel 只写「新增」。
+  // 只报一个数会让人以为表漏写了，悬停把这道算式讲清楚。
+  badge.title = breakdownText(st, rows.length);
   empty.style.display = rows.length ? 'none' : 'block';
   const sc = tb.closest('.live-scroll');
   if (sc) sc.scrollTop = sc.scrollHeight;      // 始终停在最新一条
@@ -228,6 +256,11 @@ function renderSessionStatus(st){
   el.style.color = '';
   if (st.session_active){
     const bits = ['已采 ' + n + ' 条'];
+    // ⚠️ 必须把「新增 / 已在库」拆开报：明细行数 = 新增 + 已在库，而 Excel 只写新增。
+    //    只报「已采 N 条」会让人以为表漏写了（实测踩过：已采 17 条、表里 13 行）。
+    if (st.added != null || st.existed != null){
+      bits.push('新增 ' + (st.added || 0) + ' · 已在库 ' + (st.existed || 0));
+    }
     if (st.session_industry) bits.push('行业 ' + st.session_industry);
     if (st.session_country) bits.push('国家 ' + st.session_country);
     if (st.running) bits.push('批量 ' + (st.done || 0) + '/' + (st.total || 0));
@@ -243,10 +276,11 @@ async function loadManualState(){
   let st;
   try { st = await (await fetch('/api/manual/state')).json(); } catch(e){ return; }
   renderHeart(st);
-  renderSession(st.session_rows);
+  renderSession(st.session_rows, st);
   renderSessionStatus(st);
-  document.getElementById('sessionFile').textContent =
-    st.session_excel ? ('本批结果文件：' + st.session_excel + '（点「导出到飞书」导的就是它）') : '';
+  document.getElementById('sessionFile').textContent = st.session_excel
+    ? ('本批结果文件：' + st.session_excel + '（点「导出到飞书」导的就是它）' + roundTally(st))
+    : '';
   document.getElementById('btnSessionStart').disabled = !!st.session_active;
   document.getElementById('btnSessionFinish').disabled = !st.session_active;
   document.getElementById('mcounter').textContent =

@@ -425,7 +425,9 @@ async function urlsReply() {
   const found = await discover();
   if (!found) return { ok: false };
   const base = `http://127.0.0.1:${found.port}`;
-  return { ok: true, base, manual: `${base}/manual`, home: `${base}/` };
+  // db = 客户库查询页（第三个页面）。与 manual/home 同款拼接：端口由 discover() 实测得到，
+  // 不写死 —— 用户机器上端口会漂移（见 客户开发工具.py 的 pick_port）。
+  return { ok: true, base, manual: `${base}/manual`, home: `${base}/`, db: `${base}/db` };
 }
 
 async function activeTab() {

@@ -6,6 +6,7 @@
 若 log 留在入口，这里就得反过来 import 入口 → 循环导入。
 """
 import os
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -156,9 +157,26 @@ def db_upsert_customer(data):
             if value not in ('', None) and (key != 'score' or isinstance(value, (int, float))):
                 updates.append(f'{key}=?')
                 values.append(value)
-        if website_key and not row['website_key']:
-            updates.append('website_key=?')
-            values.append(website_key)
+        # ---- 键自愈：让 website_key 恒等于 normalize_domain(website) ----
+        # 命中的这条可能是**按 email 兜底**匹配上的（两家站共用同一个邮箱时会被合并），
+        # 此时它的 website_key 还是旧站域名 —— 键一旦和网址错位，
+        # db_has_customer('新站') 就永远查不到 → 同一个站每次采集都被判「新客户」、
+        # 反复写进结果 Excel，而库里始终只有一条（实测：megazone.mx 在一份表里出现 3 次）。
+        # ⚠️ 改键前先确认新键没被别的行占用，否则这条 UPDATE 会撞 UNIQUE 约束。
+        #    按上面的查找顺序（先按键、再按邮箱），此处的 website_key 一定没被占用；
+        #    这个判断只是防将来把两步调换顺序时静默炸掉。
+        if website_key and website_key != (row['website_key'] or ''):
+            taken = conn.execute('SELECT id FROM customers WHERE website_key=?',
+                                 (website_key,)).fetchone()
+            if taken is None:
+                if row['website_key']:
+                    log(f'🔧 键自愈：id={row["id"]} 的 website_key '
+                        f'{row["website_key"]!r} → {website_key!r}（与网址对齐）')
+                updates.append('website_key=?')
+                values.append(website_key)
+            else:
+                log(f'⚠️ id={row["id"]} 的网址算出键 {website_key!r}，但已被 id={taken["id"]} 占用，'
+                    f'键保持 {row["website_key"]!r} 不变')
         updates.append("last_seen_at=datetime('now','localtime')")
         values.append(row['id'])
         conn.execute(f"UPDATE customers SET {', '.join(updates)} WHERE id=?", values)
@@ -172,6 +190,46 @@ def db_stats():
         total = conn.execute('SELECT COUNT(*) FROM customers').fetchone()[0]
         verified = conn.execute("SELECT COUNT(*) FROM customers WHERE score IS NOT NULL").fetchone()[0]
     return {'total': total, 'verified': verified, 'file': DB_DIR + '/' + DB_FILE}
+
+
+# ================= 去重键一致性（website_key == normalize_domain(website)）=================
+# 这是全库最重要的一条不变量：db_has_customer()（判断「要不要跳过」）**只**按 website_key 查，
+# 而 db_upsert_customer()（写入）是「按 website_key 查不到、再按 email 兜底合并」——
+# 两者口径本来就不完全一致。一旦某行的键和网址错位，那个网址就会被永久判成「新客户」，
+# 每采一次就往结果 Excel 里多写一行，而库里始终只有一条。
+def db_fix_website_keys(apply=False):
+    """把所有「website_key != normalize_domain(website)」的行修回一致。
+
+    返回 (fixed, conflict) 两个列表，元素是 (id, 旧键, 应改成的键, ...)：
+      · fixed    —— 能安全修正的（apply=True 时真的写库）
+      · conflict —— 目标键已被**别的行**占用的，不硬改（会撞 UNIQUE），留给人判断
+
+    apply=False 是纯只读 dry-run（回归脚本用这个模式断言「真实库里 conflict/fixed 都为空」）。
+    """
+    init_customer_db()
+    fixed, conflict = [], []
+    with closing(db_connect()) as conn:
+        rows = list(conn.execute('SELECT id, website_key, website FROM customers'))
+        holder = {(r['website_key'] or ''): r['id'] for r in rows}
+        for r in rows:
+            want = normalize_domain(r['website'] or '')
+            if not want or want == (r['website_key'] or ''):
+                continue
+            other = holder.get(want)
+            if other is not None and other != r['id']:
+                conflict.append((r['id'], r['website_key'], want, other))
+                continue
+            fixed.append((r['id'], r['website_key'], want, r['website']))
+            if apply:
+                conn.execute('UPDATE customers SET website_key=? WHERE id=?', (want, r['id']))
+        if apply:
+            conn.commit()
+    if apply:
+        for i, old, new, _w in fixed:
+            log(f'🔧 键修正：id={i} {old!r} → {new!r}')
+        for i, old, new, other in conflict:
+            log(f'⚠️ 键冲突未改：id={i} {old!r} → {new!r} 已被 id={other} 占用')
+    return fixed, conflict
 
 
 # ================= 删除客户（含删除前自动备份）=================
@@ -234,3 +292,168 @@ def db_delete_customer(website=''):
         cur = conn.execute('DELETE FROM customers WHERE id=?', (row['id'],))
         conn.commit()
         return cur.rowcount
+
+
+# ================= 客户库查询（只读，供「客户库查询页 /db」用）=================
+# 这是一条**纯读**链路，两条硬纪律：
+#   ① 不碰 STATE / STATE_LOCK —— 那把锁是非可重入的全局锁，一次几万行的扫描若占着它，
+#      采集、落盘、页面轮询会一起卡住。查询只开自己的 sqlite 连接，出函数就关。
+#   ② 不改 paths.ENRICH_FILE / STATE['output'] —— 那两个是「本轮结果文件」指针，
+#      被查询串改的话，飞书导出会导到错的表上。
+# 注入面：条件值全部走参数位；排序字段走白名单（键→子句），绝不把外部字符串拼进 SQL。
+
+# 表格与导出要读的列（刻意不含 website_key：那是内部去重键，页面与业务上都用不到）
+QUERY_SELECT_COLS = ('id, company_name, website, email, phone, contact_url, country, industry, '
+                     'score, rating, snippet, search_formula, source, status, notes, '
+                     'first_seen_at, last_seen_at')
+
+# 排序白名单。score 为 NULL（还没评过分）的行一律沉到末尾，
+# 否则「按评分降序」会把那几条没分的顶在最前面。
+QUERY_ORDER_SQL = {
+    'score_desc': 'score IS NULL, score DESC, id DESC',
+    'score_asc':  'score IS NULL, score ASC, id DESC',
+    'newest':     'first_seen_at DESC, id DESC',
+    'oldest':     'first_seen_at ASC, id ASC',
+    'updated':    'last_seen_at DESC, id DESC',
+    'name':       'company_name COLLATE NOCASE ASC, id ASC',
+}
+QUERY_DEFAULT_ORDER = 'score_desc'
+QUERY_MAX_LIMIT = 500          # 单页硬上限：防前端传巨大的 limit 把内存撑爆
+QUERY_EMPTY = '__empty__'      # 多选里代表「这一列为空」的哨兵值（前端「未标注 / 未填写」用）
+
+# 「联系方式」单选：值 → SQL 片段。列名全部写死在这里，不接受任何外部输入。
+_QUERY_CONTACT_SQL = {
+    'has_email':       "IFNULL(email,'')<>''",
+    'has_phone':       "IFNULL(phone,'')<>''",
+    'has_contact_url': "IFNULL(contact_url,'')<>''",
+    'has_both':        "IFNULL(email,'')<>'' AND IFNULL(phone,'')<>''",
+    'has_any':         "(IFNULL(email,'')<>'' OR IFNULL(phone,'')<>'')",
+    'no_email':        "IFNULL(email,'')=''",
+    'no_phone':        "IFNULL(phone,'')=''",
+    'no_contact':      "IFNULL(email,'')='' AND IFNULL(phone,'')=''",
+}
+
+_DATE_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+
+
+def _query_where(f):
+    """把筛选 dict 翻成 (WHERE 片段列表, 参数列表)。列名全是字面量，值全进参数位。"""
+    where, args = [], []
+
+    kw = str(f.get('kw') or '').strip()
+    if kw:
+        like = '%' + kw + '%'
+        where.append('(company_name LIKE ? OR website LIKE ? OR email LIKE ? OR phone LIKE ?'
+                     ' OR snippet LIKE ? OR search_formula LIKE ? OR industry LIKE ?'
+                     ' OR country LIKE ? OR notes LIKE ?)')
+        args += [like] * 9
+
+    def _multi(col, values):
+        """行业/国家/来源/评级这类多选：命中任一值即可；勾了「未填写」时空值也算命中。"""
+        raw = [str(v) for v in (values or [])]
+        picked = [v for v in raw if v != QUERY_EMPTY]
+        parts = []
+        if picked:
+            parts.append(f'{col} IN ({",".join("?" * len(picked))})')
+            args.extend(picked)
+        if QUERY_EMPTY in raw:
+            parts.append(f"IFNULL({col},'')=''")
+        if parts:
+            where.append('(' + ' OR '.join(parts) + ')')
+
+    _multi('industry', f.get('industries'))
+    _multi('country', f.get('countries'))
+    _multi('source', f.get('sources'))
+    _multi('rating', f.get('ratings'))
+
+    for key in ('score_min', 'score_max'):
+        v = f.get(key)
+        if v in (None, ''):
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            raise ValueError(f'{key} 必须是整数：{v!r}')
+        where.append('score IS NOT NULL AND score ' + ('>=' if key == 'score_min' else '<=') + ' ?')
+        args.append(n)
+
+    rule = _QUERY_CONTACT_SQL.get(str(f.get('contact') or ''))
+    if rule:
+        where.append(rule)
+
+    for key, op in (('seen_after', '>='), ('seen_before', '<=')):
+        v = str(f.get(key) or '').strip()
+        if not v:
+            continue
+        if not _DATE_RE.match(v):
+            raise ValueError(f'{key} 必须是 YYYY-MM-DD 格式：{v!r}')
+        # 只给到「天」，末端补足时分秒，否则「到 X 日为止」会把 X 日当天的记录全漏掉
+        where.append(f'first_seen_at {op} ?')
+        args.append(v + (' 00:00:00' if op == '>=' else ' 23:59:59'))
+    return where, args
+
+
+def db_query_customers(filters=None, order=QUERY_DEFAULT_ORDER, limit=50, offset=0):
+    """按条件分页查询客户，返回 (命中总数, 当前页行列表, 实际生效的 limit)。
+
+    计数与取行共用**同一个 WHERE**，所以「命中 N 条」与翻到底看到的一定自洽。
+    order 只认 QUERY_ORDER_SQL 里的键；非法值静默回落默认排序（既不报错也不拼进 SQL）。
+    """
+    init_customer_db()
+    where, args = _query_where(filters or {})
+    clause = (' WHERE ' + ' AND '.join(where)) if where else ''
+    order_sql = QUERY_ORDER_SQL.get(str(order or '')) or QUERY_ORDER_SQL[QUERY_DEFAULT_ORDER]
+    try:
+        limit = max(1, min(int(limit), QUERY_MAX_LIMIT))
+    except (TypeError, ValueError):
+        limit = 50
+    try:
+        offset = max(0, int(offset))
+    except (TypeError, ValueError):
+        offset = 0
+    with closing(db_connect()) as conn:
+        total = conn.execute('SELECT COUNT(*) FROM customers' + clause, args).fetchone()[0]
+        rows = [dict(r) for r in conn.execute(
+            f'SELECT {QUERY_SELECT_COLS} FROM customers{clause}'
+            f' ORDER BY {order_sql} LIMIT ? OFFSET ?', args + [limit, offset])]
+    return total, rows, limit
+
+
+def db_facet_counts():
+    """给筛选面板提供「库里真实存在的取值 + 各自条数」（含「未填写」项的条数）。
+
+    ⚠️ 必须读真实 distinct 值，**不能**拿关键词库那 8 个规范行业名硬编码 ——
+       库里还留着历史行业名（家具家居 18 条 / 汽配 5 条），硬编码会让这些数据一筛就漏。
+    ⚠️ 下面四个列名都是本函数里写死的字面量，不接受任何外部输入
+       （f-string 拼进去的全是常量，不是用户数据，无注入面）。
+    """
+    init_customer_db()
+    facets = {}
+    with closing(db_connect()) as conn:
+        for key, col in (('industries', 'industry'), ('countries', 'country'),
+                         ('sources', 'source'), ('ratings', 'rating')):
+            facets[key] = [{'value': r[0], 'count': r[1]} for r in conn.execute(
+                f"SELECT {col}, COUNT(*) FROM customers WHERE IFNULL({col},'')<>''"
+                f' GROUP BY {col} ORDER BY COUNT(*) DESC, {col}')]
+            facets[key + '_blank'] = conn.execute(
+                f"SELECT COUNT(*) FROM customers WHERE IFNULL({col},'')=''").fetchone()[0]
+
+        def _n(sql):
+            return conn.execute(sql).fetchone()[0]
+
+        facets['total'] = _n('SELECT COUNT(*) FROM customers')
+        facets['contact'] = {
+            'has_email': _n("SELECT COUNT(*) FROM customers WHERE IFNULL(email,'')<>''"),
+            'has_phone': _n("SELECT COUNT(*) FROM customers WHERE IFNULL(phone,'')<>''"),
+            'has_contact_url': _n("SELECT COUNT(*) FROM customers WHERE IFNULL(contact_url,'')<>''"),
+            'no_contact': _n("SELECT COUNT(*) FROM customers "
+                             "WHERE IFNULL(email,'')='' AND IFNULL(phone,'')=''"),
+        }
+        smin, smax = conn.execute(
+            'SELECT MIN(score), MAX(score) FROM customers WHERE score IS NOT NULL').fetchone()
+        facets['score'] = {'min': smin, 'max': smax}
+        dmin, dmax = conn.execute(
+            'SELECT MIN(substr(first_seen_at,1,10)), MAX(substr(first_seen_at,1,10))'
+            ' FROM customers').fetchone()
+        facets['date'] = {'min': dmin or '', 'max': dmax or ''}
+    return facets

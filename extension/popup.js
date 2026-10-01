@@ -111,6 +111,17 @@ function sessRowHtml(r, i) {
     + '</div></div>';
 }
 
+/* 轮已结束时，在结果文件那行补一句「这份表到底写了几行」。
+ * ⚠️ 只在 !session_active 时显示：新一轮开起来后 added/existed 已清零，
+ *    而 session_excel 还挂着上一份文件名，配上新计数会误导。 */
+function roundTally(st) {
+  if (!st || st.session_active) return '';
+  if (st.added == null && st.existed == null) return '';
+  const a = st.added || 0, e = st.existed || 0;
+  return '；本轮写入 ' + a + ' 行新客户'
+    + (e ? '，另有 ' + e + ' 条已在客户库、未重复写入' : '');
+}
+
 function renderSession(st) {
   const count = $('sessCount'), status = $('sessStatus');
   const list = $('sessList'), empty = $('sessEmpty'), file = $('sessFile'), btn = $('btnFinish');
@@ -124,11 +135,17 @@ function renderSession(st) {
 
   const rows = Array.isArray(st.session_rows) ? st.session_rows : [];
   const sig = [rows.length, rows.length ? (rows[rows.length - 1].url || '') : '',
-               !!st.session_active, st.session_excel || '', st.session_error || ''].join('|');
+               !!st.session_active, st.session_excel || '', st.session_error || '',
+               st.added || 0, st.existed || 0].join('|');
   if (sig !== _lastSig) {                          // 只有变化才重建：否则每秒重置滚动位置
     _lastSig = sig;
     list.innerHTML = rows.map(sessRowHtml).join('');
     count.textContent = rows.length + ' 条';
+    // 徽章数的是「明细行数」＝ 新增 + 已在库，而结果 Excel 只写「新增」。
+    // 徽章太窄放不下，所以挂悬停提示把这道算式讲清楚（正文在状态行里）。
+    count.title = (st.added == null && st.existed == null) ? ''
+      : ('已采 ' + rows.length + ' 条 = 新增 ' + (st.added || 0) + ' + 已在库 ' + (st.existed || 0)
+         + '；结果 Excel 只写「新增」的 ' + (st.added || 0) + ' 条');
     empty.style.display = rows.length ? 'none' : 'block';
     if (rows.length) list.scrollTop = list.scrollHeight;   // 停在最新一条
   }
@@ -138,6 +155,11 @@ function renderSession(st) {
     status.textContent = '⚠️ 结果文件保存失败，可重试';
   } else if (st.session_active) {
     const bits = ['已采 ' + rows.length + ' 条'];
+    // ⚠️ 必须把「新增 / 已在库」拆开报（与 /manual 页同口径）：明细行数 = 新增 + 已在库，
+    //    而 Excel 只写新增。只报一个数会让人以为表漏写了（实测踩过：已采 17 条、表里 13 行）。
+    if (st.added != null || st.existed != null) {
+      bits.push('新增 ' + (st.added || 0) + ' · 已在库 ' + (st.existed || 0));
+    }
     if (st.session_industry) bits.push('行业 ' + st.session_industry);
     if (st.session_country) bits.push('国家 ' + st.session_country);
     if (st.running) bits.push('批量 ' + (st.done || 0) + '/' + (st.total || 0));
@@ -149,7 +171,7 @@ function renderSession(st) {
   }
 
   if (st.session_error) file.textContent = st.session_error;
-  else if (st.session_excel) file.textContent = '本批结果文件：' + st.session_excel;
+  else if (st.session_excel) file.textContent = '本批结果文件：' + st.session_excel + roundTally(st);
   else file.textContent = _note || '';
 
   btn.disabled = !st.session_active || _finishing;
@@ -325,6 +347,12 @@ async function init() {
   $('lnkHome').addEventListener('click', async (e) => {
     e.preventDefault();
     const u = await toolUrls(); if (u) openUrl(u.home);
+  });
+  // 客户库查询页：/db 是新加的第三个页面。老实例上没有这个路由（返回 404），
+  // 所以它和别的页面一样必须靠「重启工具」才生效 —— 不要在这里加兜底判断。
+  $('lnkDb').addEventListener('click', async (e) => {
+    e.preventDefault();
+    const u = await toolUrls(); if (u) openUrl(u.db);
   });
   $('lnkOptions').addEventListener('click', (e) => {
     e.preventDefault();

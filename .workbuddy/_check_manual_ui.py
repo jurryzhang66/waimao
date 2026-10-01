@@ -7,6 +7,7 @@
   C. 「重新探测」能把本实例认出来（打 /api/ping 看到 app=waimao-dp）
   D. 心跳区显示「从未收到扩展请求」→ 模拟一次带 Origin 的预检后变成「在线」
   E. 「本轮采集明细」表能增量渲染 session_rows（含「已在库」行、绿色等宽、「未抓到」、状态行三分支），
+     计数拆开报「已采 N 条 · 新增 X · 已在库 Y」（差额就是 Excel 少写的那部分），
      点行尾 ✕ 能「明细 + 客户库」双删（删前自动备份客户库）
   F. 批量提交空内容要给出 alert 而不发请求；提交 1 条非法网址要优雅失败
 不联网；客户库与结果输出都已打桩到临时目录（E 段的删除会真的走 DB）。
@@ -124,6 +125,9 @@ try:
         m.MANUAL_STATE.update({
             'session_active': True, 'session_started_at': time.time(),
             'session_industry': '塑料包装袋', 'session_country': '德国',
+            # ⚠️ added/existed 必须和 session_rows 自洽（明细行数 = 新增 + 已在库）。
+            #    状态行要报「已采 3 条 · 新增 2 · 已在库 1」，写 0/0 就自相矛盾了。
+            'added': 2, 'existed': 1,
             'session_rows': [
                 {'kind': 'added', 'rid': 1, 'title': 'Trash Bags Wholesale Ltd',
                  'url': 'https://plasticbagpc.com', 'emails': ['info@plasticbagpc.com'],
@@ -167,6 +171,9 @@ try:
     assert n == 3, f'应渲染 3 行，实际 {n}'
     assert '3' in badge, f'徽章不对：{badge}'
     assert '进行中' in status and '已采 3 条' in status, f'状态行不对：{status}'
+    # 计数必须拆开报：明细行数 = 新增 + 已在库，而结果 Excel 只写「新增」。
+    # 只报「已采 3 条」会让人以为表漏写了（实测踩过：已采 17 条、表 13 行）。
+    assert '新增 2 · 已在库 1' in status, f'状态行应拆开报「新增 / 已在库」：{status}'
     assert empty_disp == 'none', '有数据时占位提示应隐藏'
     assert mail_style == 'live-mail', '有邮箱的行应使用绿色等宽样式'
     assert miss_txt == '未抓到', f'没邮箱应显示「未抓到」，实际 {miss_txt!r}'
@@ -177,6 +184,7 @@ try:
 
     # 增量追加：后端再加一条 → 只应多出一行（游标不回退、不重绘已有的）
     with m.STATE_LOCK:
+        m.MANUAL_STATE['added'] = 3
         m.MANUAL_STATE['session_rows'] = m.MANUAL_STATE['session_rows'] + [
             {'kind': 'added', 'rid': 4, 'title': 'Flat Bag GmbH', 'url': 'https://flatbag-maker.de',
              'emails': ['sales@flatbag-maker.de'], 'phones': [], 'score': 75,
@@ -194,9 +202,28 @@ try:
     assert stable2, f'增量追加后应稳定为 4 行，实际 {prev2}'
     n2 = page.run_js("return document.querySelectorAll('#sessionBody tr').length;")
     badge2 = page.run_js("return document.getElementById('sessionCount').textContent;")
-    print('追加一行后：', n2, badge2)
+    badge2_tip = page.run_js("return document.getElementById('sessionCount').title;")
+    status2 = page.run_js("return document.getElementById('sessionStatus').textContent;")
+    print('追加一行后：', n2, badge2, '|', status2)
     assert n2 == 4, f'增量追加后应是 4 行，实际 {n2}'
     assert '4' in badge2, f'徽章应跟着更新：{badge2}'
+    assert '已采 4 条 · 新增 3 · 已在库 1' in status2, f'计数应跟着明细走：{status2}'
+    assert '已采 4 条 = 新增 3 + 已在库 1' in (badge2_tip or ''), \
+        f'徽章悬停应给出算式：{badge2_tip!r}'
+
+    # 计数口径的两个纯函数（就是回答「为什么 Excel 行数比已采少」的那两段文案）
+    print('breakdownText / roundTally：')
+    bd = page.run_js("return breakdownText({added: 13, existed: 4}, 17);")
+    assert '已采 17 条 = 新增 13 + 已在库 4' in bd, f'算式不对：{bd}'
+    assert '只写「新增」的 13 条' in bd, f'没说清 Excel 只写新增：{bd}'
+    assert page.run_js("return breakdownText(null, 5);") == '', '拿不到计数时不该硬编算式'
+    tl = page.run_js("return roundTally({session_active: false, added: 13, existed: 4});")
+    assert '本轮写入 13 行新客户' in tl and '另有 4 条已在客户库' in tl, f'落盘口径不对：{tl}'
+    assert page.run_js("return roundTally({session_active: false, added: 13, existed: 0});") \
+        == '；本轮写入 13 行新客户', '没有「已在库」时不该提它'
+    assert page.run_js("return roundTally({session_active: true, added: 13, existed: 4});") == '', \
+        '本轮进行中不该显示上一轮的落盘口径（计数已清零、文件名还是旧的）'
+    print('  ✓ 计数拆开报：已采 N 条 = 新增 X + 已在库 Y；落盘行数单独说清')
 
     # 状态行另外两个分支（同步取值，免得被下一次轮询覆盖回「进行中」）
     s_done = page.run_js("renderSessionStatus({session_active:false, session_rows:[],"

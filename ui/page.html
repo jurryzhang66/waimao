@@ -68,12 +68,24 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
 .tag-r1 { background:#fdeceb; color:#d93025; }
 .tag-r2 { background:#eef3fe; color:#1a73e8; }
 .tag-r3 { background:#f1f3f4; color:#777; }
+/* 顶栏导航：主页 → 手动采集页 / 客户库查询。
+   ⚠️ 这段样式会被 _page_style() 一并注入 manual.html / query.html（它们共用本 <style>），
+      但 .nav / .nav-a 只在主页用到，副页面里是无害的死规则。 */
+.nav { display:flex; gap:10px; margin:0 0 18px; }
+.nav-a { display:inline-block; background:#fff; color:#1a73e8; border:1px solid #dbe4f0; border-radius:8px;
+  padding:8px 14px; font-size:13px; font-weight:600; text-decoration:none; }
+.nav-a:hover { background:#e8f0fe; border-color:#1a73e8; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🔍 谷歌客户开发工具</h1>
   <div class="sub">本地运行 · 搜到一个网站就立刻抓联系方式 · SQLite 客户库去重 · 导出 Excel / 飞书</div>
+
+  <div class="nav">
+    <a class="nav-a" href="/manual">📝 手动采集页</a>
+    <a class="nav-a" href="/db">📊 客户库查询</a>
+  </div>
 
   <div class="card" style="margin-bottom:16px;">
     <h3>1. 目标国家（单选，下拉选择）</h3>

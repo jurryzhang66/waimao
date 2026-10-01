@@ -5,7 +5,7 @@
 本脚本把浏览器/网络换成假实现，让真实的 collect_from_html / _flush_manual_session /
 两个会话路由跑起来；数据库与 output 都指向临时目录，绝不碰真实客户库。
 
-覆盖 11 组：
+覆盖 12 组：
   ① 无会话时扩展单点采集 → 自动开一轮（口径取请求里的行业/国家），且**不落盘**
   ② /api/manual/batch 并入同一轮 → 批量子过程字段与本轮累计字段各管各的
   ③ 结束时落一份 10 列结果文件（降序、成为「最新结果文件」、本轮清零）
@@ -17,6 +17,7 @@
   ⑨ /api/manual/state 的 session_* 字段契约
   ⑩ 自动任务运行时拒绝开本轮
   ⑪ 删除单条明细 → 明细与客户库双删、删前自动备份（含节流）、计数回退、被删条目不进 Excel
+  ⑫ 去重键自愈：website_key 恒等于 normalize_domain(website)（否则同站会被反复算「新客户」）
 
 用法：python .workbuddy\\_smoke_manual_session.py
 """
@@ -444,6 +445,95 @@ check(st['session_active'] is True, '⑪ 删空后本轮仍然进行中（没被
 with m.app.test_client() as c:
     jz = c.post('/api/manual/session/finish').get_json() or {}
 check(jz.get('ok') and jz.get('saved') is False, '⑪ 删空后结束 → 空轮不落盘', str(jz))
+
+
+# ============ ⑫ 去重键一致性：website_key 必须恒等于 normalize_domain(website) ============
+# 为什么这条不变量值得单独守：db_has_customer()（判断「要不要跳过」）**只**按 website_key 查，
+# 而 db_upsert_customer()（写入）是「按键查不到、再按 email 兜底合并」——两条口径本来就不一致。
+# 键一旦与网址错位，那个网址就被永久判成「新客户」：每采一次往结果 Excel 多写一行，
+# 而库里始终只有一条（实测：megazone.mx 在一份表里出现 3 次、另一份 2 次）。
+section('⑫ 去重键自愈：website_key 恒等于 normalize_domain(website)')
+
+
+def _conn():
+    return m.db_connect()
+
+
+def _one(sql, args=()):
+    c = _conn()
+    try:
+        r = c.execute(sql, args).fetchone()
+        return dict(r) if r is not None else None
+    finally:
+        c.close()
+
+
+def _write(sql, args=()):
+    c = _conn()
+    try:
+        cur = c.execute(sql, args)
+        c.commit()
+        return cur.lastrowid
+    finally:
+        c.close()
+
+
+# 前置：一条记录，邮箱是两家站共用的（模拟「先采到 A 站，站上留的是 B 站邮箱」）
+m.db_upsert_customer({'company_name': 'Old Key Ltd', 'website': 'https://keyshare-old.it',
+                      'email': 'office@shared-key.it', 'source': '手动采集'})
+check(m.db_has_customer('https://keyshare-old.it'), '⑫ 前置：A 站按老键入库')
+check(m.db_has_customer('https://keyshare-new.it') is False, '⑫ 前置：B 站此刻还查不到')
+
+# 再 upsert B 站（同邮箱）→ 走 email 兜底合并；键必须跟着网址一起改掉，不能留在旧站域名上
+m.db_upsert_customer({'company_name': 'New Key Ltd', 'website': 'https://keyshare-new.it',
+                      'email': 'office@shared-key.it', 'source': '手动采集'})
+check(m.db_has_customer('https://keyshare-new.it'), '⑫ 自愈：合并后 B 站查得到了（键跟着网址走）')
+check(m.db_has_customer('https://keyshare-old.it') is False, '⑫ 自愈：老键已让位')
+r = _one("SELECT id, website_key FROM customers WHERE lower(email)='office@shared-key.it'")
+check(r is not None and r['website_key'] == 'keyshare-new.it',
+      '⑫ 库里仍只有一条，且键 = keyshare-new.it', str(r))
+check(len(m.db_fix_website_keys(apply=False)[0]) == 0, '⑫ 自愈之后全库没有再错位')
+
+# 端到端：自愈过的站再采一次 → 判「已在客户库」，不再算新增（这正是用户看到的现象）
+with m.app.test_client() as c:
+    c.post('/api/manual/session/start', json={'industry': '食品', 'country': '意大利'})
+    jk = c.post('/api/collect', json={'url': 'https://keyshare-new.it', 'title': 'New Key Ltd',
+                                      'html': html_with_mail('keyshare-new.it')},
+                headers={'X-DP-Ext': '1'}).get_json() or {}
+check(jk.get('existed') is True and jk.get('added') is False,
+      '⑫ 端到端：自愈后再采 B 站 = 「已在客户库」，不再算新客户', str(jk))
+stk = state()
+check(stk['added'] == 0 and stk['existed'] == 1, '⑫ 本轮计数：新增 0 / 已在库 1', str(
+    {'added': stk['added'], 'existed': stk['existed']}))
+check(len(stk['session_rows']) == 1 and stk['session_rows'][0]['kind'] == 'existed',
+      '⑫ 明细里只有一条 existed（它不会进 Excel）')
+
+# 手工造一条错位（绕开 upsert）→ 扫描函数要能揪出来并修好
+_write("UPDATE customers SET website_key='stale-bad-key.it' WHERE website_key='keyshare-new.it'")
+fixed, conflict = m.db_fix_website_keys(apply=False)
+check(len(fixed) == 1 and fixed[0][2] == 'keyshare-new.it' and not conflict,
+      '⑫ dry-run 揪出 1 条错位、0 条冲突（且没写库）', str((fixed, conflict)))
+check(_one("SELECT website_key FROM customers WHERE website_key='stale-bad-key.it'") is not None,
+      '⑫ dry-run 确实只读：错位键还挂在那')
+m.db_fix_website_keys(apply=True)
+check(_one("SELECT id FROM customers WHERE website_key='keyshare-new.it'") is not None,
+      '⑫ apply=True 真把键改回来了')
+check(m.db_fix_website_keys(apply=False)[0] == [], '⑫ 修完再扫 → 不变量成立')
+
+# 目标键已被**别的行**占用 → 只报冲突，绝不硬改（硬改会撞 UNIQUE 把整批写挂掉）
+_write("INSERT INTO customers (company_name,website,website_key,email,phone,contact_url,country,"
+       "industry,score,rating,snippet,search_formula,source,notes) "
+       "VALUES ('Conflict Row','https://keyshare-new.it','other-key.it','','','','','',NULL,"
+       "'','','','手动采集','')")
+f3, c3 = m.db_fix_website_keys(apply=False)
+check(len(c3) == 1 and c3[0][1] == 'other-key.it', '⑫ 目标键被占用 → 报冲突而不硬改', str(c3))
+try:
+    m.db_fix_website_keys(apply=True)
+    check(True, '⑫ apply 模式下遇到冲突也不炸（不会撞 UNIQUE）')
+except Exception as ex:
+    check(False, '⑫ apply 模式下遇到冲突不炸', f'{type(ex).__name__}: {ex}')
+check(_one("SELECT id FROM customers WHERE website_key='other-key.it'") is not None,
+      '⑫ 冲突行保持原样，等人工判断')
 
 print('\n' + '=' * 62)
 print(f'通过 {_ok} 项，失败 {len(_fail)} 项')
