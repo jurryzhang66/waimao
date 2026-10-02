@@ -27,14 +27,47 @@ input[type=number], input[type=date] { border:1px solid #ddd; border-radius:6px;
 .ck-n { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .ck b { color:#9aa0a6; font-weight:400; font-size:12px; }
 .ck-blank .ck-n { color:#999; }
-/* 结果表 10 列：窄了横向滚动，而不是挤成一团；高度比首页那张明细表高一些 */
-#resTable { min-width:980px; }
+/* 结果表 12 列（勾选 + 序号 + 8 个字段 + ✕）：窄了横向滚动，而不是挤成一团；
+   高度比首页那张明细表高一些 */
+#resTable { min-width:1060px; }
 .result-scroll { max-height:560px; }
 .pager { display:flex; align-items:center; gap:12px; margin-top:12px; }
 .pageinfo { font-size:13px; color:#555; }
 .res-src { font-size:12px; color:#666; white-space:nowrap; }
 .res-time { font-size:12px; color:#888; white-space:nowrap; }
 .res-idx { color:#aaa; }
+/* ③ 结果表的「勾选」与「每行 ✕ 删除」。⚠️ 写在本页这个 <style> 里，别混进 page.html 那份
+   公共样式 —— 那份由 PAGE_CSS_PLACEHOLDER 注入到全部三个页面，加本页专有的事会顺带影响另两页。 */
+.res-ck-th, .res-ck { width:34px; text-align:center; }
+.res-ck input, .res-ck-th input { margin:0; cursor:pointer; }
+.res-del-th, .res-del { width:38px; text-align:center; }
+.row-del { border:0; background:transparent; color:#9aa0a6; cursor:pointer;
+  font-size:13px; padding:2px 6px; border-radius:4px; line-height:1.4; }
+.row-del:hover { color:#d93025; background:#fdeceb; }
+.btn-del { background:#fdeceb; color:#c5221f; border:1px solid #f3b8b4; border-radius:6px;
+  padding:8px 14px; font-size:13px; font-weight:600; cursor:pointer; }
+.btn-del:hover { background:#fbd6d3; }
+.btn-del:disabled { background:#f6f6f6; color:#bdbdbd; border-color:#e5e5e5; cursor:not-allowed; }
+.sel-note { color:#888; font-size:12px; }
+/* ④ 删除的二次确认弹窗。原生 confirm 的弹窗位置由浏览器定（贴在窗口顶部），改不了 →
+   换成页面自己的居中模态框。⚠️ 同样写在本页这个 <style> 里，不进 page.html 那份共享样式。 */
+#delModal { position:fixed; inset:0; z-index:1000; display:none; padding:20px;
+  background:rgba(32,38,45,.42); align-items:center; justify-content:center; }
+#delModal.show { display:flex; }
+#delModal .modal { background:#fff; border-radius:12px; width:100%; max-width:440px;
+  padding:22px 24px 18px; box-shadow:0 12px 40px rgba(0,0,0,.22); animation:m-pop .14s ease-out; }
+@keyframes m-pop { from { transform:translateY(8px); opacity:0; } to { transform:none; opacity:1; } }
+#delModal .modal-t { font-size:16px; font-weight:600; color:#202124; margin-bottom:12px; }
+#delModal .modal-b { margin:0 0 18px; padding-left:20px; color:#5f6368; font-size:13px; line-height:1.9; }
+#delModal .modal-b li { list-style:disc; }
+#delModal .modal-f { display:flex; justify-content:flex-end; gap:10px; }
+.btn-plain { background:#fff; color:#3c4043; border:1px solid #dadce0; border-radius:8px;
+  padding:8px 18px; font-size:13px; font-weight:600; cursor:pointer; }
+.btn-plain:hover { background:#f6f8fa; }
+.btn-danger { background:#d93025; color:#fff; border:1px solid #d93025; border-radius:8px;
+  padding:8px 18px; font-size:13px; font-weight:600; cursor:pointer; }
+.btn-danger:hover { background:#c5221f; }
+.btn-danger:disabled { background:#e8a5a1; border-color:#e8a5a1; cursor:not-allowed; }
 </style>
 </head>
 <body>
@@ -126,11 +159,19 @@ input[type=number], input[type=date] { border:1px solid #ddd; border-radius:6px;
       <span class="live-badge" id="resCount">—</span>
       <span class="status" id="resStatus" style="margin-top:0;"></span>
     </div>
+    <!-- 删除工具条：批量删走「勾选」，单条删走每行右侧的 ✕，两条路都打 /api/db/delete -->
+    <div class="btn-row" style="margin-top:0; margin-bottom:10px;">
+      <button class="btn-del" id="btnDelSel" disabled>🗑️ 删除选中 (0)</button>
+      <span class="sel-note">勾选左侧复选框可批量删；每行最右边的 ✕ 删单条。删除后不可撤销，
+        后端会先自动备份一份客户库到 DB/backups/。</span>
+    </div>
     <div class="live-scroll result-scroll">
       <table class="live" id="resTable">
         <thead><tr>
+          <th class="res-ck-th"><input type="checkbox" id="ckAll" title="全选 / 取消全选本页"></th>
           <th>#</th><th>公司 / 官网</th><th>邮箱</th><th>电话</th><th>评分</th>
           <th>评级</th><th>行业</th><th>国家</th><th>来源</th><th>采集时间</th>
+          <th class="res-del-th"></th>
         </tr></thead>
         <tbody id="resBody"></tbody>
       </table>
@@ -145,6 +186,24 @@ input[type=number], input[type=date] { border:1px solid #ddd; border-radius:6px;
   </div>
 
   <div class="log" id="log"></div>
+</div>
+
+<!-- 删除二次确认（居中模态框；替代位置不可控的原生 confirm）
+     ⚠️ 必须放在 <script> **之前**：脚本是立即执行的 IIFE，会 getElementById 拿这些节点，
+        放到脚本后面会拿到 null，init() 在绑事件那步就抛错、后面的 loadFacets() 直接不执行。 -->
+<div id="delModal" aria-hidden="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="delModalTitle">
+    <div class="modal-t" id="delModalTitle">确定从客户库删掉这条吗？</div>
+    <ul class="modal-b" id="delModalBody">
+      <li>删除后不可撤销（后端会先自动备份一份客户库到 DB/backups/）</li>
+      <li>若「本轮采集」正在进行，请再到手动采集页把那行的 ✕ 也点掉</li>
+      <li>已经导出的 Excel 不受影响</li>
+    </ul>
+    <div class="modal-f">
+      <button type="button" class="btn-plain" id="delModalCancel">取消</button>
+      <button type="button" class="btn-danger" id="delModalOk">确定删除</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -290,7 +349,11 @@ function renderResult(d){
         esc(r.company_name || r.website) + '">' + esc(r.company_name || domainOf(r.website)) + '</a><br>' +
         '<span class="live-dom">' + esc(domainOf(r.website)) + '</span>'
       : '<span class="live-miss">' + esc(r.company_name || '(无)') + '</span>';
+    // 删除一律按**主键 id**（不是网址）：主键无歧义，不会像按键删那样删到同键的另一条。
+    // 两个入口都带 data-id —— 勾选批量删、每行 ✕ 删，走的是同一个 /api/db/delete。
+    const id = esc(r.id == null ? '' : String(r.id));
     return '<tr>' +
+      '<td class="res-ck"><input type="checkbox" class="row-ck" data-id="' + id + '"></td>' +
       '<td class="res-idx">' + idx + '</td>' +
       '<td>' + link + '</td>' +
       '<td class="live-cell">' + mails + '</td>' +
@@ -301,6 +364,8 @@ function renderResult(d){
       '<td>' + esc(r.country || '') + '</td>' +
       '<td class="res-src">' + esc(r.source || '') + '</td>' +
       '<td class="res-time">' + esc((r.first_seen_at || '').slice(0, 16)) + '</td>' +
+      '<td class="res-del"><button type="button" class="row-del" data-id="' + id +
+        '" title="从客户库删掉这一条">✕</button></td>' +
       '</tr>';
   }).join('');
 
@@ -318,6 +383,7 @@ function renderResult(d){
   document.getElementById('counter').textContent = '命中 ' + d.total + ' 条';
   document.getElementById('btnPrev').disabled = PAGE.offset <= 0;
   document.getElementById('btnNext').disabled = (PAGE.offset + rows.length) >= d.total;
+  syncSel();                     // 重画完表格，勾选计数归零（行都是新的 DOM）
 }
 
 // 翻页 / 排序 / 每页条数变了，都回到第 1 页重查
@@ -354,7 +420,98 @@ async function doExport(){
   window.location.href = d.url;      // 响应带 Content-Disposition: attachment，页面不会跳走
 }
 
-// ---------- ④ 其它 ----------
+// ---------- ④ 删除客户（勾选批量 / 每行 ✕，都打同一个接口）----------
+// ⚠️ 事件委托挂在 #resBody(tbody) 上，不要逐行绑：行是 innerHTML 拼好再整体替换的，
+//    每次查询 / 翻页都会把旧行连同监听一起丢掉。
+// ⚠️ 单行 ✕ 与批量删走**同一条**接口（单行就是长度为 1 的数组）：少一条路径就少一处
+//    「只有批量删才备份」之类的漏洞。
+function selectedIds(){
+  return [].slice.call(document.querySelectorAll('#resBody .row-ck:checked'))
+    .map(function(x){ return x.getAttribute('data-id'); })
+    .filter(function(v){ return v !== null && v !== ''; });
+}
+function syncSel(){
+  const box = [].slice.call(document.querySelectorAll('#resBody .row-ck'));
+  const n = box.filter(function(x){ return x.checked; }).length;
+  const btn = document.getElementById('btnDelSel');
+  btn.disabled = n === 0;
+  btn.textContent = '🗑️ 删除选中 (' + n + ')';
+  const all = document.getElementById('ckAll');
+  all.checked = box.length > 0 && n === box.length;
+  all.indeterminate = n > 0 && n < box.length;   // 半选：勾了一部分
+}
+function toggleAll(checked){
+  [].slice.call(document.querySelectorAll('#resBody .row-ck'))
+    .forEach(function(x){ x.checked = checked; });
+  syncSel();
+}
+function onResBodyClick(e){
+  const btn = (e.target && e.target.closest) ? e.target.closest('.row-del') : null;
+  if (!btn) return;
+  const id = btn.getAttribute('data-id');
+  if (!id) return;
+  deleteRows([id]);
+}
+// 原生 confirm 的弹窗贴在浏览器窗口顶部、样式不可控 → 换成页面自己的居中模态框。
+// 用法：if (!(await askDeleteConfirm('这 3 条'))) return;
+let _delResolve = null;
+function askDeleteConfirm(label){
+  return new Promise(function(resolve){
+    _delResolve = resolve;
+    document.getElementById('delModalTitle').textContent =
+      '确定从客户库删掉' + label + '吗？';
+    const mk = document.getElementById('delModal');
+    mk.classList.add('show');
+    mk.setAttribute('aria-hidden', 'false');
+    document.body.style.overflow = 'hidden';       // 弹窗期间别让底下的长表格跟着滚
+    const ok = document.getElementById('delModalOk');
+    ok.disabled = false;
+    setTimeout(function(){ ok.focus(); }, 0);      // 默认焦点给「确定删除」
+  });
+}
+function closeDeleteConfirm(ok){
+  const mk = document.getElementById('delModal');
+  if (!mk.classList.contains('show')) return;      // 防重复关闭（Esc 与点击可能同时到）
+  mk.classList.remove('show');
+  mk.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+  const r = _delResolve;
+  _delResolve = null;
+  if (r) r(!!ok);
+}
+async function deleteRows(ids){
+  if (!ids.length) return;
+  const label = ids.length === 1 ? '这 1 条' : ('这 ' + ids.length + ' 条');
+  if (!(await askDeleteConfirm(label))) return;
+  const btn = document.getElementById('btnDelSel');
+  btn.disabled = true;
+  let d = null;
+  try {
+    d = await (await fetch('/api/db/delete', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ids: ids})
+    })).json();
+  } catch(e){
+    logBox('⚠️ 删除请求失败：' + e);
+    document.getElementById('resNote').textContent = '⚠️ 删除请求失败：' + e;
+    syncSel();
+    return;
+  }
+  if (!d || d.ok === false){
+    logBox('⚠️ 删除失败：' + ((d && d.msg) || '未知原因'));
+    document.getElementById('resNote').textContent = '⚠️ 删除失败：' + ((d && d.msg) || '未知原因');
+    syncSel();
+    return;
+  }
+  const extra = (d.missing && d.missing.length) ? ('，另有 ' + d.missing.length + ' 条库里已不存在') : '';
+  logBox('🗑️ 已从客户库删除 ' + d.deleted + ' 条' + extra
+         + (d.backup ? '，已备份：' + d.backup : '（本轮已有备份，未重复备份）'));
+  document.getElementById('resNote').textContent = '已删除 ' + d.deleted + ' 条' + extra;
+  await runQuery(PAGE.offset);    // 原地重查；删到本页空了会自动回退到最后一个有内容的页
+}
+
+// ---------- ⑤ 其它 ----------
 function resetForm(){
   document.getElementById('kw').value = '';
   document.querySelectorAll('#facetGrid input[type=checkbox]').forEach(function(x){ x.checked = false; });
@@ -384,6 +541,22 @@ async function openFolder(){
   });
   document.getElementById('btnNext').addEventListener('click', function(){
     runQuery(PAGE.offset + PAGE.limit);
+  });
+  // 删除：批量按钮 + 全选框 + 表格上的事件委托（勾选/单行 ✕ 都在 tbody 里冒泡上来）
+  document.getElementById('btnDelSel').addEventListener('click', function(){ deleteRows(selectedIds()); });
+  document.getElementById('ckAll').addEventListener('change', function(e){ toggleAll(!!e.target.checked); });
+  document.getElementById('resBody').addEventListener('click', onResBodyClick);
+  document.getElementById('resBody').addEventListener('change', syncSel);
+  // 删除二次确认模态框：确定 / 取消 / 点遮罩空白 / Esc = 取消 / Enter = 确定
+  document.getElementById('delModalCancel').addEventListener('click', function(){ closeDeleteConfirm(false); });
+  document.getElementById('delModalOk').addEventListener('click', function(){ closeDeleteConfirm(true); });
+  document.getElementById('delModal').addEventListener('click', function(e){
+    if (e.target === this) closeDeleteConfirm(false);
+  });
+  document.addEventListener('keydown', function(e){
+    if (!document.getElementById('delModal').classList.contains('show')) return;
+    if (e.key === 'Escape') closeDeleteConfirm(false);
+    else if (e.key === 'Enter') closeDeleteConfirm(true);
   });
   document.getElementById('order').addEventListener('change', requery);
   document.getElementById('pagesize').addEventListener('change', requery);

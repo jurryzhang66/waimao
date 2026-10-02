@@ -12,8 +12,8 @@
 import os
 import re
 
-from core.config import (CHINA_FILTER_OPTIONS, COND_LANGS, COND_ROLES, CONDITIONS,
-                         COUNTRIES, COUNTRY_CENTERS, EXCLUDE_OPTIONS, cond_template)
+from core.config import (CHINA_FILTER_OPTIONS, COND_CATEGORY, COND_LANGS, COND_ROLES, CONDITIONS,
+                         COUNTRIES, COUNTRY_CENTERS, COUNTRY_LIMITS, EXCLUDE_OPTIONS, cond_template)
 from core.paths import _app_dir
 
 # 模板文件：<项目根>/ui/page.html
@@ -81,7 +81,8 @@ def _build_page():
     # 按当前选择的搜索语言取，保证预览与实际查询（run_search 里 cond_template）一致
     tmpl_map = {k: {lg: cond_template(k, lg) for lg in COND_LANGS} for k, _ in CONDITIONS}
     default_on = ('wholesale', 'importer')
-    conds_js = [(k, name, k in default_on, tmpl_map.get(k, {'en': '{p}'}))
+    conds_js = [(k, name, k in default_on, tmpl_map.get(k, {'en': '{p}'}),
+                 COND_CATEGORY.get(k, '辅助线索'))
                 for k, name in CONDITIONS]
     # 默认勾选美国；(代码, 名称, 是否默认勾选, 该国语言 hl, gl) —— hl/gl 用于「国家→语言」联动
     # 和预览里显示国家筛选参数（gl=fr&hl=fr）
@@ -90,6 +91,10 @@ def _build_page():
     china_js = [(k, q, label, desc) for k, q, label, desc in CHINA_FILTER_OPTIONS]
     # 国家代码 → [纬度, 经度]：给前端拼地图搜索 URL 用，与后端 COUNTRY_CENTERS 同源
     centers_js = {k: [lat, lng] for k, (lat, lng) in COUNTRY_CENTERS.items()}
+    # 国家代码 → {cr, site}：给前端「国家限定」预览用，与后端 COUNTRY_LIMITS 同源。
+    # ⚠️ 刻意**不并进 counts_js** —— 那个 5 元组的字段顺序被重排过（code,name,is_default,hl,gl），
+    #    往里塞字段会连坐 COUNTRY_LANG / COUNTRY_GL 的解析。
+    limits_js = {k: {'cr': cr, 'site': site} for k, (cr, site) in COUNTRY_LIMITS.items()}
     # 条件 → {语言: 该条件角色词的第一个词}：地图模式要把它拼进查询词，前端预览必须与后端一致
     roles_js = {k: {lg: (v.get(lg) or v.get('en') or '').split(' OR ')[0].strip().strip('"')
                     for lg in COND_LANGS}
@@ -104,6 +109,7 @@ def _build_page():
     html = html.replace('CHINA_FILTERS_PLACEHOLDER', _json.dumps(china_js, ensure_ascii=False))
     html = html.replace('MAPS_CENTERS_PLACEHOLDER', _json.dumps(centers_js))
     html = html.replace('MAPS_ROLES_PLACEHOLDER', _json.dumps(roles_js, ensure_ascii=False))
+    html = html.replace('COUNTRY_LIMITS_PLACEHOLDER', _json.dumps(limits_js))
     return html
 
 

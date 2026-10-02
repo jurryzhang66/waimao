@@ -34,6 +34,7 @@ ITEMS = [
     ('_smoke_collect',         PY,   '.workbuddy/_smoke_collect.py',         []),
     ('_smoke_manual_session',  PY,   '.workbuddy/_smoke_manual_session.py',  []),
     ('_smoke_query',           PY,   '.workbuddy/_smoke_query.py',           []),
+    ('_smoke_annotate',        PY,   '.workbuddy/_smoke_annotate.py',        []),
     ('_check_feishu_records',  PY,   '.workbuddy/_check_feishu_records.py',  []),
     ('_check_maps_ui',         PY,   '.workbuddy/_check_maps_ui.py',         []),
     ('_check_kwlib_ui',        PY,   '.workbuddy/_check_kwlib_ui.py',        []),
@@ -54,6 +55,22 @@ def main():
     only = sys.argv[1:]
     rows = []
     t_all = time.time()
+
+    # ⚠️ 把子进程的临时目录钉在**项目所在盘**（D:）。
+    #    各回归脚本都用 tempfile.mkdtemp() 建临时客户库，默认跟着系统 TEMP（C:）走。
+    #    C: 一旦吃满，SQLite 会抛「database or disk is full」/「disk I/O error」/
+    #    「attempt to write a readonly database」→ 一堆与代码无关的**假红**。
+    #    2026-10-02 实测踩过：C: 只剩 2.34G 时，_smoke_manual_session / _smoke_query /
+    #    _smoke_annotate / _check_feishu_records / _check_maps_ui / _check_manual_ui 六项齐红，
+    #    把 TEMP 指到 D: 后立刻全绿 —— 结论是**磁盘空间**，不是产品 bug。
+    #    → 这里直接钉死，回归不再受系统盘剩余空间影响。
+    _tmp = os.path.join(BK, '_reg_tmp')
+    os.makedirs(_tmp, exist_ok=True)
+    child_env = os.environ.copy()
+    for _k in ('TMPDIR', 'TEMP', 'TMP'):
+        child_env[_k] = _tmp
+    print(f'临时目录（子进程）：{_tmp}')
+
     for name, interp, rel, extra in ITEMS:
         if only and not any(o in name for o in only):
             continue
@@ -66,7 +83,7 @@ def main():
         t0 = time.time()
         cmd = [interp, '-X', 'utf8', path] + extra if interp == PY else [interp, path] + extra
         r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
-                           errors='replace', cwd=ROOT, timeout=900)
+                           errors='replace', cwd=ROOT, timeout=900, env=child_env)
         dt = time.time() - t0
         with open(log_path, 'w', encoding='utf-8') as f:
             f.write('$ ' + ' '.join(cmd) + '\n')

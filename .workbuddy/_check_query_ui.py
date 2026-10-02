@@ -10,6 +10,9 @@
   E. 排序改成公司名 → 首行变；每页改成 3 条 → 出现第二页，翻页后行数正确、序号接续
   F. 「重置条件」把所有勾选与输入清空、回到全量结果
   G. 点「导出 Excel」→ 真的落一份文件到 output/查询导出/，页面提示与日志都对
+  H. 删除：点 ✕ 弹**页面自己的居中模态框**（不是原生 confirm —— 断言它 fixed+flex 居中、
+     卡片落在视口正中 ±2px；选「取消」/ 按 Esc 一个请求都不发）；点「确定删除」后表格减一 +
+     客户库同步删 + 删前自动备份；勾选批量删（含全选 / 半选态）；删到空表不报错
 不联网；客户库、结果输出、浏览器下载目录都已打桩到临时目录。
 """
 import importlib.util
@@ -142,7 +145,7 @@ try:
     info = page.run_js("return document.getElementById('pageInfo').textContent;")
     print('分页：', info)
     assert f'共 {TOTAL} 条' in info and '第 1 / 1 页' in info, f'分页文案不对：{info}'
-    first = page.run_js("return document.querySelector('#resBody tr td:nth-child(2)').textContent;")
+    first = page.run_js("return document.querySelector('#resBody tr td:nth-child(3)').textContent;")
     print('首行：', first.strip()[:40])
     assert 'Alpha' in first, f'默认按评分降序，首行应是最高分那条：{first}'
     print('  ✓ 打开页面自动跑查询，行数/徽章/分页三者自洽')
@@ -190,7 +193,7 @@ try:
     page.run_js("document.getElementById('btnQuery').click();")
     assert wait_text(page, "return document.getElementById('resCount').textContent;",
                      f'{TOTAL} 条', '重置到全量'), '清掉条件后应回到全量'
-    again = page.run_js("return document.querySelector('#resBody tr td:nth-child(2)').textContent;")
+    again = page.run_js("return document.querySelector('#resBody tr td:nth-child(3)').textContent;")
     assert 'Alpha' in again, f'按公司名排序首行应是 Alpha：{again}'
     print('  ✓ 排序改成「公司名 A→Z」生效')
 
@@ -214,7 +217,7 @@ try:
         '翻页没生效'
     n2 = page.run_js("return document.querySelectorAll('#resBody tr').length;")
     assert n2 == TOTAL - 3, f'第 2 页应剩 {TOTAL - 3} 行，实际 {n2}'
-    idx = page.run_js("return document.querySelector('#resBody tr td:nth-child(1)').textContent;")
+    idx = page.run_js("return document.querySelector('#resBody tr td:nth-child(2)').textContent;")
     assert idx == '4', f'第 2 页首行序号应接续为 4，实际 {idx}'
     assert page.run_js("return document.getElementById('btnNext').disabled;") is True, \
         '最后一页时「下一页」应禁用'
@@ -260,6 +263,178 @@ try:
         print('截图：', PNG, os.path.getsize(PNG), 'bytes')
     except Exception as ex:
         print('⚠️ 截图失败（只当证据，不影响结论）：', ex)
+
+    # ---------- H. 删除客户（单行 ✕ / 勾选批量 / 取消不生效）----------
+    # ⚠️ 截图放在删除之前 —— 删完表就少了，先留一张「满表 + 勾选列 + ✕ 列」的全貌。
+    def backups_now():
+        d = m.db._backups_dir()
+        return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+    def db_total():
+        return m.db_query_customers({})[0]
+
+    def row_count():
+        return page.run_js("return document.querySelectorAll('#resBody tr').length;")
+
+    def shown_names():
+        """当前表格里渲染出来的公司名（按显示顺序）。"""
+        return page.run_js("return [...document.querySelectorAll('#resBody tr td:nth-child(3) a')]"
+                           ".map(a => a.textContent);")
+
+    def db_names(order):
+        return [r['company_name'] for r in m.db_query_customers({}, order=order, limit=50)[1]]
+
+    def wait_names(expect, desc, timeout=12):
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if shown_names() == expect:
+                return True
+            time.sleep(0.25)
+        print(f'   ⚠️ 等待超时 [{desc}]：期望 {expect}，实际 {shown_names()}')
+        return False
+
+    def modal_open():
+        return page.run_js(
+            "return document.getElementById('delModal').classList.contains('show');")
+
+    def wait_modal(want, desc='删除确认模态框', timeout=8):
+        """等二次确认模态框出现 / 消失（由 JS 异步开关，别 sleep 死等）。"""
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if modal_open() is want:
+                return True
+            time.sleep(0.1)
+        print(f'   ⚠️ 等待超时 [{desc}]：期望 modal_open={want}，实际 {modal_open()}')
+        return False
+
+    # ⚠️ H 段刻意**不继承**上一段的状态：F 的 requery 是 async，断言只能保证 DOM 上的值
+    #    已经改了，不能保证最后一次 fetch 已经落地（排序/每页条数都可能还是旧的那次渲染）。
+    #    这里显式把排序设回「评分 高→低」并**等表格真的按后端顺序渲染出来**再动手。
+    page.run_js("document.getElementById('order').value = 'score_desc';")
+    page.run_js("document.getElementById('btnQuery').click();")
+    print('H 起点 order =', page.run_js("return document.getElementById('order').value;"))
+    assert wait_names(db_names('score_desc'), '排序切回评分降序并渲染完成'), \
+        'H 段起点没等到「评分降序」的渲染结果'
+
+    # 删除的二次确认是**页面自己的居中模态框**（不是原生 confirm —— 那个贴在浏览器窗口顶部、
+    # 位置与样式都改不了，用户明确要求移到屏幕中间）。所以这里断言的是模态框本身。
+    names0 = shown_names()
+    before_n, before_db, bak0 = row_count(), db_total(), backups_now()
+    print('删除前：表格', before_n, '行 | 库里', before_db, '条 | 顺序', names0)
+    assert before_n == TOTAL and before_db == TOTAL, '前置：此时应是全量满表'
+
+    # H1 点 ✕ 弹居中模态框；选「取消」→ 一个请求都不该发出去
+    page.run_js("document.querySelectorAll('#resBody .row-del')[0].click();")
+    assert wait_modal(True), '单行 ✕ 应弹出二次确认模态框'
+    time.sleep(0.25)   # 等入场动画（m-pop 140ms，从 translateY(8px) 归零）落定再量位置
+    # 位置断言：全屏 fixed 遮罩 + flex 居中；卡片中心落在视口正中（±2px）
+    geo = page.run_js(
+        "const el=document.getElementById('delModal'); const cs=getComputedStyle(el);"
+        " const r=el.querySelector('.modal').getBoundingClientRect();"
+        " return [cs.position, cs.alignItems, cs.justifyContent,"
+        "   Math.round(r.top + r.height/2 - window.innerHeight/2),"
+        "   Math.round(r.left + r.width/2 - window.innerWidth/2)];")
+    print('模态框 [position, alignItems, justifyContent, 纵向偏移, 横向偏移] =', geo)
+    assert geo[0] == 'fixed' and geo[1] == 'center' and geo[2] == 'center', \
+        f'模态框不是「全屏固定 + 居中」：{geo}'
+    assert abs(geo[3]) <= 2 and abs(geo[4]) <= 2, \
+        f'模态框没落在视口正中间（偏移 {geo[3]},{geo[4]}px）：{geo}'
+    tip = page.run_js("return document.getElementById('delModalBody').textContent;")
+    print('确认文案：', tip[:56], '…')
+    assert '不可撤销' in tip, f'二次确认应说清后果，实际：{tip[:90]}'
+    assert page.run_js("return document.getElementById('delModalCancel').textContent;").strip() == '取消'
+    page.run_js("document.getElementById('delModalCancel').click();")
+    assert wait_modal(False), '点了「取消」模态框应关闭'
+    time.sleep(0.5)
+    assert row_count() == before_n and db_total() == before_db, '点了「取消」却把行删了'
+    assert shown_names() == names0, '点了「取消」但表格重画了'
+    assert backups_now() == bak0, '点了「取消」却产生了备份（说明请求真的发出去了）'
+    print('  ✓ 点 ✕ 弹**居中**模态框；选「取消」时表格与客户库都原封不动')
+
+    # H1b Esc 也当「取消」（键盘可达性），同样不能删到东西
+    page.run_js("document.querySelectorAll('#resBody .row-del')[0].click();")
+    assert wait_modal(True), '再点一次 ✕ 应重新弹出确认框'
+    page.run_js("document.dispatchEvent(new KeyboardEvent('keydown', {key:'Escape'}));")
+    assert wait_modal(False), 'Esc 应关掉确认框'
+    time.sleep(0.4)
+    assert row_count() == before_n and db_total() == before_db and backups_now() == bak0, \
+        'Esc 取消竟然也把东西删了'
+    print('  ✓ 按 Esc 等价于「取消」')
+
+    # H2 单行 ✕ → 模态框点「确定删除」（表格减一 + 库里同步消失 + 删前自动备份）
+    gone = page.run_js("return document.querySelector('#resBody tr td:nth-child(3) a').href;")
+    page.run_js("document.querySelectorAll('#resBody .row-del')[0].click();")
+    assert wait_modal(True), '点 ✕ 应再次弹出确认框'
+    page.run_js("document.getElementById('delModalOk').click();")
+    assert wait_modal(False), '点「确定删除」后模态框应关闭'
+    ok = False
+    for _ in range(40):
+        time.sleep(0.25)
+        if row_count() == before_n - 1:
+            ok = True
+            break
+    print('单条删除后：表格', row_count(), '行 | 徽章',
+          page.run_js("return document.getElementById('resCount').textContent;"))
+    assert ok, f'单行 ✕ 确认后应剩 {before_n - 1} 行，实际 {row_count()}'
+    assert db_total() == before_db - 1, f'客户库应同步 -1，实际 {db_total()}'
+    assert m.db_has_customer(gone) is False, f'被删的 {gone} 应从客户库消失'
+    assert shown_names() == names0[1:], f'删掉首行后表格应是原来的第 2 条起：{shown_names()}'
+    new_bak = [f for f in backups_now() if f not in bak0]
+    print('新增备份：', new_bak)
+    assert any(f.startswith('客户库_删除前_') for f in new_bak), \
+        f'删前应自动备份客户库，实际新增 {new_bak}'
+    log = page.run_js("return document.getElementById('log').textContent;")
+    assert '已从客户库删除' in log, f'日志里没有删除记录：{log[-160:]}'
+    print('  ✓ 单行 ✕：二次确认 → 表格减一 → 客户库同步删 → 删前自动备份')
+
+    # H3 勾选批量：全选 / 半选态 / 计数跟着动
+    page.run_js("document.getElementById('ckAll').click();")
+    time.sleep(0.3)
+    n_ck = page.run_js("return document.querySelectorAll('#resBody .row-ck:checked').length;")
+    btn_txt = page.run_js("return document.getElementById('btnDelSel').textContent;")
+    print('全选后 勾选：', n_ck, '| 按钮：', btn_txt)
+    assert n_ck == TOTAL - 1, f'全选应勾上全部 {TOTAL - 1} 行，实际 {n_ck}'
+    assert f'({TOTAL - 1})' in btn_txt, f'按钮计数没跟着变：{btn_txt}'
+    page.run_js("document.querySelectorAll('#resBody .row-ck')[0].click();")   # 取消勾第一个
+    time.sleep(0.3)
+    n_ck2 = page.run_js("return document.querySelectorAll('#resBody .row-ck:checked').length;")
+    ind = page.run_js("return document.getElementById('ckAll').indeterminate;")
+    all_ck = page.run_js("return document.getElementById('ckAll').checked;")
+    print('取消一个后 勾选：', n_ck2, '| 全选框 indeterminate：', ind, '| checked：', all_ck)
+    assert n_ck2 == TOTAL - 2, f'取消勾选后应剩 {TOTAL - 2} 个，实际 {n_ck2}'
+    assert ind is True and all_ck is False, '部分勾选时全选框应呈「半选」态'
+    print('  ✓ 全选 / 半选态 / 按钮计数三者联动正确')
+
+    # H4 批量删除 → 只剩没勾的那一条（**只删勾中的**，不碰没勾的）
+    keep = shown_names()[0]
+    page.run_js("document.getElementById('btnDelSel').click();")
+    assert wait_modal(True), '批量删除也应先弹确认框'
+    page.run_js("document.getElementById('delModalOk').click();")
+    assert wait_modal(False), '批量删除点「确定」后模态框应关闭'
+    assert wait_names([keep], '批量删除后只剩没勾的那条'), '批量删除结果不对'
+    print('批量删除后：存在的是', keep, '| 徽章',
+          page.run_js("return document.getElementById('resCount').textContent;"))
+    assert db_total() == 1, f'客户库应只剩 1 条，实际 {db_total()}'
+    assert page.run_js("return document.getElementById('btnDelSel').disabled;") is True, \
+        '删完已无勾选，批量删除按钮应回到禁用态'
+    print('  ✓ 勾选批量删除：只删勾中的，没勾的那条完好，按钮回禁用态')
+
+    # H5 把最后一条也删掉 → 空态（并顺带验证「原地重查 + 空结果」不炸）
+    page.run_js("document.querySelectorAll('#resBody .row-del')[0].click();")
+    assert wait_modal(True), '最后一条也要过一遍确认框'
+    page.run_js("document.getElementById('delModalOk').click();")
+    ok = False
+    for _ in range(40):
+        time.sleep(0.25)
+        if row_count() == 0:
+            ok = True
+            break
+    empty_shown = page.run_js("return getComputedStyle(document.getElementById('resEmpty')).display;")
+    print('全删光后：行数 0 | 空态 display =', empty_shown, '| 分页：',
+          page.run_js("return document.getElementById('pageInfo').textContent;"))
+    assert ok and db_total() == 0, f'最后一条也该能删掉，实际库里 {db_total()} 条'
+    assert empty_shown != 'none', '删空后应显示空态提示'
+    print('  ✓ 删到空表：不报错、正常显示空态')
 
     print('\n✅ 客户库查询页真机校验全部通过')
     print('   临时目录：', TMP)

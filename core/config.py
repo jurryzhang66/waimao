@@ -21,10 +21,24 @@ CONDITIONS = [
     ('linkedin',    '找采购决策人(领英)'),
 ]
 
+# 仅用于第 5 项预览的用途说明，不改变搜索条件本身。
+COND_CATEGORY = {
+    'wholesale': '客户发现',
+    'importer': '客户发现',
+    'buyer': '客户发现',
+    'oem': '客户发现',
+    'retailer': '客户发现',
+    'project': '客户发现',
+    'contact': '辅助线索',
+    'exhibitor': '辅助线索',
+    'linkedin': '辅助线索',
+}
+
 # 公式骨架：{p} = 产品词，{role} = 本地化角色词（见 COND_ROLES）
 COND_TEMPLATE = {
     'wholesale': '{p} ({role})',
     'importer':  '{p} ({role})',
+    'buyer':     '{p} ({role})',
     'oem':       '{p} ({role})',
     'retailer':  '{p} ({role})',
     'project':   '{p} ({role})',
@@ -183,6 +197,45 @@ COUNTRY_CENTERS = {
     'tr': (38.96, 35.24),
 }
 MAPS_CENTER_DEFAULT = 'us'   # 取不到国家中心坐标时的兜底
+
+# 国家限定（可选，默认关）：仅「谷歌网页搜索 · 标准模式」能叠加的一层强限定。
+# ⚠️ 与 COUNTRY_CENTERS 同理做成**独立字典**，绝不并进 COUNTRIES（4 元组，改长度会连带炸两处）。
+# 值 = (cr 值, site 后缀)：
+#   · cr   → 拼进搜索 URL（&cr=countryXX，与 gl/hl 并列）。按**主机托管国**过滤结果，
+#            属**硬限制**。必须是 ISO 3166-1 alpha-2 **大写**；空串 = 该国不被支持 → 等同不加。
+#   · site → 拼进搜索词（形如 site:.fr，**必须带前导点**）。限域名，够硬。空串 = 不加。
+# ⚠️ 2026-09-28 真机实测（法国）：现状 &gl/hl 出 10 条、.fr 占 50%；加 cr 反而只剩 7 条、
+#    .fr 占 29% —— 因为该国 B2B 大量用 .com，cr 会把真客户挤掉。所以默认 'none'，用前想清楚。
+COUNTRY_LIMITS = {
+    'us':    ('countryUS', ''),            # 美国：不加 site:（该国以 .com 为主、.us 极少）
+    'ca':    ('countryCA', 'site:.ca'),
+    'uk':    ('countryGB', 'site:.uk'),    # ⚠️ UK 的 cr 码待实测（ISO 是 GB，谷歌页面也见 UK）；
+    'de':    ('countryDE', 'site:.de'),    #    site:.uk 可覆盖 .co.uk（".co.uk".endswith(".uk")）
+    'fr':    ('countryFR', 'site:.fr'),
+    'it':    ('countryIT', 'site:.it'),
+    'es':    ('countryES', 'site:.es'),
+    'nl':    ('countryNL', 'site:.nl'),
+    'be':    ('countryBE', 'site:.be'),
+    'ch':    ('countryCH', 'site:.ch'),
+    'ma':    ('countryMA', 'site:.ma'),
+    'dz':    ('countryDZ', 'site:.dz'),
+    'tn':    ('countryTN', 'site:.tn'),
+    'sn':    ('countrySN', 'site:.sn'),
+    'ca_fr': ('countryCA', 'site:.ca'),    # 非 ISO 的内部代码 → 映射到加拿大（法裔商家大量用 .ca）
+    'ae':    ('countryAE', 'site:.ae'),
+    'sa':    ('countrySA', 'site:.sa'),
+    'qa':    ('countryQA', 'site:.qa'),
+    'kw':    ('countryKW', 'site:.kw'),
+    'om':    ('countryOM', 'site:.om'),
+    'bh':    ('countryBH', 'site:.bh'),
+    'eg':    ('countryEG', 'site:.eg'),
+    'ir':    ('',          'site:.ir'),    # ⚠️ 伊朗不在谷歌 cr 支持列表 → cr 留空，只剩 site:
+    'af':    ('countryAF', 'site:.af'),
+    'tr':    ('countryTR', 'site:.tr'),
+}
+# 四选一（与前端 radio 的 value 必须一字不差）
+COUNTRY_LIMIT_MODES = ('none', 'cr', 'site', 'both')
+COUNTRY_LIMIT_DEFAULT = 'none'             # 默认「不改」→ 旧路径逐字不变
 
 # 排除条件（网页上可勾选，每项带说明）：(key, 排除词, 说明)
 EXCLUDE_OPTIONS = [

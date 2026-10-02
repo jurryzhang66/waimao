@@ -52,6 +52,7 @@ assert all(k in m.COND_ROLES for k, _ in m.CONDITIONS if k != 'contact'), \
     '有条件缺 COND_ROLES 定义'
 assert all(len(v) >= 8 for v in m.COND_ROLES.values()), '有条件的语言没备齐 8 种'
 assert m.cond_template('wholesale', 'fr') == '{p} (grossiste OR distributeur)'
+assert m.cond_template('buyer', 'en') == '{p} (buyer OR procurement OR purchasing OR sourcing)'
 assert m.cond_template('exhibitor', 'de') == '{p} (Verband OR Ausstellerliste) filetype:pdf'
 assert m.cond_template('wholesale', 'fa') == '{p} (wholesaler OR distributor)', '缺语言应回落英文'
 assert '""' not in m.cond_template('contact', 'fr'), '条件模板不该再给 {p} 加引号'
@@ -124,9 +125,18 @@ print('  ✓ 后端地图函数齐备；run_search 签名未变（网页搜索�
 
 # ---- 2. 占位符必须已被替换 ----
 for ph in ('CONDS_PLACEHOLDER', 'COUNTS_PLACEHOLDER', 'EXCLS_PLACEHOLDER',
-           'CHINA_FILTERS_PLACEHOLDER', 'MAPS_CENTERS_PLACEHOLDER', 'MAPS_ROLES_PLACEHOLDER'):
+           'CHINA_FILTERS_PLACEHOLDER', 'MAPS_CENTERS_PLACEHOLDER', 'MAPS_ROLES_PLACEHOLDER',
+           'COUNTRY_LIMITS_PLACEHOLDER'):
     assert ph not in html, f'占位符未替换：{ph}'
-print('  ✓ 六个占位符均已替换')
+print('  ✓ 七个占位符均已替换')
+
+# ---- 2b. 第 5 项关键词组合的 Google 语义 ----
+assert "pwords.length > 1 ? '(' + joined + ')' : joined" in html, \
+    '前端多产品 OR 没有整体加括号'
+assert m.COND_TEMPLATE.get('buyer') == '{p} ({role})', 'buyer 条件模板缺失'
+assert '客户发现' in html and '辅助线索' in html, \
+    '预览缺少条件用途分类'
+print('  ✓ buyer 条件、多产品 OR 括号与用途分类就位')
 
 # ---- 3. 内嵌 JS 语法检查 ----
 scripts = re.findall(r'<script[^>]*>(.*?)</script>', html, re.S)
@@ -284,12 +294,14 @@ for _need in ('from core.ui import PAGE_HTML, _build_page', 'from core import db
 print('  ✓ R4 入口已无任何已搬迁的模块级定义（AST 扫描 19 个函数 + 30 个常量）')
 
 # --- R5 模板与构建结果哈希必须与基线一致（防误格式化 / 转义静默变形）---
-# ⚠️ 基线在 V1.5 推进过一次：主页顶栏加了「手动采集页 / 客户库查询」两个导航链接。
-#    那是**故意**改的；以后凡是故意动 page.html，下面两个字面量必须**一起**重算（漏一个就红）。
+# ⚠️ 基线在 V1.5 推进过三次：① 主页顶栏加了「手动采集页 / 客户库查询」两个导航链接；
+#    ② 主页加「6. 自定义搜索词」卡片（自定义查询：原样搜、不套条件模板、不做中国过滤）；
+#    ③ 主页第 4 步加「国家限定」四选一（none 默认 / cr / site / both）。
+#    那三次都是**故意**改的；以后凡是故意动 page.html，下面两个字面量必须**一起**重算（漏一个就红）。
 #    这条断言剩余的价值 = 「哪次误格式化/误翻译把模板改变形，立刻能被抓到」。
 #    ⛔ 如果只是改了别的东西却发现这里红：先看 diff，别顺手把基线改掉。
-_TMPL_SHA = 'f90082ea1d375eaec7dcef1c187d7f73ded020e4d5bfd3d21954e45796e9478d'
-_BUILT_SHA = '563818c65670d8a38a2606d0e2bec20a19757551b70b2e8e6f7cffe1f69b0e11'
+_TMPL_SHA = 'aa4149f3a10c659d189fc0175e7b54c6840a6676d7f0e4954072d21c8a22c941'
+_BUILT_SHA = 'f3781483e9dbbdc82397f9e063853ab9eb97e4f68216a6f781ffc2b87574ace4'
 import hashlib as _hl
 _raw = open(os.path.join(_root, 'ui', 'page.html'), encoding='utf-8').read()
 assert _hl.sha256(_raw.encode('utf-8')).hexdigest() == _TMPL_SHA, \
@@ -398,13 +410,18 @@ for _need in ('id="facetGrid"', 'id="resBody"', 'id="resCount"', 'id="resEmpty"'
               'id="kw"', 'id="order"', 'id="pagesize"', 'id="scoreMin"', 'id="scoreMax"',
               'id="contact"', 'id="seenAfter"', 'id="seenBefore"',
               'id="btnQuery"', 'id="btnExport"', 'id="btnReset"', 'id="btnOpen"',
-              'id="btnPrev"', 'id="btnNext"', 'id="log"'):
+              'id="btnPrev"', 'id="btnNext"', 'id="log"',
+              # 结果表的删除：全选框 + 批量删按钮（单行 ✕ 与勾选框是每行动态渲染的，见下）
+              'id="ckAll"', 'id="btnDelSel"'):
     assert _need in m.QUERY_HTML, f'客户库查询页缺少 {_need}'
 for _fn in ('function collect(', 'function runQuery(', 'function renderResult(',
-            'function loadFacets(', 'function doExport(', 'function resetForm('):
+            'function loadFacets(', 'function doExport(', 'function resetForm(',
+            'function selectedIds(', 'function syncSel(', 'function toggleAll(',
+            'function onResBodyClick(', 'function deleteRows('):
     assert _fn in m.QUERY_HTML, f'查询页缺少逻辑函数：{_fn}'
 assert '/api/db/facets' in m.QUERY_HTML and '/api/db/query' in m.QUERY_HTML \
-    and '/api/db/export' in m.QUERY_HTML and '/api/db/open_folder' in m.QUERY_HTML, \
+    and '/api/db/export' in m.QUERY_HTML and '/api/db/open_folder' in m.QUERY_HTML \
+    and '/api/db/delete' in m.QUERY_HTML, \
     '查询页没打开全部新接口'
 # ⚠️⚠️ 前端 JS 里那个「未填写」哨兵值必须与后端 core.db.QUERY_EMPTY 一字不差。
 #    写错不会报错，只会让「勾了未填写却筛不出任何东西」——最典型的静默失效。
@@ -424,8 +441,57 @@ assert '行业' in [t for _, t in m.QUERY_EXPORT_COLUMNS] \
 assert len(m.EXCEL_HEADER_10) == 10, '结果 Excel 的 10 列硬契约被改坏了'
 # 路由已注册
 assert 'query_page' in m.app.view_functions, '/db 路由没注册'
-for _api in ('api_db_facets', 'api_db_query', 'api_db_export', 'api_db_download', 'api_db_open_folder'):
+for _api in ('api_db_facets', 'api_db_query', 'api_db_export', 'api_db_download',
+             'api_db_open_folder', 'api_db_delete'):
     assert _api in m.app.view_functions, f'查询接口没注册：{_api}'
+
+# --- 结果删除（勾选批量 / 每行 ✕）---
+# 每行两个入口都是**动态渲染**的：勾选框与 ✕ 都带 data-id，且删的是主键而不是网址
+# （按主键无歧义，不会像按键删那样删到同键的另一条）。
+for _need in ('class="row-ck"', 'class="row-del"', 'data-id',
+              "getElementById('resBody').addEventListener('click'",
+              "getElementById('resBody').addEventListener('change'"):
+    assert _need in m.QUERY_HTML, f'查询页缺少删除相关实现：{_need}'
+# ⚠️ 事件**委托**必须挂在 #resBody 上：行是 innerHTML 整表重画的，逐行绑监听会随行一起丢
+assert 'closest(\'.row-del\')' in m.QUERY_HTML, '单行 ✕ 没做事件委托（应挂 #resBody）'
+# 样式只能进本页自带的第二个 <style>（page.html 那份会被注入到全部三页）
+assert '.row-del' in m.QUERY_HTML and '.btn-del' in m.QUERY_HTML, \
+    '删除相关样式没写进查询页自己的 <style>'
+assert m.QUERY_DELETE_MAX == 500, f'单次批量删除上限被改了：{m.QUERY_DELETE_MAX}'
+# 二次确认必须是**页面自己的居中模态框**：原生 confirm() 弹在浏览器窗口顶部、样式不可控，
+# 用户明确要求把它挪到屏幕中间。所以这里同时钉住「有模态框」与「没有原生 confirm」。
+for _need in ('id="delModal"', 'id="delModalTitle"', 'id="delModalBody"',
+              'id="delModalOk"', 'id="delModalCancel"',
+              'function askDeleteConfirm(', 'function closeDeleteConfirm(',
+              "getElementById('delModalOk').addEventListener('click'",
+              "getElementById('delModalCancel').addEventListener('click'",
+              "getElementById('delModal').addEventListener('click'",
+              "e.key === 'Escape'", "e.key === 'Enter'"):
+    assert _need in m.QUERY_HTML, f'删除确认模态框缺少实现：{_need}'
+assert '#delModal { position:fixed; inset:0' in m.QUERY_HTML \
+    and '#delModal.show { display:flex; }' in m.QUERY_HTML, \
+    '模态框样式没写进查询页自己的 <style>，或不是「fixed 全屏 + flex 居中」'
+# ⛔ 不许再用原生 confirm()。注意 askDeleteConfirm( / closeDeleteConfirm( 里的是大写 C，
+#    不会误命中这个小写子串断言。
+assert 'confirm(' not in m.QUERY_HTML, \
+    '查询页里还有原生 confirm()（贴浏览器顶部、位置样式都改不了，应走页面自己的居中模态框）'
+# ⚠️⚠️ 两条继承来的硬纪律，都用源码级断言钉住（这类失误没有任何运行时报错）：
+#   ① 必须按主键批量删 + 删前备份；② 全程不许持 STATE_LOCK
+#      —— 那把锁非可重入，而 backup_db_before_delete() 内部会调 log()（log 自己也要抢它），
+#      持锁调用必死锁（历史上踩过两次）。
+# ⚠️ 用 AST 只取**标识符**，不拿源码做子串匹配：这几个名字在 docstring 里也出现过
+#    （说明性文字），按子串匹配的话「调用被删了、注释还在」这种回归会被漏掉。
+import ast as _ast
+import inspect as _insp
+_tree_del = _ast.parse(_insp.getsource(m.api_db_delete))
+_ids_del = {n.id for n in _ast.walk(_tree_del) if isinstance(n, _ast.Name)}
+_ids_del |= {n.attr for n in _ast.walk(_tree_del) if isinstance(n, _ast.Attribute)}
+assert 'db_delete_customers_by_ids' in _ids_del, \
+    '删除接口没有按主键删（应走 db_delete_customers_by_ids，而不是按 website_key）'
+assert 'backup_db_before_delete' in _ids_del, '删除接口没做删前备份'
+assert 'STATE_LOCK' not in _ids_del, \
+    '删除接口持了 STATE_LOCK —— backup_db_before_delete() 内部的 log() 也抢它，非可重入会死锁'
+assert hasattr(m.db, 'db_delete_customers_by_ids'), 'core/db.py 没导出按主键批量删的函数'
 # ⚠️ 导出必须落 output/查询导出/**子目录**：落 output/ 根下会被 find_latest_result()
 #    选中当「最新结果文件」，把飞书导出的目标劫持到一份查询表上。
 assert m.QUERY_EXPORT_DIRNAME == '查询导出', '查询导出子目录名被改了'
@@ -445,8 +511,89 @@ try:
 finally:
     _cu._QUERY_TEMPLATE_PATH = _save_q
 print('  ✓ R9 客户库查询页 /db：成品、共享样式已注入、控件齐全、行业枚举未硬编码、'
-      '哨兵值与后端一致、导出落 output/查询导出/ 子目录')
+      '哨兵值与后端一致、导出落 output/查询导出/ 子目录、勾选/✕ 双入口删除就位')
 
-print('  ✓ 拆包防护断言全部通过（程序根 / 单例 / 动态 ENRICH_FILE / 残留定义 / 模板哈希 / 第二页 R7 / 第三页 R9）')
+# --- R10 主页「6. 自定义搜索词」（原样搜 / 与标准模式互斥 / 不做中国过滤）---
+# 这一卡的价值全压在两条约定上：① 搜索词**一个字符都不加**；② 它与标准模式互斥。
+# 两条都是**静默失效**型 —— 写错了不会有任何运行时报错，只会悄悄拼上排除词、或悄悄整卡不生效。
+import ast as _ast2
+import inspect as _insp2
+for _need in ('id="rawCard"', 'id="rawQueries"', 'id="rawMapsHint"',
+              'function rawQueries()', 'custom_queries: raws'):
+    assert _need in m.PAGE_HTML, f'主页缺少自定义搜索词实现：{_need}'
+# 自定义词只服务谷歌网页搜索：切到地图模式必须置灰（否则用户会以为地图也在用它）
+assert "getElementById('rawQueries').disabled" in m.PAGE_HTML, \
+    '切到地图模式时没有把自定义搜索词置灰'
+# 预览与实搜必须一致：预览里也要走「原样」分支，否则用户照预览抄下来的词与实际发出去的不符
+assert '条自定义查询（原样搜索，不拼任何词）' in m.PAGE_HTML, \
+    '组合预览没有自定义查询分支（预览与实搜会不一致）'
+assert m.RAW_QUERY_MAX == 20, f'自定义搜索词单轮上限被改了：{m.RAW_QUERY_MAX}'
+# ⚠️ 同样只用 AST 取标识符/字符串常量，不做源码子串匹配（docstring 里同名会造成假绿）。
+#    注意 'custom_queries' 是 JSON 键 → 落在 ast.Constant 里，不在 ast.Name 里。
+_tree_start = _ast2.parse(_insp2.getsource(m.api_start))
+_names_start = {n.id for n in _ast2.walk(_tree_start) if isinstance(n, _ast2.Name)}
+_consts_start = {n.value for n in _ast2.walk(_tree_start)
+                 if isinstance(n, _ast2.Constant) and isinstance(n.value, str)}
+assert 'custom_queries' in _consts_start, \
+    'api_start 没有读 custom_queries（前端填的自定义词会被静默丢弃）'
+assert 'raw_queries' in _names_start, 'api_start 没有把自定义词传递给 run_search'
+assert 'RAW_QUERY_MAX' in _names_start, 'api_start 没有用单轮上限做长度校验'
+assert 'run_search' in _names_start and 'run_maps' in _names_start, 'api_start 的两个 worker 分支不见了'
+_tree_rs = _ast2.parse(_insp2.getsource(m.run_search))
+_names_rs = {n.id for n in _ast2.walk(_tree_rs) if isinstance(n, _ast2.Name)}
+_names_rs |= {n.attr for n in _ast2.walk(_tree_rs) if isinstance(n, _ast2.Attribute)}
+assert 'raw_queries' in _names_rs and 'custom_mode' in _names_rs, \
+    'run_search 没有 raw_queries / custom_mode 分支'
+assert 'china_filter_terms' in _names_rs, \
+    'run_search 不再拼中国过滤词了？（标准模式会静默退化）'
+assert 'cond_template' in _names_rs, 'run_search 不再用条件模板了？（标准模式会静默退化）'
+print('  ✓ R10 主页自定义搜索词：卡片/预览/地图置灰/上限齐备，'
+      'api_start 读 custom_queries 并传给 run_search，run_search 有独立自定义分支')
+
+# --- R11 主页「国家限定」四选一（默认关 / cr 走 URL / site: 走搜索词 / 只标准模式）---
+# 这一支最怕两件事：① 默认值被改成非 none（用户没勾却悄悄改了搜索行为）；
+#                  ② 前端预览与后端实搜不一致（照预览抄下来的公式发出去对不上）。
+# 两条都是**静默失效**型 —— 不报错，只是结果悄悄变样。
+for _need in ('id="countryLimit"', 'name="country_limit"',
+              'value="none" checked', 'value="cr"', 'value="site"', 'value="both"',
+              'function countryLimit()', 'function effectiveLimit()', 'function siteTerm()',
+              "getElementById('countryLimit').style.display",
+              '#conds, #excludes, #chinaFilters, #countryLimit',
+              'country_limit: countryLimitVal'):
+    assert _need in m.PAGE_HTML, f'主页缺少国家限定实现：{_need}'
+# 预览与实搜必须同位置：site: 拼在条件模板之后（后端 core + ' ' + site）
+assert "if (st) core = core + ' ' + st;" in m.PAGE_HTML, \
+    '前端预览没把 site: 拼进公式主体（预览与实搜会不一致）'
+assert "s += '&cr=' + cr;" in m.PAGE_HTML, \
+    '前端预览没把 cr 挂到 URL 参数上（预览与实搜会不一致）'
+# 数据层完整性：每个国家都要有 (cr, site) 条目；且不许动 COUNTRIES 的元组长度
+assert set(m.COUNTRY_LIMITS) == {c[0] for c in m.COUNTRIES}, \
+    'COUNTRY_LIMITS 与 COUNTRIES 的国家代码没对齐（缺项会让该国静默失效）'
+assert all(len(c) == 4 for c in m.COUNTRIES), \
+    'COUNTRIES 被改成非 4 元组（会连带炸前端注入与 run_search 解包）'
+assert m.COUNTRY_LIMITS['us'][1] == '', '美国不该配 site: 后缀（.com 为主、.us 极少）'
+assert m.COUNTRY_LIMITS['ca_fr'][0] == 'countryCA', 'ca_fr（内部代码）没映射到 countryCA'
+assert m.COUNTRY_LIMIT_MODES == ('none', 'cr', 'site', 'both'), \
+    f'四选一的取值被改了：{m.COUNTRY_LIMIT_MODES}'
+assert m.COUNTRY_LIMIT_DEFAULT == 'none', \
+    f'国家限定默认值被改了（用户没勾却会改搜索行为）：{m.COUNTRY_LIMIT_DEFAULT}'
+# ⚠️ 同样只用 AST 取标识符/字符串常量，不做源码子串匹配。
+assert 'country_limit' in _consts_start, \
+    'api_start 没有读 country_limit（前端选的限定会被静默丢弃）'
+assert 'country_limit' in _names_start, 'api_start 没有把国家限定传给 worker'
+assert 'country_limit' in _names_rs and 'COUNTRY_LIMITS' in _names_rs, \
+    'run_search 没有国家限定分支'
+assert 'site_term' in _names_rs and 'cr_param' in _names_rs, \
+    'run_search 里 cr/site 的拼装变量不见了（限定会静默失效）'
+# 用**参数对象**断言默认值（signature 里是求值后的 'none'，不是源码里的常量名 —— 别按文本匹配）
+_sig_rs = _insp2.signature(m.run_search)
+assert 'country_limit' in _sig_rs.parameters, 'run_search 丢了 country_limit 参数'
+assert _sig_rs.parameters['country_limit'].default == 'none', \
+    f'country_limit 默认值应回落 none（旧调用方行为必须不变）：{_sig_rs.parameters["country_limit"].default}'
+print('  ✓ R11 主页国家限定：四选一控件/默认 none/预览同位置齐备，'
+      'COUNTRY_LIMITS 与 COUNTRIES 对齐，api_start 读并透传，run_search 有独立限定分支')
+
+print('  ✓ 拆包防护断言全部通过（程序根 / 单例 / 动态 ENRICH_FILE / 残留定义 / 模板哈希 / '
+      '第二页 R7 / 第三页 R9 / 主页 R10 / 主页 R11）')
 
 print('\n✅ 页面静态检查通过')

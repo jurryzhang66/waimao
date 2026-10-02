@@ -50,10 +50,11 @@
 
 - 三条采集链路（网页搜索 / 地图名录 / 手动采集 + 扩展）全部跑通并各有回归脚本守着。
 - 已拆包成「入口 + `core/` 包 + `ui/` 模板」，三个页面（主页 / 手动采集 / 客户库查询）共用一份 CSS。
-- 有 **22 项自动化回归**（`.workbuddy/_run_all_reg.py`），改代码后必须全绿。
-- 真实客户库已积累 **306 条**（有邮箱 200 / 有电话 100），用户在日常使用中（数字一直在涨）。
+- 有 **23 项自动化回归**（`.workbuddy/_run_all_reg.py`），改代码后必须全绿。
+- 真实客户库已积累 **303 条**（有邮箱 200 / 有电话 99），用户在日常使用中（数字一直在涨）。
 - 代码已提交并推送到 GitHub：`https://github.com/jurryzhang66/waimao`（**public**，用户知情同意，见 §6.9 风险提示）。
-- **未提交的工作区改动**：最近四轮（计数口径拆分 + 去重键不变量；客户库查询页 `/db`；扩展面板入口；主页顶栏导航）尚未 commit。
+- **未提交的工作区改动**：最近六轮（计数口径拆分 + 去重键不变量；客户库查询页 `/db`；扩展面板入口；主页顶栏导航；`/db` 结果删除 + 行业为空批量标注脚本；**删除确认改居中模态框**）尚未 commit。
+  ⚠️ `git status` 里会看到若干 `D`（`DB/backups/` 的旧备份 + `关键词库.json.bak*` + `客户库.sqlite3.bak_*`）：**是用户自己清理的，不是 bug、不用恢复**（用户 2026-10-02 确认）。提交 V1.5 时用 `git add -A` 让这些删除自然一并进去即可，**不必单独为它做任何事**。
 
 ---
 
@@ -97,6 +98,7 @@ D:\waimao\dp\
 ├── 补历史欠账.py              CLI：批量补全库里「邮箱电话都为空」的历史欠账（--dry 只列不跑）
 ├── 回填行业.py                CLI：按规则判断行业，回填本地库 + 飞书（行业口径的**唯一权威**）
 ├── 重标行业.py                CLI：把历史行业旧口径改成规范名（默认 dry-run，--apply 才写）
+├── 标注空行业.py              ★ CLI：把「行业没标注」的客户批量写成指定行业（默认 dry-run，--apply 才写）
 ├── 同步数据库到飞书.py         CLI：把 SQLite 全量缺失记录同步到飞书（--dry-run 预演）
 ├── demo.py                    诊断脚本：检查 PyCharm 环境与浏览器能否启动
 ├── gen_import.py              一次性脚本：从旧 Excel 生成飞书导入 JSON（历史遗留）
@@ -106,7 +108,7 @@ D:\waimao\dp\
 ├── AI_PROJECT_CONTEXT.md      ★ 本文档：项目地图
 │
 └── .workbuddy/              ⚠️ 与程序**零耦合**（代码里引用 0 处），但是改代码的安全网
-    ├── _run_all_reg.py        全量回归驱动（22 项，逐项写 _reg__<名字>.log）
+    ├── _run_all_reg.py        全量回归驱动（23 项，逐项写 _reg__<名字>.log）
     ├── _check_*.py            静态/单测类校验（页面、启动、扩展、词库、行业规则、飞书记录、真实库键、查询页真机）
     ├── _smoke_*.py / .js      运行时冒烟（搜索/地图/采集/本轮会话/客户库查询/扩展内容脚本/扩展 popup/端到端联调）
     ├── _kwlib_before.json     词库回归的 deep-diff 基准（脚本依赖，**不能删**）
@@ -134,6 +136,8 @@ D:\waimao\dp\
 - **核心文件**：`客户开发工具.py`；依赖 `core/config.py`（条件模板、国家表、黑名单）
 - **实现方法**：
   1. 组装查询词：`cond_template(key, lang)` 给出公式骨架 → 用 `pq_list` 替换 `{p}` → 拼上排除词与中国过滤词。
+     ⚠️ 传了 `raw_queries`（见 **M14**）时**整步跳过**：每条自定义词就是完整公式，原样发出。
+     ⚠️ 若 `country_limit` 含 `site`（见 **M15**），在核心公式后**追加 `site:.xx`**（进搜索词）；含 `cr` 则给 URL 追加 `&cr=countryXX`（不进搜索词）。默认 `none` 时这两步都不发生。
   2. `open_search()` 打开搜索页，**内置多轮重开**专治谷歌返回「壳页面」（前 2 轮直连 `/search?q=`，第 3 轮走搜索框兜底）。
   3. `extract_results()` 抽结果（判据 `RESULT_LINK_CSS = 'css:a:has(h3)'`），结果链接是跳转链，必须 `resolve_goto()` 还原真域名。
   4. 逐条：`enrich()` 就地抓联系方式 → `china_filter_reasons()` 中国信号过滤 → `db_upsert_customer()` 登记 → 评分 → 再 upsert 回填 → 追加 `all_rows`。
@@ -269,7 +273,7 @@ D:\waimao\dp\
 - **与其他模块的关系**：被 M1/M2/M3/M4 写入，被 M7/M8 读取，被 CLI 脚本批量处理。
 - **依赖**：`core/paths`、`core/state.log`、openpyxl（仅空库时迁移旧 Excel用）
 - **是否可复用**：✅ 高 —— 去重键算法、upsert 合并语义、WAL 安全备份骨架都可直接搬。
-- **当前完成状态**：✅ 已投产（306 条）
+- **当前完成状态**：✅ 已投产（303 条）
 - **修改时注意**：
   - ⛔ **不变量：`website_key` 恒等于 `normalize_domain(website)`**。回归项 `_check_db_keys.py` 守着它。
     **破了会怎样**：`db_has_customer()`（判断跳过）**只**查 `website_key`，而 `db_upsert_customer()`（写入）是「按键查不到、再按 email 兜底合并」—— 口径本就不一致；键一错位，该网址就**永久**被判「新客户」，每采一次往 Excel 多写一行、库里始终只有一条（实测 `megazone.mx` 在一份表里出现 3 次）。
@@ -351,7 +355,7 @@ D:\waimao\dp\
   - `CONDITIONS` 是 `(key, 中文名)` 2 元组；`COND_TEMPLATE` 是含 `{p}` / `{role}` 的骨架；`COND_ROLES[key][lang]` 有 8 种语言（缺则回落 `en`）。
   - `cond_template(key, lang)` 是**唯一出口**，后端 `run_search` 与前端预览都必须走它（保证「预览即实际」）。
   - 语言优先级：`#kwLang`（用户手选）→ 该国 `hl` → `en`。
-  - 国家筛选走 URL 参数 `&gl=…&hl=…`，**不写进搜索词**（`cr`/`lr` 实测不值得加，已拍板）。
+  - 国家筛选默认走 URL 参数 `&gl=…&hl=…`，**不写进搜索词**。在此之外还提供一层更硬的国家限定（`cr` 挂 URL、`site:` 进搜索词）—— 见 **M15**，**默认关、仅标准网页模式**。`lr` 仍不采用。
 - **与其他模块的关系**：被 M1 消费；被 M11（页面）注入为 `tmpl_map` 供预览。
 - **依赖**：零 import（`core/config.py` 永远在依赖图最底层）
 - **是否可复用**：✅ 高 —— 多语言身份词表可直接搬。
@@ -387,7 +391,7 @@ D:\waimao\dp\
 
 ### M12. 回归测试套件
 
-- **功能作用**：改代码后的安全网。22 项，覆盖页面静态、启动、词库、行业规则、地图常量、三条采集链路、UI 真机渲染、查询页（后端冒烟 + 真机）、扩展三层验证、真实库体检。
+- **功能作用**：改代码后的安全网。23 项，覆盖页面静态、启动、词库、行业规则、地图常量、三条采集链路、UI 真机渲染、查询页（后端冒烟 + 真机）、数据修复脚本（标注空行业）、扩展三层验证、真实库体检。
 - **所在位置**：`.workbuddy/`（与程序零耦合，但会被 gitignore 的白名单放行）
 - **核心文件**：`_run_all_reg.py`（驱动）、`_reg_summary.txt`（验收记录）
 - **实现方法**：
@@ -397,7 +401,7 @@ D:\waimao\dp\
 - **与其他模块的关系**：横切所有模块。
 - **依赖**：Python / Node（路径硬编码在 `_run_all_reg.py`）
 - **是否可复用**：✅ 高 —— 「全量驱动 + 每项独立子进程 + 兜底日志」的骨架、DOM 桩、E2E 骨架都可复用。
-- **当前完成状态**：✅ 22 项全绿
+- **当前完成状态**：✅ 23 项全绿
 - **修改时注意**：
   - ⚠️ 打桩落点：子模块间必须 `模块.函数()`（如 `m.db.db_path = …`）；smoke 必须有 `_under_tmp()` 护栏，否则**静默写真实库**。
   - ⚠️ 禁止并行 Edit 同一文件（会静默覆盖）。
@@ -417,18 +421,76 @@ D:\waimao\dp\
   3. `db_query_customers()` 计数与取行**共用同一个 WHERE**，所以「命中 N 条」与翻页看到的一定自洽；`limit` 钳在 1…`QUERY_MAX_LIMIT`(500)。
   4. 导出：`/api/db/export` 分页拉完命中行 → `_save_query_excel()` 写 **14 列**（客户库全字段，**不是**结果 Excel 的 10 列契约）→ 落 `output/查询导出/`，返回文件名与下载 URL；`/api/db/download/<name>` 用 `send_file` 下载，并挡路径穿越。
   5. 页面交互：打开即自动查一次；任一筛选 chip / 排序 / 每页变化都回到第 1 页重查；翻过头（`offset >= total`）自动回退到最后一个有内容的页。
-  6. **入口共四处**：① **首页顶栏 `.nav` 的「📊 客户库查询」**（V1.5 加，`href="/db"`，R6 有断言守着）；② Chrome 扩展面板底部「📊 客户库查询」（`popup.html` 的 `#lnkDb` → `background.js::urlsReply()` 返回的 `db` 字段，复用 `DP_URLS` 消息）；③ `/manual` 页顶部同一链接；④ 直接敲地址。⚠️ 四条路都依赖**后端是新代码**：跑着的旧实例（改动前启动的）打 `/db` 是 **404**，必须先重启工具。
+  6. **删除客户**（2026-10-02 加）：结果表每行最左有勾选框、最右有 ✕，另有「🗑️ 删除选中 (N)」按钮与表头全选框（支持半选态）。两个入口打**同一条**接口 `POST /api/db/delete`，body 固定 `{'ids': [主键…]}`（单行就是长度为 1 的数组）。后端 `db_delete_customers_by_ids()` **按主键**删（不用 website_key，主键无歧义），删前调 `backup_db_before_delete()` 落一份 WAL 安全备份到 `DB/backups/`（300 秒节流，失败不阻断）。删完前端原地重查当前页。
+  7. **入口共四处**：① **首页顶栏 `.nav` 的「📊 客户库查询」**（V1.5 加，`href="/db"`，R6 有断言守着）；② Chrome 扩展面板底部「📊 客户库查询」（`popup.html` 的 `#lnkDb` → `background.js::urlsReply()` 返回的 `db` 字段，复用 `DP_URLS` 消息）；③ `/manual` 页顶部同一链接；④ 直接敲地址。⚠️ 四条路都依赖**后端是新代码**：跑着的旧实例（改动前启动的）打 `/db` 是 **404**，必须先重启工具。
 - **与其他模块的关系**：**只读消费** M6 客户库；与 M7 结果 Excel / 飞书导出**完全隔离**（见「注意」第一条）。不参与采集，也不被采集调用。
 - **依赖**：Flask、openpyxl、`core/db`、`core/paths`、`core/ui`
 - **是否可复用**：✅ 高 —— 「facets 驱动的前端筛选面板 + 白名单排序的分页查询 + 导出落子目录」是一套与业务无关的骨架，换个表就能复用。
-- **当前完成状态**：✅ 已完成（2026-10-01 新增，`.workbuddy/_smoke_query.py` 126 项 + `_check_query_ui.py` 真机全绿）
+- **当前完成状态**：✅ 已完成（2026-10-01 新增查询/导出；2026-10-02 新增删除、并把删除确认改成**页面自己的居中模态框**。`.workbuddy/_smoke_query.py` **168 项** + `_check_query_ui.py` 真机 A–H 全绿 + 全量 **23 项**）
 - **修改时注意**：
   - ⛔⛔ **导出必须落 `output/查询导出/` 子目录，绝不能落 `output/` 根下**。`find_latest_result()` 只 glob `output/` 一层、且靠「文件名里有 8 位日期」筛候选 —— 查询表的名字天然带日期，落在根下会被它选中当「**最新结果文件**」，把飞书导出的目标劫持到一份查询结果上。`_smoke_query.py` ⑧ 组有一条**反证**断言守着这个行为。
-  - ⛔ **查询链路不碰 `STATE_LOCK`、不改 `paths.ENRICH_FILE` / `STATE['output']`**（那两个指针归「本轮采集」用）。它是纯读链路，只开自己的 sqlite 连接。
+  - ⛔ **查询链路不碰 `STATE_LOCK`、不改 `paths.ENRICH_FILE` / `STATE['output']`**（那两个指针归「本轮采集」用）。**删除接口同样全程不持 `STATE_LOCK`** —— `backup_db_before_delete()` 内部会调 `log()`，而 `log()` 自己要抢那把**非可重入**锁，持锁调用必死锁（`_check_page.py` R9 用 AST 断言钉住了「删除接口里不出现 `STATE_LOCK`」）。
+  - ⛔ **删除必须按主键 id**（`db_delete_customers_by_ids`），并且**空/非法 id 一律返回 0** —— 少了这道门，前端传个 `[]`/`None`/字符串就等于 `DELETE FROM customers`（清库）。`_smoke_query.py` ⑪ 组有 4 条断言守着。
+  - ⚠️ 删除**只动客户库，不动 `MANUAL_STATE`**：若「本轮采集」正在进行，被删的那条仍留在它的内存明细里（那明细不是从库里读的），本轮结果 Excel 还会带上它 —— 要一并拿掉得去 `/manual` 点那行的 ✕。
   - ⚠️ 前端 JS 里的 `const EMPTY = '__empty__'` 必须与后端 `core.db.QUERY_EMPTY` 完全一致（`_check_page.py` R9 有断言）。写错不报错，只会让「勾了未填写却筛不出东西」——典型静默失效。
   - ⚠️ 页面里**不许**出现行业名（`_check_page.py` R9 会红）——选项一律由 `/api/db/facets` 生成。
+  - ⚠️ 结果表每行的勾选框 / ✕ 是 `innerHTML` 整表重画的，删除的事件**必须委托到 `#resBody`**（与 `/manual` 的 `.row-del` 同一个道理：逐行绑监听会随行一起丢）。
   - ⚠️ 入口从 `core.ui` 是**分两行 import** 的（`PAGE_HTML, _build_page` 单独一行）——`_check_page.py` R4 有一个字符串级的 glue 断言 `'from core.ui import PAGE_HTML, _build_page'`，合并成一行会让它红。
+  - ⛔ **二次确认一律用页面自己的模态框（`#delModal`），绝不用原生 `confirm()`**：原生对话框贴在浏览器窗口**顶部**、位置与样式都由浏览器决定（用户明确嫌「放顶部不方便」，2026-10-02 要求移到屏幕中间）。模态框 = `position:fixed` 全屏遮罩 + `flex` 居中卡片，Esc / 点遮罩 = 取消，Enter = 确定。`_check_query_ui.py` H 段断言「卡片中心落在视口正中 ±2px」（量之前先等 `m-pop` 入场动画落定），`_check_page.py` R9 断言整页里**不再出现 `confirm(`**。⚠️ **例外：`ui/manual.html`（约第 408 行）保留原生 confirm** —— 用户 2026-10-02 拍板**暂不改**（别主动去动，改它要同步 `_check_manual_ui.py` + R7）。
+  - ⛔ **模态框等「JS 要取的 DOM 节点」必须放在 `<script>` 之前**：本页脚本是**立即执行的 IIFE**，解析到那一刻就 `getElementById` 取节点 —— 放到 `</script>` 之后会拿到 `null`、绑事件抛 TypeError，导致 `init()` 整体中断、**筛选面板全空白**（现象是「0 个筛选框」而不是弹窗报错，极易误判成后端挂了；实测踩过）。
   - ⚠️ 改 `ui/query.html` 后**必须重启工具**（`QUERY_HTML` 在 import 期构建）。
+
+---
+
+### M14. 自定义搜索词（完全原样搜索）
+
+- **功能作用**：主页第 6 卡。用户自己写完整谷歌查询（一行一条），**原样**发出去 —— 不套条件模板、不自动加英文双引号、不自动拼产品词、不拼排除词、不做中国商家过滤。用于标准模式覆盖不到的长尾查询（例如手写 `-site:.cn`、`OR`、`(...)`、指定城市名）。
+- **所在位置**：`ui/page.html` 的 `#rawCard` / `#rawQueries`（卡片 + `rawQueries()` + `renderCombos()` 分支 + `start()` 校验 + `onSource()` 置灰）；后端 `客户开发工具.py` 的 `api_start`（读 `custom_queries`、`RAW_QUERY_MAX = 20`）与 `run_search(..., raw_queries=None)`。
+- **核心文件**：`ui/page.html`、`客户开发工具.py`
+- **实现方法**：
+  1. 前端 `rawQueries()` 按行取、丢弃空行、去首尾空格；**非空即进入自定义模式**（与标准模式**互斥**）。
+  2. `start()` 把列表放进请求体的 `custom_queries` 字段；同时放宽两处校验：`products` 可空、搜索条件可不勾（都改成「或填一条自定义搜索词」）。
+  3. 后端 `api_start` 清洗（非字符串丢弃 / `strip` / 去重保序）→ 超过 `RAW_QUERY_MAX` 拒绝 → `source == 'maps'` 时整批忽略并记日志。
+  4. `run_search` 里 `custom_mode = bool(raw_queries)`：`pq_list = raw_queries`、`cond_count = 1`、`cond_list = [('自定义', '{p}')]`（**占位模板，让原有双层循环原样跑，不必另写一套循环**）、`formula = pq`（原样）。
+  5. 国家**不进搜索词**：仍走 `country_params = &gl=&hl=` 挂 URL，结果行照旧 `item['country'] = cname` → Excel 第 10 列。**国家那段代码一行都没改。**
+- **与其他模块的关系**：与 M1 共用同一条链路（`open_search` / `extract_results` / `enrich` / 评分 / `db_upsert_customer` / M7 落盘 / M8 飞书），只是**查询词的来源**不同。与 M2 并列。
+- **依赖**：与 M1 相同。
+- **是否可复用**：`raw_queries` 这个「绕过模板直给公式」的开关本身可复用（任何「用户手写完整查询」的场景都能走它）。
+- **当前完成状态**：✅ 已投产（2026-10-02 新增）
+- **修改时注意**：
+  - ⛔ **「搜索词一个字符都不加」是这条链路的全部价值**（用户原话：「既然是自定义关键词我就不希望加任何进去，要干净」）。`exclude` / `china_filter_terms` / 双引号一律不许拼。
+  - ⛔ **`china_filters` 必须置空**：用户拍板自定义模式下**完全不做中国商家过滤**。实现方式是 `custom_mode` 时 `china_filters = set()` —— 这样 `extract_results()` 与 `china_filter_reasons()` 两处调用**一个字都不用改**就自动变成 no-op（`china_filter_reasons` 见到空集合直接 `return []`）。
+  - ⚠️ **「完全不过滤」有边界**：`is_blocked()` 的平台黑名单（`BLOCK_DOMAINS`：amazon / ebay / etsy / walmart / wikipedia / linkedin / youtube / indiamart / trade.gov…、`BLOCK_SUBSTR`、搜索引擎域名族）**仍然生效**，与 `china_filters` 无关。要放开它属另一个开关，本次未做。
+  - ⛔ **两处前端校验必须一起放宽**：`start()` 里 `if (!products.trim())` 与 `if (source !== 'maps' && !conditions.length)` —— 只改后者的话，自定义模式下会被「请填写产品关键词」挡住。
+  - ⛔ **后端第一道门也要放宽**：`api_start` 里 `if not products: return ...'请填写至少一个产品关键词'`，只改前端会在 HTTP 层被拒。
+  - ⚠️ `cond_list` 必须给**占位模板**：留空会让 `for cname2, tmpl in cond_list` 永不进入 → **静默跑 0 条查询**（日志「本轮新增 0 个网站」），与「勾了条件却 0 条」是同一个坑。
+  - ⚠️ 预览（`renderCombos()`）必须**同步**切成自定义分支，否则用户照预览抄下来的词与实际发出去的不符（预览/实搜两条链路一致的既有约定）。
+  - ⚠️ 自定义框只服务**谷歌网页搜索**：切到地图模式时置灰 + 提示（`#rawMapsHint`），`api_start` 里也整批忽略。
+  - ⚠️ 改 `ui/page.html` 后**必须重启工具**，且**必须重算 R5 两条 sha256**。
+
+---
+
+### M15. 国家限定（可选，默认关）
+
+- **功能作用**：主页第 4 步「参数」卡里的**四选一**（`none` / `cr` / `site` / `both`），在现有 `&gl=&hl=`（软偏好，不排除任何页面）之外，再叠一层更强的国家限定。**默认 `none`，行为与旧版一字不差**；只对「谷歌网页搜索」的**标准模式**生效。
+- **所在位置**：`core/config.py`（`COUNTRY_LIMITS` / `COUNTRY_LIMIT_MODES` / `COUNTRY_LIMIT_DEFAULT`）、`core/ui.py`（注 `COUNTRY_LIMITS_PLACEHOLDER`）、`ui/page.html`（`#countryLimit` 四选一 + `countryLimit()` / `effectiveLimit()` / `siteTerm()` / `countryParams()` / `renderCombos()`）、`客户开发工具.py`（`run_search(country_limit=)` 与 `api_start` 透传）。
+- **核心文件**：`core/config.py`、`ui/page.html`、`客户开发工具.py`
+- **实现方法**：
+  1. 数据层 `COUNTRY_LIMITS = {code: (cr, site)}` —— `cr` 是 `countryXX`（**大写 ISO**，如 `countryFR`），`site` 是 `site:.xx` 域名字面量。**独立字典**，与 `COUNTRY_CENTERS` 同理，**不动 `COUNTRIES` 4 元组**。
+  2. `cr` **只挂 URL**（`countryParams()` 末尾 `s += '&cr=' + cr`），`site:` **只进搜索词**（`renderCombos()` 标准分支 `core = core + ' ' + st`）；两者都与既有 `&gl=&hl=` 并联。
+  3. 特殊值：**美国** `('countryUS', '')` —— site 留空（美国 B2B 以 `.com` 为主，`.us` 极少）；**伊朗** `('', 'site:.ir')` —— cr 留空（不在谷歌 cr 支持列表）；`ca_fr` 内部码 → 映射 `countryCA`。英国 `cr='countryGB'`（**待实测**；`COUNTRIES` 里 `gl='uk'` 保持不变）。
+  4. **互斥纪律**：`custom_mode` 时强制 `country_limit='none'`（与 `china_filters = set()` 同一纪律）；地图模式整块 `display:none` + `api_start` 忽略。
+- **与其他模块的关系**：M1 的搜索链路消费；`site:` 与「找采购决策人（领英）」条件**互斥**（领英模板本身是 `site:linkedin.com/in …`，叠加 `site:.fr` 必 0 结果）。数据层被 M11 注入为前端常量。
+- **依赖**：`core/config.py`（零 import）；前端零新依赖。
+- **是否可复用**：`COUNTRY_LIMITS` 这张「代码 → (cr, ccTLD)」映射表可整张搬走。
+- **当前完成状态**：✅ 已投产（2026-10-02 新增，代码已改完 + 23 项回归全绿，尚未 git commit）
+- **修改时注意**：
+  - ⛔ **默认关是刻意设计**：2026-09-28 真机实测（法国同查询 `"nouilles chinoises" grossiste`）—— `&gl=fr&hl=fr`（现状）**10 条 / `.fr` 占 50%** 最好；加 `cr=countryFR` 后**掉到 7 条 / 占 29%**、真客户反而被挤掉（法国 B2B 大量用 `.com`）。**限定更严 ≠ 更准**。
+  - ⚠️ **`site:` 不是「限国家」而是「限域名」**：能当国家筛选是因为 ccTLD 与国家强绑定，**但美国是例外**（`.us` 注册量只有 `.com` 百分之一量级）→ 美国 site 留空。
+  - ⚠️ **`site:.uk` 能匹配 `.co.uk`**：`site:` 支持 TLD，`"example.co.uk".endswith(".uk")` 成立 → 英国写 `site:.uk` 即可覆盖 `.co.uk`。
+  - ⚠️ **已知限制**：`open_search()` 最后一轮兜底（`type_search`）走的 `country_params` **不含 `cr`** → 壳页面兜底轮会丢 `cr`（`gl`/`hl` 本来也丢）；`site:` 在 formula 里，不会丢。本轮**接受 + 记账**（见 §7.1 3b）。
+  - ⚠️ 新增国家时 `COUNTRY_LIMITS` 的键要和 `COUNTRIES` 的 `code` 对齐（`_check_page.py` R11 有 `set(COUNTRY_LIMITS) == {c[0] for c in COUNTRIES}` 断言）。
+  - ⚠️ 改 `ui/page.html` 后**必须重启工具**，且**必须重算 R5 两条 sha256**。
 
 ---
 
@@ -573,7 +635,10 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 | `_flush_manual_session()` | `客户开发工具.py` | 「攒一批 → 一次性落盘 → 失败保留可重试」的骨架 |
 | `db_query_customers(filters, order, limit, offset)` | `core/db.py` | **分页查询骨架**：参数化 WHERE + 白名单 ORDER BY + 计数与取行共用同一 WHERE（分页数字必然自洽） |
 | `db_facet_counts()` | `core/db.py` | **「按真实数据生成筛选选项」骨架**：各维度 distinct + 条数 + 空值条数（换张表就能用） |
+| `db_delete_customers_by_ids(ids)` | `core/db.py` | **按主键批量删的干净实现**：非正整数丢弃 + 去重 + 空列表直接返回 0（内建「不清库」门）；配合 `backup_db_before_delete()` 就是一套完整的「安全删除」 |
+| `run_search(..., raw_queries=[...])` | `客户开发工具.py` | **「用户手写完整查询、绕开模板」的开关**：`custom_mode` 一开，查询词原样发出（不拼任何东西），并把 `china_filters` 置空。任何「让用户直接控制查询串」的场景都能复用这个形态 |
 | `query_export_dir()` / `ts_query_export_path()` | `core/paths.py` | 导出落「专用子目录 + 时间戳去重」的骨架（配合「别让产物混进会被扫描的目录」这条经验） |
+| `标注空行业.py` | 项目根 | **「把某列为空的记录批量补一个值」的脚本骨架**：默认 dry-run 打印将改的 id 清单 → `--apply` 才写库（写前 sqlite 在线 backup）；`--exclude-id` 可挑掉几条。`重标行业.py` 是它的「改名」孪生兄弟 |
 | 三级抓取降级策略 | `collect_from_html()` | 「秒级正则 → 轻量 HTTP → 重型浏览器」的降级链，通用性很强 |
 | `_guess_industry()` | `客户开发工具.py` | 行业判定，**刻意复用 `回填行业.py` 的规则**（口径只能有一份） |
 
@@ -589,6 +654,10 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 | 事件委托删除行 | `ui/manual.html::onSessionBodyClick` + `extension/popup.js::onSessionListClick` | 行是 innerHTML 拼的、会整表重建 → **只能**委托 |
 | 「facets 驱动的筛选面板」模式 | `ui/query.html::loadFacets()` | 勾选项全部由后端 distinct 接口生成，页面里零硬编码枚举 —— 将来新增行业/来源，页面一个字都不用改 |
 | 「查询条件 → 导出」一整套 | `ui/query.html` + `/api/db/*` | 换张表/换个库就能复用的筛选+分页+导出页面，是目前项目里最完整的一个 CRUD 只读视图 |
+| 「勾选 + 单行 ✕ 双入口同一接口」删除模式 | `ui/query.html::deleteRows()` / `selectedIds()` / `syncSel()` | 单行就是长度为 1 的数组 → 只有一个后端路径，不会出现「批量删才备份」这类分支漏洞；`ckAll.indeterminate` 处理半选态 |
+| 「删除前二次确认 + 说清后果」文案 | `ui/query.html::deleteRows()` | `confirm()` 里写明：不可撤销 / 已自动备份 / 对本轮明细的影响 —— 删数据的确认框必须把代价讲明白 |
+| 「按行取多行文本 → 与后端同规则」的小函数 | `ui/page.html::rawQueries()` / `productQueries()` | `split('\n') → trim → filter(Boolean)`；**预览与实搜必须走同一个函数**，否则用户照预览抄下来的词与实际发出去的不符 |
+| 「预览按模式选分支」结构 | `ui/page.html::renderCombos()` | 地图分支 → 自定义分支 → 标准分支，各自 `return` 掉；新加一种查询来源时就在这儿插一段，比在渲染里塞 if 清晰 |
 | `_note` 兜底提示 | `extension/popup.js` | 应对「末尾必然 `refreshSession()` 会覆盖一次性提示」 |
 | `breakdownText()` / `roundTally()` | `ui/manual.html` | 「把两个口径一起报出来」的文案函数 |
 
@@ -649,8 +718,11 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 ### 6.6 为什么删除要「明细 + 客户库双删 + 删前备份」
 
 - **双删**：采集即落库，只删明细是**假删除** —— 库里那条还在，下次再采到同一个站会被 `db_has_customer` 判「已在客户库」跳过，**永远采不回来**，飞书导出也仍会带它。
-- **按 `rid` 删**：同一 url 在一轮里可能既有 `added` 又有 `existed`。
-- **删前备份**：不可逆操作；用 sqlite3 在线 `backup()`（WAL 下裸拷贝会漏数据）。
+- **按 `rid` 删**（`/manual`）：同一 url 在一轮里可能既有 `added` 又有 `existed`。
+- **按主键 `id` 删**（`/db` 查询页）：查询结果每行都带着主键，主键无歧义，不存在「键错位删错人」；两条路都**不做 email 兜底**（email 兜底是 upsert 的合并口径，用它来删会删到「被合并进来的另一家」）。
+- **删前备份**：不可逆操作；用 sqlite3 在线 `backup()`（WAL 下裸拷贝会漏数据）。两条路共用 `backup_db_before_delete()`（300 秒节流）。
+- **「不清库」的门**：两条路的入口都必须能挡住空 key / 空 id —— `db_delete_customer('')` 与 `db_delete_customers_by_ids([])` 都**直接返回 0**。少了这道门，一次空输入就等于 `DELETE FROM customers`。
+- ⚠️ `/db` 的删除**不清理 `MANUAL_STATE` 的内存明细**：若本轮采集正在进行，被删那条仍会进本轮结果 Excel，要一并拿掉得回 `/manual` 点那行的 ✕（刻意不跨模块改内存态，否则查询链路就得持 `STATE_LOCK`）。
 
 ### 6.7 为什么 Excel「只写新增」，不写「已在库」
 
@@ -663,7 +735,7 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 ### 6.9 ⛔ 为什么「公开 GitHub 仓库」是个必须记住的事实
 
 `origin = https://github.com/jurryzhang66/waimao.git`，**public**（用户在我的风险说明之后仍明确同意）。里面已包含：
-- `DB/客户库.sqlite3`（真实客户 306 条 / 200 邮箱 / 100 电话）
+- `DB/客户库.sqlite3`（真实客户 303 条 / 200 邮箱 / 99 电话）
 - `output/` 结果表、`DB/backups/` 快照
 - **飞书 `BASE_TOKEN`**（`core/state.py`、`同步数据库到飞书.py`、`回填行业.py`）
 
@@ -676,7 +748,7 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 - **V1.4 起不再往记忆文件里写提交 hash**（该提交里就含记忆文件，写 hash 得再 amend、amend 又换 hash，永远差一位）→ 一律 `git rev-parse "V1.4^{commit}"`。
 - **10 列硬契约**不可改（见 §7 相关注意事项）。
 - **自动搜索的两条链路一次性把结果落到「最新结果文件」**，手动采集则一轮一份 —— 两套语义刻意不同。
-- `cr` / `lr` 搜索参数**不值得加**（已实测拍板），国家筛选只用 `gl` / `hl`。
+- 国家筛选**默认**只用 `gl` / `hl`；`cr` 与 `site:` 做成**默认关**的可选开关（**M15**）。`lr` 仍不加。2026-09-28 实测：法国加 `cr` 后条数 10→7、`.fr` 占比反降、真客户被挤掉（法国 B2B 多用 `.com`）→ 故**默认关**。
 
 ---
 
@@ -691,6 +763,7 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 | 1 | **「结果没渲染」两种成因日志分不开**：① 谷歌返回壳页面（重开能好）② 谷歌**零结果页**（`did not match any documents`，重试同 URL 无效）。触发场景 = 冷会话的第一个谷歌请求 + 重公式（33 词） | `open_search()` / `wait_results()` | 排查时容易误判为 bug。**修法未拍板**。取证图 `.workbuddy/_fail_q1_p0.png` |
 | 2 | **冷会话首请求被降级** | 同上 | 同上，是 #1 的成因之一 |
 | 3 | 谷歌限流：连返壳页面 → 重试失败跳页 | `run_search` | **等 90 秒**恢复。别当 bug。 |
+| 3b | **`country_limit` 的 `cr` 在 `open_search` 兜底轮会丢**：最后一轮 `type_search` 走的 `country_params` 不含 `cr` | `open_search()` | 仅壳页面兜底轮丢 `cr`（`gl`/`hl` 本该也不含）。`site:` 在 formula 里，**不会丢**。已知、**暂接受** |
 
 ### 7.2 评分与行业
 
@@ -699,13 +772,14 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 | 4 | ⛔ **评分在非英语场景方向是反的**（20 条法国结果实锤）：`CTYPE_WORDS` 全是英文（`wholesale/distributor/…`），法语 `grossiste/distributeur/fournisseur` 一个不认；且 `score_item()` **只有加分无减分** | `客户开发工具.py` 第 526/653 行 | 法语/德语等市场会把真正买家判成低分。**未修**。根治三件事：① `CTYPE_WORDS` 多语言化 ② `PRODUCT_WORDS` 按本轮产品词动态传入 + 加词边界 ③ 加否决/减分项（`.gov` / 点评站 / 餐馆 / 菜谱 / B2B 名录 / 新闻） |
 | 5 | `PRODUCT_WORDS` 写死猫砂垫词表且**子串匹配无词边界** | `客户开发工具.py` 第 527 行 | 换行业必须同步改（已开可选入参缓解，但自动链路未传） |
 | 6 | 行业取值历史上有两套口径（`家具家居` / `汽配`） | `重标行业.py` | 已提供重标脚本，**待改 23 条**（dry-run 已备） |
+| 6b | ~~**行业为空 24 条**（`未标注`）~~ **✅ 2026-10-02 已处理完**：`/db` 勾选删掉 7 条平台页/误采（`127.0.0.1`、`erp.91miaoshou.com`、mercadolibre ×2、`bodegaaurrera`、`tripadvisor`、`amazon.com.mx`），310→303；再用 `标注空行业.py --apply` 把剩余 17 条标成「食品」，行业为空 24→**0** | `标注空行业.py`(+`_smoke_annotate.py` 33 项) + `/db` 删除 | 已执行；备份 `DB/backups/客户库_删除前_20261002_083924.sqlite3` 与 `DB/客户库.sqlite3.bak_标注空行业_20261002_083932` |
 
 ### 7.3 数据质量
 
 | # | 问题 | 位置 | 影响 |
 |---|---|---|---|
-| 7 | 库里混着平台/垃圾域名（joybuy / dreamstime / chegg / thomasnet / trendyol / u-buy / petz.ae / suppliergo / archive.org / tiktok，以及 `drive.google.com`、`linkfly.to`）约 25–38 条 | `DB/客户库.sqlite3` | 导飞书会带垃圾。**现在可以直接在「本轮明细」里点 ✕ 删** |
-| 8 | 用户自采记录里 `127.0.0.1`（误点工具自己的页面）与 `erp.91miaoshou.com`（SaaS 平台）是明显误采 | 同上 | 是否清理**未拍板** |
+| 7 | 库里混着平台/垃圾域名（joybuy / dreamstime / chegg / thomasnet / trendyol / u-buy / petz.ae / suppliergo / archive.org / tiktok，以及 `drive.google.com`、`linkfly.to`）约 25–38 条 | `DB/客户库.sqlite3` | 导飞书会带垃圾。**现在有三种删法**：① 本轮明细点 ✕；② `/db` 筛出来勾选删；③ 按 id 直接删。删除前都会自动备份 |
+| 8 | 用户自采记录里 `127.0.0.1`（误点工具自己的页面）与 `erp.91miaoshou.com`（SaaS 平台）是明显误采 | 同上 | ✅ 2026-10-02 已随 §7.2 6b 一并删除 |
 | 9 | 客户库 `id=154` 是淘宝记录 | 同上 | 待清 |
 | 10 | 飞书里有 **16 条垃圾记录**待删 | 飞书「客户信息」表 + `.workbuddy/_todo.json` | 待处理 |
 | 11 | **worklist 判据是「邮箱电话都为空」而非「补过没补过」** | `_enrich_worklist()` | 欠账脚本会**反复**访问抓不到联系方式的站（实测 26 条）。彻底修需加 `enriched_at` 列（**未拍板**） |
@@ -726,8 +800,9 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 - 「半自动组合 / 纯手工输入」单选未实现。
 - 冷会话首请求降级的修法未定。
 - 阶段 B 拆包：`google_search` / `google_maps` / `tasks` / `feishu` 尚未从入口拆出。
-- 飞书「客户信息」表的「来源渠道」**需要人工**加 `手动采集` 选项（否则导出时该值会被降级成「谷歌搜索」）。
+- 飞书「客户信息」表的「来源渠道」**需要人工**加 `手动采集` 选项（否则导出时该值会被降级成「谷歌搜索」）；「行业」选项也还是旧四值（缺 `食品` 之外的新规范名）。
 - `chrome://extensions` 加载扩展、装/改扩展后刷新已开页面（人工步骤）。
+- **最近六轮改动尚未 git commit**（是否打 V1.5 推远端待拍板）。
 
 ---
 
@@ -747,16 +822,19 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 | 飞书导出（含手动采集豁免） | ✅ |
 | 关键词库三级联动 + 条件词多语言化 | ✅ |
 | 计数口径拆分显示（已采 N = 新增 X + 已在库 Y） | ✅ |
-| 客户库查询页 `/db`（多维筛选 + 分页 + 导出 Excel） | ✅ |
+| 客户库查询页 `/db`（多维筛选 + 分页 + 导出 Excel + **勾选/✕ 删除客户** + 居中模态框二次确认） | ✅ |
+| 主页「6. 自定义搜索词」（**M14**：原样搜、不套条件模板、不做中国过滤、国家只做标记） | ✅ |
+| 主页「国家限定」四选一（**M15**：`none`/`cr`/`site`/`both`，默认关、仅标准网页模式） | ✅ |
 | 首页顶栏导航（→ `/manual`、`/db`，V1.5 加） | ✅ |
+| 数据修复脚本（`重标行业.py` / **`标注空行业.py`**） | ✅ |
 | 项目拆包（`core/` + `ui/`） | ✅ |
-| 22 项全量回归 | ✅ |
+| 23 项全量回归 | ✅ |
 | git V1.4 提交 + 推 GitHub | ✅ |
 
 ### 8.2 正在开发 / 刚完成未提交
 
-- **最近一轮**（主页顶栏导航：`ui/page.html` 加 `.nav` + R5 基线重算 + R6 与 `_check_live_ui` C 段新断言）：**代码已改完、22 项回归全绿，尚未 git commit**。
-- 再往前三轮（① 计数口径拆分 + 去重键不变量；② 客户库查询页 `/db` + 2 个新回归项；③ 扩展面板「客户库查询」入口）也都在等待一并提交 —— 是否打 **V1.5** 待用户拍板。
+- **最近一轮**（主页新增「国家限定」四选一 = **M15**：`core/config.py` 加 `COUNTRY_LIMITS` 数据层、`core/ui.py` 注入 `COUNTRY_LIMITS_PLACEHOLDER`、`ui/page.html` 四选一 + 4 个 JS 函数、`客户开发工具.py` 的 `run_search(country_limit=)` / `api_start` 透传；`_check_page.py` R5 基线重算 + 新增 **R11**；`_smoke_search.py` 补国家限定段 + HTTP 层；`_check_live_ui.py` 新增 **E 段**；`_check_maps_ui.py` 加「地图收起」断言）：**代码已改完、23 项回归全绿，尚未 git commit**。
+- 再往前七轮（① 计数口径拆分 + 去重键不变量；② 客户库查询页 `/db` + 2 个新回归项；③ 扩展面板「客户库查询」入口；④ 主页顶栏导航；⑤ `/db` 结果删除 + `标注空行业.py`；⑥ `/db` 删除确认改居中模态框；⑦ 主页「6. 自定义搜索词」= **M14**）也都在等待一并提交 —— 是否打 **V1.5** 待用户拍板。
 
 ### 8.3 未完成
 
@@ -764,18 +842,22 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 - §7.5 全部待办。
 - 阶段 B 拆包（`google_search` / `google_maps` / `tasks` / `feishu`）。
 
-### 8.4 数据现状（2026-10-01 实测）
+### 8.4 数据现状（2026-10-02 实测）
 
 | 项 | 值 |
 |---|---|
-| 客户库总条数 | **306**（还在涨 —— 用户随时在用扩展采，别拿固定数字当基线） |
-| 按来源 | 谷歌搜索 214 / 手动采集 85 / 谷歌地图 7 |
+| 客户库总条数 | **303**（还在涨 —— 用户随时在用扩展采，别拿固定数字当基线） |
+| 按来源 | 谷歌搜索 214 / 手动采集 82 / 谷歌地图 7 |
 | 有邮箱 | 200 |
-| 有电话 | 100 |
-| 结果 Excel | `output/` 21 份 |
+| 有电话 | 99 |
+| 有联系页 | 36 |
+| 行业为空 | **0** —— 2026-10-02 已处理完：先删 7 条平台页/误采（310→303），再把剩余 17 条批量标成「食品」 |
+| 行业分布 | 食品 197 / 宠物用品 67 / 家具家居 18 / 户外用品 10 / 汽配 5 / LED照明 5 / 机械零部件 1（合计 303） |
+| 评分/评级为空 | 8 条（两者同一批） |
+| 结果 Excel | `output/` 22 份 |
 | 查询导出 | `output/查询导出/`（用完可删，已 gitignore） |
-| 库备份 | `DB/backups/` 5 份（清理前 / 污染前 / 删除前 ×2 / 修键前） |
-| git | `main` 最新提交 `37de110`（**最近四轮的改动都还没提交**）；标签 V1.0～V1.4（均为附注标签） |
+| 库备份 | `DB/backups/` 7 份（清理前 / 污染前 / 删除前 ×N / 修键前）；另有 `DB/客户库.sqlite3.bak_标注空行业_20261002_083932` 1 份 |
+| git | `main` 最新提交 `37de110`（**最近七轮的改动都还没提交**）；标签 V1.0～V1.4（均为附注标签） |
 
 ---
 
@@ -794,6 +876,7 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
    - ⛔ Excel 的 10 列契约
    - ⛔ `website_key` 不变量
 5. **不要随意改变已经确定的架构**（拆包的分层、状态管理与锁纪律、扩展的「唯一 fetch 出口」、端口不写死）。
+6. **⛔ 不要主动去读 `output/` 与 `DB/backups/` 里的内容**（用户 2026-10-02 明确要求）：这两个是**运行产物目录**，与代码改造几乎无关，内容随时在变（用户自己也在清理）。列举文件名/条数当「环境体检」尚可，**逐个读文件内容、比对哪份不见了 = 纯浪费上下文，还会引发假警报**（本轮收尾就因为发现 `DB/backups/` 少了 6 份、`git status` 冒出 7 个 `D`，花了好几轮排查，最后结论是「用户自己清的、与程序无关」）。**只有用户明确要求看某一份，或要复现数据库问题时，才去读它们。**
 
 ### 9.2 最容易犯的错（按踩坑频率排序）
 
@@ -813,11 +896,22 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 | 12 | 回归脚本打桩后忘了护栏 → 写进真实库 | `m.db.db_path = <tmp>` + `_under_tmp()` 自检 |
 | 13 | 拿固定条数当回归基线 | 用户在用扩展持续采集，**按 source 分布 + 测试域名残留**复核 |
 | 14 | 改 `PREFERRED_PORTS` 忘了同步 `ports.js` | 两边一起改（`_check_ext.py` 有硬断言） |
-| 15 | 改国家/条件时动了元组长度 | `COUNTRIES` 是 4 元组、前端按 5 元组注入，改长度会连带炸两处 |
+| 15 | 改国家/条件时动了元组长度 | `COUNTRIES` 是 4 元组、前端按 5 元组注入，改长度会连带炸两处。新增国家相关数据（如 `COUNTRY_LIMITS`）要**另开独立字典**，别塞进 `COUNTRIES` |
+| 16 | 写「删除」时没挡空输入 | `db_delete_customer('')` / `db_delete_customers_by_ids([])` 都必须**直接返回 0**；少了这道门，一次空 key / 空 id 就等于 `DELETE FROM customers`（清库） |
+| 17 | 在删除接口里图省事用了 `STATE_LOCK` | 全程不持锁（`backup_db_before_delete()` 内部的 `log()` 也要抢它，非可重入 → 死锁）。R9 用 AST 断言钉住了这条 |
+| 18 | 前端把每行 ✕ / 勾选框的监听逐行绑 | 行是 `innerHTML` 整表重画的 → 必须事件**委托**到 `#resBody`，否则翻页/重查后按钮全失灵 |
+| 19 | 用原生 `confirm()` / `alert()` 做二次确认 | 位置与样式全由浏览器定（贴窗口**顶部**，用户明确嫌不方便）→ 一律用页面自己的居中模态框（`#delModal`）。`_check_page.py` R9 断言整页里 `confirm(` 为 0；⚠️ 别把带括号的 `confirm()` 写进注释，会把这断言撞红。**例外：`ui/manual.html`（约第 408 行「确定删除这一条吗？」）保留原生 `confirm`** —— 用户 2026-10-02 拍板**暂不改**（别主动去改，改它要连带同步 `_check_manual_ui.py` + R7） |
+| 20 | 把弹窗/JS 要取的 DOM 节点放在 `<script>` **之后** | 本页脚本是**立即执行的 IIFE**，解析到那一刻就 `getElementById` → 拿到 `null` → 绑事件抛错 → `init()` 整体中断、**筛选面板全空白**（无弹窗报错，极易误判成后端挂了）。**必须放在 `<script>` 之前** |
+| 21 | 主动去读 / 比对 `output/` 与 `DB/backups/` 里的文件 | 这两个是**运行产物目录**，内容随时在变（用户在自采、也在自己清理），与代码改造无关。**默认不读内容**，也别因为「少了几份」就当成 bug 去排查（2026-10-02 实测白查了好几轮，用户已确认 `DB/backups/` 少了 6 份、`关键词库.json.bak*`、`客户库.sqlite3.bak_标注空行业_*` **都是他自己删的，与程序/回归脚本无关** —— 别去「恢复」，也别再排查）。只在用户点名要看某一份时才读 |
+| 22 | 新增「用户手写查询」这类入口时只放宽**一处**校验 | 同一件事有**三道**门槛：前端 `start()` 的 `if (!products.trim())` 与 `if (source !== 'maps' && !conditions.length)`、后端 `api_start` 的 `if not products`。只改一处 → 用户仍被「请填写产品关键词」挡住（前端过不了就压根发不出请求；后端没改则 400）。**三处一起放宽**（2026-10-02 M14 实测） |
+| 23 | 绕开条件模板时把 `cond_list` 留成空列表 | `run_search` 是**双层**循环 `for pq in pq_list: for cname2, tmpl in cond_list:` —— 留空则内层永不进入 → **静默跑 0 条查询**（只在日志里写「本轮新增 0 个网站」，不报错）。给一个占位模板 `[('自定义', '{p}')]` 就能原样复用这套循环，不必另写一套 |
+| 24 | 以为 `site:.us` 能筛出美国客户 / 把 `site:` 当「限国家」 | `site:` 是**限域名**，靠 ccTLD 与国家强绑定才等效，**美国是例外**（`.com` 为主、`.us` 极少）→ M15 里美国 `site` 留空。且 `site:.uk` **能**匹配 `.co.uk`（`site:` 支持 TLD），不必写 `co.uk`。核心认知：**「限定更严 ≠ 更准」**（法国加 `cr` 实测 10→7 条、真客户反被挤掉） |
+| 25 | 用 `str(inspect.signature(fn))` 做**文本**断言默认值 | 签名里是**求值后**的 `country_limit='none'`，不是源码文本 `COUNTRY_LIMIT_DEFAULT` → 改用 `sig = inspect.signature(fn); sig.parameters['country_limit'].default == 'none'`（`_check_page.py` R11 踩过） |
+| 26 | 回归整体变红就一头扎进业务逻辑查 | 先看**错误类型**：出现 `disk I/O error` / `database or disk is full` / `attempt to write a readonly database` → **先查磁盘剩余空间**。2026-10-02 实测：`C:` 只剩 2.34 GB 时 6 项 DB 相关回归集体假红（临时客户库默认落系统盘 `C:`）。根治 = `_run_all_reg.py` 已把子进程 `TMPDIR/TEMP/TMP` 钉到 `.workbuddy/_reg_tmp`（项目盘），**别再改回系统 TEMP** |
 
 ### 9.3 改完必须做的
 
-1. **跑受影响的单项回归**，再跑 `.workbuddy/_run_all_reg.py`（**22 项**）—— **全部 EXIT=0** 才算过。
+1. **跑受影响的单项回归**，再跑 `.workbuddy/_run_all_reg.py`（**23 项**）—— **全部 EXIT=0** 才算过。
 2. **复核真实客户库**：条数与 source 分布、测试域名残留 = 0、`DB/backups/` 没有测试垃圾。
 3. **检查 `.gitignore`**：新增的回归脚本要被 `!` 白名单放行（`git status --short` 里出现 `??`）。
 4. **更新记忆**：`.workbuddy/memory/YYYY-MM-DD.md` 追加当日工作日志；长期结论写 `.workbuddy/memory/MEMORY.md`。
@@ -842,13 +936,18 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 | 我想… | 去看 |
 |---|---|
 | 改搜索逻辑 | `客户开发工具.py` `run_search` + `core/config.py` |
+| 加「让用户手写完整查询」的入口 | `run_search(..., raw_queries=…)` 这个开关（见 **M14**）—— ⛔ 记得三处校验一起放宽、`cond_list` 给占位模板、`china_filters` 置空 |
 | 改地图采集 | `客户开发工具.py` `run_maps` / `maps_*` |
 | 改抓邮箱/电话 | `客户开发工具.py` `clean_emails` / `clean_phones` / `enrich` / `_find_contact_url` |
 | 改评分 | `客户开发工具.py` `score_item` / `rating` |
 | 改首页顶栏导航 | `ui/page.html` 的 `.nav` / `.nav-a`（⚠️ 动它就连带要重算 `_check_page.py` R5 的 `_TMPL_SHA` / `_BUILT_SHA`） |
 | 改页面 | `ui/page.html` / `ui/manual.html` / `ui/query.html`（⚠️ 改了 `page.html` 必须重算 R5 两条基线） |
 | 改客户库查询页 | `ui/query.html` + `core/db.py` 末段「客户库查询」+ 入口 `/api/db/*`（⚠️ 导出必须落 `output/查询导出/` 子目录） |
+| 改查询结果的删除 | `core/db.py::db_delete_customers_by_ids` + `客户开发工具.py::api_db_delete` + `ui/query.html::deleteRows`（⛔ 不持锁、必须按主键、删前备份；R9 有 AST 断言） |
+| 把原生弹窗换成居中模态框 | `ui/query.html`（`#delModal` 样式 + HTML + `askDeleteConfirm`/`closeDeleteConfirm`）—— ⛔ 弹窗 HTML 必须放 `<script>` **之前**；H 段断言「居中 ±2px」、R9 断言整页无 `confirm(` |
 | 加/改筛选维度 | `core/db.py` `_query_where()` + `db_facet_counts()`（前端零改动，选项自动出现） |
+| 清垃圾/误采记录 | `/db` 筛出来 → 勾选 → 「删除选中」（删前自动备份）；或按 id 直接删 |
+| 批量补某列为空的记录 | `标注空行业.py`（默认 dry-run）/ `重标行业.py`（改旧口径）——先看不写，`--apply` 才落库 |
 | 改扩展 | `extension/`（改完必须点「重新加载」） |
 | 改数据库结构 | `core/db.py` + `.workbuddy/_check_db_keys.py` |
 | 改结果 Excel 列 | ⛔ 不要改（10 列硬契约） |

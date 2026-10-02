@@ -38,7 +38,12 @@ def connect_ro():
 
 
 def stats(conn):
-    return {r['industry'] or '': r['n'] for r in conn.execute(
+    """行业 → 条数分布。
+    ⚠️ 刻意用**下标**取值而不是 `r['industry']` —— 本函数会被两种连接调用：
+       只读连接（`connect_ro()`，设了 row_factory）和写库连接（裸 `sqlite3.connect`）。
+       依赖 row_factory 的话，写库那条路会在**改完数据之后**抛 TypeError，
+       让脚本看起来「失败」，其实数据已经写进去了（2026-10-02 在 标注空行业.py 上实测踩到，同源。）"""
+    return {r[0] or '': r[1] for r in conn.execute(
         "SELECT industry, COUNT(*) AS n FROM customers GROUP BY industry")}
 
 

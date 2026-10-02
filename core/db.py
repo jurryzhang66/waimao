@@ -294,6 +294,43 @@ def db_delete_customer(website=''):
         return cur.rowcount
 
 
+QUERY_DELETE_MAX = 500      # 单次批量删除的硬上限（也顺带把 SQL 变量数压在 sqlite 限额内）
+
+
+def db_delete_customers_by_ids(ids):
+    """按**主键 id** 批量删客户，返回 (实际删除条数, 库里没找到的 id 列表)。
+
+    与 db_delete_customer 的分工：
+      · `db_delete_customer(website)` 按 website_key 删 —— 「本轮明细」手里只有 url，只能这么删；
+      · 本函数按主键删 —— 查询页每行都带着 id，主键没有歧义（不存在键错位删错人、
+        也不会像 email 兜底那样删到「合并进来的另一家」）。
+    两条路都**不做 email 兜底**，口径一致。
+
+    ⚠️ 安全门：ids 里非正整数一律丢弃；筛完为空就返回 (0, [])，**绝不能**拼出
+       `DELETE FROM customers`（少了这道门，前端传个 []/None/字符串就等于清库）。
+    """
+    clean = []
+    for v in (ids if isinstance(ids, (list, tuple)) else []):
+        if isinstance(v, bool):
+            continue                       # True/False 在 Python 里是 int，别把它当 id
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n > 0:
+            clean.append(n)
+    clean = list(dict.fromkeys(clean))     # 去重：同一 id 传两次不该被算两条
+    if not clean:
+        return 0, []
+    holes = ','.join('?' * len(clean))
+    with closing(db_connect()) as conn:
+        found = {r['id'] for r in conn.execute(
+            'SELECT id FROM customers WHERE id IN (%s)' % holes, clean)}
+        cur = conn.execute('DELETE FROM customers WHERE id IN (%s)' % holes, clean)
+        conn.commit()
+    return cur.rowcount, [i for i in clean if i not in found]
+
+
 # ================= 客户库查询（只读，供「客户库查询页 /db」用）=================
 # 这是一条**纯读**链路，两条硬纪律：
 #   ① 不碰 STATE / STATE_LOCK —— 那把锁是非可重入的全局锁，一次几万行的扫描若占着它，

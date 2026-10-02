@@ -335,6 +335,95 @@ for p in (path, wanted):
         os.remove(p)
 check(os.listdir(m.query_export_dir()) == [], '导出目录已清空（只留空目录）')
 
+section('⑪ 删除客户（勾选批量 / 每行 ✕ 打同一条接口）')
+
+
+def id_of(name):
+    for _r in q({})[1]:
+        if _r['company_name'] == name:
+            return _r['id']
+    return None
+
+
+def total_now():
+    return q({})[0]
+
+
+# —— 纯函数层：任何「不合法输入」都不许退化成清库 ——
+check(m.db_delete_customers_by_ids([]) == (0, []), '空列表直接返回 0（绝不清库）')
+check(m.db_delete_customers_by_ids(None) == (0, []), 'None 也直接返回 0')
+check(m.db_delete_customers_by_ids('1,2') == (0, []), '传字符串也返回 0（不当可迭代拆）')
+check(m.db_delete_customers_by_ids(['x', -1, 0, None, True]) == (0, []),
+      '全是不合法 id 时返回 0（这才是「不清库」那道门）')
+check(total_now() == TOTAL, '以上四次调用一行都没删掉')
+
+za = id_of('Zeta NoScore')
+check(m.db_delete_customers_by_ids([za, za]) == (1, []),
+      f'同一个 id 传两次只算一条（id={za}）')
+check(total_now() == TOTAL - 1, f'删掉 1 条后总数 {TOTAL} → {total_now()}')
+check(q({'kw': 'zeta-noscore'})[0] == 0, '删掉的客户已经查不到了')
+check(m.db_delete_customers_by_ids([999999]) == (0, [999999]),
+      '不存在的 id 如实报 missing（不报错也不牵连别的行）')
+
+# —— 删除前备份：必须落**打桩目录**（_backups_dir() 由 db_path() 推导，漏打桩就会写真实 DB/backups/）——
+m.db._last_delete_backup_at = 0.0        # 清掉节流，确保这次真的会备份
+_bak = m.backup_db_before_delete()
+check(_bak != '' and os.path.exists(_bak), f'删除前确实落了一份备份：{os.path.basename(_bak or "")}')
+check(_under_tmp(_bak), '备份落在打桩的临时目录里（没往真实 DB/backups/ 塞测试垃圾）')
+check(m.backup_db_before_delete() == '', '300 秒节流生效：紧接着再删不会重复备份')
+
+# —— HTTP 层 ——
+check(c.post('/api/db/delete', json={'ids': []}).get_json().get('ok') is False,
+      'ids 为空数组时被拒（不是「等于清库」）')
+check(c.post('/api/db/delete', json={'ids': 'abc'}).get_json().get('ok') is False,
+      'ids 不是数组时被拒')
+check(c.post('/api/db/delete', json={}).get_json().get('ok') is False, '缺 ids 时被拒')
+check(c.post('/api/db/delete').get_json().get('ok') is False, '非 JSON body 不崩')
+check(total_now() == TOTAL - 1, '以上四个被拒的请求真的一行都没删')
+
+before = total_now()
+a_id, b_id = id_of('Delta Furniture'), id_of('Epsilon Auto Parts')
+m.db._last_delete_backup_at = 0.0        # 再清一次节流：验证**路由**自己也会先备份
+dj = c.post('/api/db/delete', json={'ids': [a_id, b_id, 999999]}).get_json()
+check(dj.get('ok') is True and dj.get('deleted') == 2, f'批量删 2 条：{dj}')
+check(dj.get('missing') == [999999], f'顺带如实回报不存在的 id：{dj.get("missing")}')
+check(bool(dj.get('backup')), f'路由在删之前自己做了备份：{dj.get("backup")}')
+check(os.path.exists(os.path.join(m.db._backups_dir(), dj.get('backup') or 'x')),
+      '路由返回的那个备份文件名在磁盘上真的存在')
+check(total_now() == before - 2, f'总数再 -2（{before} → {total_now()}）')
+
+_saved_del_max = m.QUERY_DELETE_MAX
+try:
+    m.QUERY_DELETE_MAX = 1
+    big = c.post('/api/db/delete', json={'ids': [id_of('Alpha Bag GmbH'),
+                                                id_of('Beta Liner Ltd')]}).get_json()
+    check(big.get('ok') is False and '最多' in (big.get('msg') or ''),
+          f'一次删太多时明确拒绝：{big.get("msg")}')
+finally:
+    m.QUERY_DELETE_MAX = _saved_del_max
+check(total_now() == before - 2, '被拒的超限请求没删掉任何一行')
+check(m.db_delete_customer('beta-liner.co.uk') == 1
+      and m.db_delete_customers_by_ids([]) == (0, []),
+      '原有的按网站键删除仍然可用，且与按 id 删除并存不冲突')
+
+# —— 隔离性：删除链路同样不许碰「本轮结果」指针 ——
+check(os.path.basename(m.paths.ENRICH_FILE) == '__no_such_enrich__.xlsx',
+      'paths.ENRICH_FILE 没被删除链路改动')
+check(m.STATE.get('output') in ('', None), "STATE['output'] 没被删除链路改动")
+
+# —— 页面与路由 ——
+body2 = c.get('/db').get_data(as_text=True)
+for _need in ('id="btnDelSel"', 'id="ckAll"', 'class="row-del"', 'class="row-ck"',
+              'id="btnDelSel"', "getElementById('btnDelSel')", "'/api/db/delete'",
+              'function deleteRows(', 'function syncSel(', 'function selectedIds(',
+              "getElementById('resBody').addEventListener('click'"):
+    check(_need in body2, f'/db 页面含删除相关实现：{_need}')
+check('data-id' in body2, '删除按钮/勾选框带 data-id（按主键删，不按网址）')
+check('.row-del' in body2 and '.btn-del' in body2,
+      '删除相关样式写在本页自己的 <style> 里')
+check('api_db_delete' in m.app.view_functions, '删除接口路由已注册')
+check(m.QUERY_DELETE_MAX == 500, f'单次批量删除上限为 {m.QUERY_DELETE_MAX}')
+
 print('\n' + '=' * 62)
 print(f'通过 {_ok} 项' + (f'，失败 {len(_fail)} 项：' if _fail else '，全部通过 ✅'))
 for d in _fail:

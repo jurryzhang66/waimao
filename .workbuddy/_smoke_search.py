@@ -81,6 +81,9 @@ def fake_enrich(page, url):
     if 'testco1' in url:
         return {'emails': ['sales@testco1.com'], 'phones': ['+1 555 0100'],
                 'contact_url': url + 'contact'}
+    if 'cn-supplier-' in url:            # 自定义模式对照实验用：带 +86 电话与 .cn 邮箱的中国站
+        return {'emails': ['sales@cn-supplier.cn'], 'phones': ['+86 138 0000 0000'],
+                'contact_url': url + 'contact'}
     return {'emails': [], 'phones': [], 'contact_url': ''}
 
 
@@ -189,6 +192,248 @@ assert all('wholesaler OR distributor' in f for f in calls['formulas']), \
 assert not any('grossiste' in f for f in calls['formulas']), 'lang=en 时不该出现法语词'
 print('  ✓ 条件词按国家语言本地化；显式 lang 优先于国家 hl')
 print('  ✓ fa（波斯语）等缺失语言由 cond_template 回落英文，已有断言覆盖')
+
+# ---- 自定义模式（主页第 6 卡）：原样搜索、一个字符都不加、国家只做标记、中国过滤全关 ----
+# 用户 2026-10-02 拍板：完全原始查询；目标国家只填结果「国家」列，不进搜索词；与标准模式互斥；
+# 只继承「采集数量 + 就地抓联系方式」；**不做**中国商家过滤。
+def mk_items(tag):
+    """每轮一组：① 会被中国过滤命中的站（.cn 域名 + China manufacturer + cn 邮箱/+86 电话）
+    ② 一个干净的法国站。"""
+    return [
+        {'title': f'China Manufacturer Supplier {tag}', 'url': f'https://cn-supplier-{tag}.cn/',
+         'snippet': 'China manufacturer factory in China'},
+        {'title': f'Grossiste {tag}', 'url': f'https://grossiste-{tag}.fr/',
+         'snippet': 'grossiste importateur'},
+    ]
+
+
+def reset_calls(items):
+    global CUR_ITEMS
+    CUR_ITEMS = items
+    calls['formulas'].clear()
+    calls['params'].clear()
+    calls['saved'] = None
+
+
+# 对照组：标准模式 + 默认中国过滤（17 项全开）→ 中国那条应当被过滤掉
+reset_calls(mk_items('a'))
+print('\n---- 对照组：标准模式（中国过滤全开）----')
+m.run_search(['nouilles'], ['wholesale'], [('fr', '法国', 'fr', 'fr')], 1,
+             '-alibaba', 'or', 1, '食品', True, '', None)
+assert calls['saved'] is not None and len(calls['saved']) == 1, \
+    f'对照组应只留下法国那 1 条，实际 {len(calls["saved"] or [])}'
+assert calls['saved'][0]['url'] == 'https://grossiste-a.fr/', \
+    f'对照组剩下的应是法国站，实际 {calls["saved"][0]["url"]}'
+print('  ✓ 标准模式下中国站被过滤（对照组成立，下面的对照才有意义）')
+
+# 实验组：自定义模式 —— 同一组结果，中国那条必须**留下来**
+# 改成「每次抽取都返回一批全新域名」的桩，否则第一条查询就达标、后面的查询根本不会跑，
+# 断言就看不到第 2 条公式（也不该靠调大 target 硬凑，那样测的是达标逻辑不是公式）。
+SEQ = {'n': 0}
+CUR_TAG = ['b']
+
+
+def fake_extract(page, seen_titles, china_filters=None):
+    SEQ['n'] += 1
+    return (mk_items(f'{CUR_TAG[0]}{SEQ["n"]}'), 0, {})
+
+
+m.extract_results = fake_extract
+SEQ['n'] = 0
+CUR_TAG[0] = 'b'
+reset_calls([])
+print('\n---- 实验组：自定义模式 ----')
+m.run_search([], [], [('fr', '法国', 'fr', 'fr')], 1,
+             '-alibaba -site:.cn', 'or', 4, '食品', True, '',
+             None, ['cat litter grossiste', '   ', '"pet food" importer Lyon  '])
+print('实际发出的第 1 页公式：')
+for f in calls['formulas']:
+    print('   ', repr(f))
+
+# ① 原样：空白行丢弃、首尾空格清掉、不加引号、不拼产品词
+assert calls['formulas'] == ['cat litter grossiste', '"pet food" importer Lyon'], \
+    f'自定义公式不是原样（含空行/空格/引号处理）：{calls["formulas"]}'
+# ② 排除词一个都不许拼进来
+assert not any('-alibaba' in f or '-site:.cn' in f for f in calls['formulas']), \
+    f'自定义模式不该拼排除词：{calls["formulas"]}'
+# ③ 国家参数照旧挂 URL（不是进搜索词）
+assert all(p == '&gl=fr&hl=fr' for p in calls['params']) and len(calls['params']) == 2, \
+    f'国家参数不对：{calls["params"]}'
+assert not any(('法国' in f) or ('France' in f) for f in calls['formulas']), \
+    f'国家不该写进搜索词：{calls["formulas"]}'
+print('  ✓ 公式逐字原样；不拼排除词；国家只走 &gl=&hl=，没进搜索词')
+
+# ④ 落盘行：搜索公式原样、国家列打上「法国」、中国站**没被过滤**
+saved = calls['saved'] or []
+assert len(saved) == 4, f'自定义模式应留下 4 条（不过滤中国站），实际 {len(saved)}'
+urls = {r['url'] for r in saved}
+assert 'https://cn-supplier-b1.cn/' in urls and 'https://cn-supplier-b2.cn/' in urls, \
+    f'自定义模式下中国站应被保留，实际 {urls}'
+assert all(r['formula'] in ('cat litter grossiste', '"pet food" importer Lyon') for r in saved), \
+    f'落盘行的搜索公式不是原样：{[r["formula"] for r in saved]}'
+assert all(r['country'] == '法国' for r in saved), \
+    f'国家列没打上标记：{[r["country"] for r in saved]}'
+print(f'  ✓ 中国过滤已关闭（{len(saved)} 条全留）；搜索公式逐字原样；国家列 = 法国')
+
+# ⑤ 与标准模式互斥：自定义模式下传了产品词/条件也不该被使用
+SEQ['n'] = 0
+CUR_TAG[0] = 'c'
+reset_calls([])
+m.run_search(['nouilles'], ['wholesale'], [('fr', '法国', 'fr', 'fr')], 1,
+             '-alibaba', 'or', 1, '食品', True, '',
+             None, ['grossiste alimentaire'])
+assert calls['formulas'] == ['grossiste alimentaire'], \
+    f'自定义模式应忽略产品词/条件，实际 {calls["formulas"]}'
+assert not any('nouilles' in f or 'grossiste OR distributeur' in f for f in calls['formulas']), \
+    '自定义模式下产品词/条件词不该出现'
+print('  ✓ 互斥成立：自定义模式下产品词与条件词被完全忽略')
+
+# ---- 国家限定（主页第 4 步，可选，默认关）：cr 只挂 URL、site: 只进搜索词、美国不加 site: ----
+# 用户 2026-10-02 拍板：做一个四选一分支（none 默认 / cr / site / both），只对标准网页模式生效。
+# ⚠️ 断言里的 site: 要写全后缀（'site:.fr'）—— 默认中国过滤会往公式里拼 '-site:.cn'，
+#    光判 'site:' 会假红。
+FR = [('fr', '法国', 'fr', 'fr')]
+US = [('us', '美国', 'us', 'en')]
+IR = [('ir', '伊朗', 'ir', 'fa')]
+CAF = [('ca_fr', '加拿大(法语)', 'ca', 'fr')]
+
+
+def cl_run(tag, countries, limit=None, raws=None, target=1):
+    """跑一轮并返回 (formulas, params)。limit=None → **完全不传** country_limit，
+    以此验证「默认参数」路径与原行为逐字一致。"""
+    SEQ['n'] = 0
+    CUR_TAG[0] = tag
+    reset_calls([])
+    pos = (['nouilles'], ['wholesale'], countries, 1, '-alibaba', 'or', target, '食品', True, '')
+    kw = {}
+    if raws is not None:
+        kw['raw_queries'] = raws
+    if limit is not None:
+        kw['country_limit'] = limit
+    m.run_search(*pos, **kw)
+    assert calls['formulas'], f'[{tag}] 一条公式都没发出'
+    return list(calls['formulas']), list(calls['params'])
+
+
+print('\n---- 国家限定 ----')
+f_none, p_none = cl_run('cl0', FR)
+assert p_none == ['&gl=fr&hl=fr'], f'默认（不传）不该加 cr：{p_none}'
+assert 'site:.fr' not in f_none[0], f'默认（不传）不该加 site:：{f_none}'
+print(f'  ✓ 默认不传参 = 原行为逐字一致：{p_none[0]}')
+
+f_cr, p_cr = cl_run('cl1', FR, limit='cr')
+assert p_cr[0] == '&gl=fr&hl=fr&cr=countryFR', f'cr 模式参数不对：{p_cr}'
+assert 'site:.fr' not in f_cr[0], f'cr 模式不该动搜索词：{f_cr}'
+print(f'  ✓ cr 只挂 URL：{p_cr[0]}（搜索词不变）')
+
+f_site, p_site = cl_run('cl2', FR, limit='site')
+assert p_site[0] == '&gl=fr&hl=fr', f'site 模式不该加 cr：{p_site}'
+assert ' site:.fr' in f_site[0], f'site 模式没把后缀拼进搜索词：{f_site}'
+print(f'  ✓ site: 只进搜索词：{f_site[0][:70]}…')
+
+f_both, p_both = cl_run('cl3', FR, limit='both')
+assert p_both[0] == '&gl=fr&hl=fr&cr=countryFR', f'both 模式参数不对：{p_both}'
+assert ' site:.fr' in f_both[0], f'both 模式搜索词没加后缀：{f_both}'
+print('  ✓ both = 两者同时生效')
+
+# 美国：site 留空（.com 为主、.us 极少）→ site 模式下公式应与「不改」完全相同；cr 仍有效
+f_us_none, _ = cl_run('cl4', US)
+f_us_site, _ = cl_run('cl5', US, limit='site')
+assert f_us_site == f_us_none, \
+    f'美国不该加 site:（公式应与默认一致）：{f_us_site} vs {f_us_none}'
+_, p_us_cr = cl_run('cl6', US, limit='cr')
+assert p_us_cr[0].endswith('&cr=countryUS'), f'美国 cr 应有效：{p_us_cr}'
+print('  ✓ 美国：site: 自动跳过（公式与默认一致），cr 照常生效')
+
+# 伊朗不在谷歌 cr 支持列表 → cr 留空，cr 模式下参数应与默认一致
+_, p_ir_none = cl_run('cl7', IR)
+_, p_ir_cr = cl_run('cl8', IR, limit='cr')
+assert p_ir_cr == p_ir_none, f'伊朗 cr 应留空不拼：{p_ir_cr} vs {p_ir_none}'
+print('  ✓ 伊朗（不在 cr 支持列表）cr 自动跳过')
+
+# 非 ISO 内部代码 ca_fr → 映射到加拿大
+_, p_cafr = cl_run('cl9', CAF, limit='cr')
+assert p_cafr[0].endswith('&cr=countryCA'), f'ca_fr 应映射 countryCA：{p_cafr}'
+print('  ✓ ca_fr（内部代码）→ cr=countryCA')
+
+# 非法值静默回落 none（与其它参数的容错口径一致）
+_, p_bad = cl_run('cl10', FR, limit='乱写')
+assert p_bad == ['&gl=fr&hl=fr'], f'非法限定值应回落 none：{p_bad}'
+print('  ✓ 非法限定值静默回落 none')
+
+# 互斥：自定义模式下即使传了 both 也不加（cr 不进 URL、site: 不进搜索词）
+f_raw, p_raw = cl_run('cl11', FR, limit='both', raws=['cat litter grossiste'])
+assert f_raw == ['cat litter grossiste'], f'自定义模式应原样：{f_raw}'
+assert p_raw == ['&gl=fr&hl=fr'], f'自定义模式不该加 cr：{p_raw}'
+print('  ✓ 互斥：自定义模式下国家限定被完全关掉')
+
+# ---- /api/start 的 HTTP 层：自定义词要真能送进去，且「产品词必填」这条校验要跟着放宽 ----
+# 用「打桩 worker」验证**参数传递**（不起真线程、不联网、不写库）：
+# api_start 里的 threading.Thread(target=run_search, ...) 是在调用时才查全局名，
+# 所以替换 m.run_search / m.run_maps 就能把它截住。
+spy_run = {'args': None, 'kw': None}
+spy_maps = {'args': None, 'kw': None}
+
+
+def fake_run_search(*a, **kw):
+    spy_run['args'] = a
+    spy_run['kw'] = kw
+
+
+def fake_run_maps(*a, **kw):
+    spy_maps['args'] = a
+    spy_maps['kw'] = kw
+
+
+m.run_search = fake_run_search
+m.run_maps = fake_run_maps
+
+
+def post_start(payload):
+    m.STATE['running'] = False      # api_start 成功一次就会把 running 置 True，逐次复位
+    with m.app.test_client() as c:
+        return c.post('/api/start', json=payload).get_json()
+
+
+print('\n---- /api/start：自定义词的参数传递与校验 ----')
+# ① 只填自定义词、产品词留空 → 必须放行（否则前端等于逼用户填一个用不上的产品词）
+spy_run['kw'] = None
+r = post_start({'products': '', 'custom_queries':
+                ['cat litter grossiste', '   ', 'cat litter grossiste', 123]})
+assert r.get('ok'), f'只填自定义词应放行，实际：{r}'
+assert spy_run['kw'] and spy_run['kw'].get('raw_queries') == ['cat litter grossiste'], \
+    f'自定义词没传给 run_search（或空行/重复/非字符串没清干净）：{spy_run["kw"]}'
+print('  ✓ 只填自定义词即可开始；空行/重复/非字符串已清洗后再传给 run_search')
+# ② 两边都空 → 仍然要拦住（别把老校验一起放没了）
+r = post_start({'products': '', 'custom_queries': []})
+assert not r.get('ok') and '产品关键词' in r.get('msg', ''), f'两边都空应拦住，实际：{r}'
+print('  ✓ 产品词与自定义词都空时仍然拦住（老校验没被放没）')
+# ③ 超上限 → 拒绝（防误粘一大段文本把整轮拖成几小时）
+r = post_start({'products': 'x',
+                'custom_queries': [f'q{i}' for i in range(m.RAW_QUERY_MAX + 1)]})
+assert not r.get('ok') and str(m.RAW_QUERY_MAX) in r.get('msg', ''), f'超上限应拒绝，实际：{r}'
+print(f'  ✓ 超过 {m.RAW_QUERY_MAX} 条直接拒绝')
+# ④ 地图模式 → 自定义词被忽略，且不许塞给 run_maps
+spy_run['kw'] = None
+spy_maps['kw'] = None
+r = post_start({'products': 'x', 'custom_queries': ['zzz'], 'source': 'maps'})
+assert r.get('ok'), f'地图模式应正常开始，实际：{r}'
+assert spy_maps['kw'] is not None, '地图模式没走 run_maps'
+assert spy_run['kw'] is None, '地图模式不该调用 run_search'
+assert 'raw_queries' not in (spy_maps['kw'] or {}), '自定义词被塞给了 run_maps（地图不用它）'
+assert 'country_limit' not in (spy_maps['kw'] or {}), '国家限定被塞给了 run_maps（地图不用它）'
+print('  ✓ 地图模式下自定义词与国家限定都被忽略（仍走 run_maps）')
+# ⑤ 国家限定：透传给 run_search；非法值回落 none
+spy_run['kw'] = None
+r = post_start({'products': 'x', 'country_limit': 'both'})
+assert r.get('ok'), f'带国家限定应正常开始，实际：{r}'
+assert spy_run['kw'].get('country_limit') == 'both', \
+    f'国家限定没透传给 run_search：{spy_run["kw"]}'
+spy_run['kw'] = None
+post_start({'products': 'x', 'country_limit': '乱写'})
+assert spy_run['kw'].get('country_limit') == 'none', \
+    f'非法限定值应回落 none：{spy_run["kw"]}'
+print('  ✓ 国家限定透传给 run_search；非法值回落 none')
 
 print('\n✅ 冒烟测试全部通过')
 

@@ -75,6 +75,13 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
 .nav-a { display:inline-block; background:#fff; color:#1a73e8; border:1px solid #dbe4f0; border-radius:8px;
   padding:8px 14px; font-size:13px; font-weight:600; text-decoration:none; }
 .nav-a:hover { background:#e8f0fe; border-color:#1a73e8; }
+/* 自定义搜索词卡片（第 6 卡）。⚠️ 与上面 .nav 同理：这几条也会被注入副页面，
+   但 .raw-card / .raw-off 只在主页用到，在那两页是无害的死规则 → 不必另开 <style>
+   （更不许在本 <style> 之前插新块：_STYLE_RE.search() 只取第一个）。 */
+.raw-card textarea { width:100%; box-sizing:border-box; font-family:inherit; font-size:13px;
+  line-height:1.7; padding:8px 10px; border:1px solid #d0d5dd; border-radius:6px; resize:vertical; }
+.raw-card textarea:disabled { background:#f6f7f9; color:#9aa0a6; cursor:not-allowed; }
+.raw-off { color:#b26a00; }
 </style>
 </head>
 <body>
@@ -139,6 +146,14 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
           <label style="font-size:14px;">每条公式抓几页：</label>
           <input type="number" id="pages" value="2" min="1" max="5" style="width:80px; margin:6px 0;">
         </div>
+        <div id="countryLimit">
+          <div style="margin:12px 0 4px; font-size:14px;">国家限定（可选，仅对「谷歌网页搜索」的标准模式生效）：</div>
+          <label class="cond" style="display:block;"><input type="radio" name="country_limit" value="none" checked> 不改（默认，与现在完全一致）</label>
+          <label class="cond" style="display:block;"><input type="radio" name="country_limit" value="cr"> 只加 cr 国家参数（挂搜索 URL，不进搜索词）</label>
+          <label class="cond" style="display:block;"><input type="radio" name="country_limit" value="site"> 只加 site: 域名后缀（进搜索词）</label>
+          <label class="cond" style="display:block;"><input type="radio" name="country_limit" value="both"> 两者都加（最强限定，结果会明显变少）</label>
+          <div class="note" id="countryLimitHint">自定义搜索词模式下本设置不生效；美国不加 site:（.com 为主，.us 极少）。⚠️ 实测法国加 cr 后条数从 10 掉到 7、真客户反而被挤掉 —— 限定更严 ≠ 更准。</div>
+        </div>
         <br><label style="font-size:14px;">本次任务采集数量：</label>
         <input type="number" id="targetCount" value="10" min="10" max="100" step="1" style="width:80px; margin:6px 0;">
         <div class="note">本轮最多新增多少个新客户（10-100）；按新增个数计，不按是否抓到联系方式计。SQLite 客户库总量不设上限</div>
@@ -167,6 +182,24 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
         <button class="btn-mini" onclick="copyCombos()">复制全部组合</button>
         <span class="note" id="comboHint" style="margin:0;">浅灰＝排除词；末尾的 <code>&amp;gl=..&amp;hl=..</code> 是国家筛选参数（加在搜索 URL 上，不在搜索词里）</span>
       </div>
+    </div>
+  </div>
+
+  <!-- 自定义搜索词（第 6 卡）：完全原样发给谷歌 —— 不套条件模板、不自动加引号、不拼排除词，
+       也不做中国商家过滤；与上面的标准模式互斥（这栏有内容就只跑这里）。
+       目标国家只用于给采到的数据打「国家」标记，不会写进搜索词。 -->
+  <div class="card raw-card" id="rawCard">
+    <h3>6. 自定义搜索词（原样搜，不套上面的条件）</h3>
+    <textarea id="rawQueries" rows="4" placeholder="一行一条，原样发给谷歌。例：
+cat litter grossiste -site:.cn
+&quot;pet food&quot; importer Lyon"></textarea>
+    <div class="note">
+      这里写什么就<b>原样搜什么</b>：不自动加双引号、不套上面的条件词、不拼排除词，也不做中国商家过滤。<br>
+      只要这一栏有内容，本轮就<b>只跑这里</b>，上面第 3 步勾选的条件会被忽略；清空它即恢复正常模式。<br>
+      目标国家（第 1 步）只用于给采到的数据打「国家」标记，<b>不会</b>写进你的搜索词。
+    </div>
+    <div class="note raw-off" id="rawMapsHint" style="display:none;">
+      ⚠️ 地图模式不使用自定义搜索词：它走「关键词库 + 城市 + 身份词」。切回谷歌网页搜索即可使用。
     </div>
   </div>
 
@@ -321,15 +354,19 @@ async function start(){
     const lang = curLang();                                                // 条件词语言（随后国家自动联动）
     const source = curSource();                                            // google=网页搜索 / maps=谷歌地图
     const city = curCity();                                                // 仅地图用
-    if (!products.trim()){ alert('请填写产品关键词'); return; }
-    if (source !== 'maps' && !conditions.length){ alert('请至少勾选一个搜索条件'); return; }
+    const raws = rawQueries();                                             // 第 6 卡自定义搜索词；地图模式下恒为空
+    const countryLimitVal = countryLimit();                                // 国家限定四选一（none/cr/site/both，仅标准模式生效）
+    if (!raws.length && !products.trim()){ alert('请填写产品关键词，或在第 6 步填一条自定义搜索词'); return; }
+    if (source !== 'maps' && !raws.length && !conditions.length){
+      alert('请至少勾选一个搜索条件，或在第 6 步填一条自定义搜索词'); return; }
     if (!Number.isInteger(targetCount) || targetCount < 10 || targetCount > 100){
       alert('本次任务采集数量只能设置为 10-100 的整数'); return;
     }
     const r = await fetch('/api/start', { method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({products, conditions, countries, pages, target_count: targetCount, exclude,
-        china_filters: chinaFilters, match, industry, auto_enrich: autoEnrich, lang, source, city}) });
+        china_filters: chinaFilters, match, industry, auto_enrich: autoEnrich, lang, source, city,
+        custom_queries: raws, country_limit: countryLimitVal}) });
   const d = await r.json();
   if (!d.ok){ alert(d.msg); return; }
   RUN_SOURCE = source;
@@ -383,6 +420,27 @@ COUNTS.forEach(c => {
 });
 const MAPS_CENTERS = MAPS_CENTERS_PLACEHOLDER;   // 国家代码 → [纬度, 经度]，与后端 COUNTRY_CENTERS 同源
 const MAPS_ROLES = MAPS_ROLES_PLACEHOLDER;       // 条件 → {语言: 身份词}，与后端 COND_ROLES 同源
+const COUNTRY_LIMITS = COUNTRY_LIMITS_PLACEHOLDER;  // 国家代码 → {cr, site}，与后端 COUNTRY_LIMITS 同源
+
+// ==================== 国家限定（可选，默认关） ====================
+// 四选一：none=不改（默认）/ cr=只加 &cr=countryXX / site=只加 site:.xx / both=都加
+function countryLimit(){
+  const r = document.querySelector('input[name="country_limit"]:checked');
+  return (r || {}).value || 'none';
+}
+// 真正生效的限定：只对「谷歌网页搜索 · 标准模式」；地图模式与自定义搜索词模式一律 none（与后端一致）
+function effectiveLimit(){
+  if (curSource() === 'maps') return 'none';
+  if (rawQueries().length) return 'none';
+  return countryLimit();
+}
+// 当前国家该拼进搜索词的后缀（如 site:.fr）；美国为空串（.com 为主，.us 极少）→ 等于不加
+function siteTerm(){
+  const code = document.getElementById('countries').value;
+  const lim = effectiveLimit();
+  const s = (COUNTRY_LIMITS[code] || {}).site || '';
+  return ((lim === 'site' || lim === 'both') && s) ? s : '';
+}
 
 // ==================== 数据源切换（谷歌网页搜索 / 谷歌地图） ====================
 function curSource(){
@@ -408,6 +466,11 @@ function onSource(){
   document.getElementById('excludesWrap').style.display  = maps ? 'none'  : 'block';
   document.getElementById('condMapsHint').style.display  = maps ? 'block' : 'none';
   document.getElementById('chinaMapsHint').style.display = maps ? 'block' : 'none';
+  // 自定义搜索词只服务「谷歌网页搜索」：切到地图时置灰并提示（地图走关键词库 + 城市 + 身份词）
+  document.getElementById('rawMapsHint').style.display   = maps ? 'block' : 'none';
+  document.getElementById('rawQueries').disabled          = maps;
+  // 国家限定只服务网页搜索：切到地图时整块收起（地图靠「城市名进查询词 + 视野锁」定位，已是另一套）
+  document.getElementById('countryLimit').style.display   = maps ? 'none' : 'block';
   renderCombos();
 }
 // 地图搜索 URL：与后端 maps_search_url() 保持完全一致
@@ -542,19 +605,24 @@ function curLang(){
   const gl = COUNTRY_LANG[document.getElementById('countries').value];
   return gl || 'en';
 }
-// 当前国家筛选参数（写在 URL 上，不在搜索词里）：&gl=fr&hl=fr
+// 当前国家筛选参数（写在 URL 上，不在搜索词里）：&gl=fr&hl=fr [+ &cr=countryFR]
 function countryParams(){
   const code = document.getElementById('countries').value;
   const gl = COUNTRY_GL[code] || code;
   const hl = COUNTRY_LANG[code] || gl;
-  return '&gl=' + gl + '&hl=' + hl;
+  let s = '&gl=' + gl + '&hl=' + hl;
+  // 国家限定（可选）：cr 按「主机托管国」硬过滤结果集，比 gl 硬。仅标准模式生效
+  const lim = effectiveLimit();
+  const cr = (COUNTRY_LIMITS[code] || {}).cr || '';
+  if ((lim === 'cr' || lim === 'both') && cr) s += '&cr=' + cr;
+  return s;
 }
 
 function esc(s){
   return String(s).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
 }
 // 产品词 → 查询片段。组合规则与后端 run_search 完全一致：
-// OR → 所有词用 OR 连接；AND → 空格连接；分别搜 → 每词一条
+// OR → 所有词用括号包住后用 OR 连接；AND → 空格连接；分别搜 → 每词一条
 function productQueries(){
   const raw = document.getElementById('products').value
     .split('\n').map(s => s.trim()).filter(Boolean);
@@ -563,7 +631,15 @@ function productQueries(){
   const match = (document.querySelector('input[name="match"]:checked') || {}).value || 'or';
   if (match === 'and')  return [pwords.join(' ')];
   if (match === 'each') return pwords;
-  return [pwords.join(' OR ')];
+  const joined = pwords.join(' OR ');
+  return [pwords.length > 1 ? '(' + joined + ')' : joined];
+}
+// 自定义搜索词（第 6 卡）：按行取，去掉空行与首尾空格。
+// 有内容即进入「自定义模式」—— 原样发给谷歌，与标准模式互斥（后端 run_search 同步实现）。
+function rawQueries(){
+  const el = document.getElementById('rawQueries');
+  if (!el || el.disabled) return [];      // 地图模式下该框被置灰 → 恒为空，等于不参与
+  return el.value.split('\n').map(s => s.trim()).filter(Boolean);
 }
 function renderCombos(){
   const box = document.getElementById('comboList');
@@ -571,7 +647,7 @@ function renderCombos(){
   const pqs   = productQueries();
   const conds = [...document.querySelectorAll('#conds input:checked')];
   const excl  = [...document.querySelectorAll('#excludes input:checked, #chinaFilters input:checked')]
-    .map(i => i.value).filter(Boolean).join(' ');
+    .map(i => i.value).filter(v => v && v !== '-').join(' ');
   const csel  = document.getElementById('countries');
   const cname = (csel.selectedOptions[0] || {}).textContent || '未选择';
   const lang  = curLang();
@@ -604,6 +680,21 @@ function renderCombos(){
       + '</div>');
     return;
   }
+  // 自定义搜索词（第 6 卡）：有内容就以它为准 —— 预览必须与后端实搜一致，
+  // 所以这里也按「原样」，不拼排除词、不加引号。
+  const raws = rawQueries();
+  if (raws.length){
+    sum.innerHTML = '<b>' + raws.length + '</b> 条自定义查询（原样搜索，不拼任何词） · 目标国家：' + esc(cname);
+    COMBO_CACHE.push(...raws);
+    box.insertAdjacentHTML('beforeend',
+      '<div class="cmb-group"><div class="cmb-head">自定义搜索词（原样发给谷歌）'
+          + ' <span class="cmb-category">[自定义]</span></div>'
+      + raws.map(q => '<div class="cmb-line">' + esc(q)
+          + ' <span class="cmb-arg" title="这两个参数加在搜索 URL 上，决定谷歌按哪个国家/语言给结果，不写进搜索词">'
+          + esc(args) + '</span></div>').join('')
+      + '</div>');
+    return;
+  }
   if (!pqs.length || !conds.length){
     sum.textContent = '请先填写「2. 产品关键词」，并至少勾选一个「3. 搜索条件」';
     box.innerHTML = '<div class="cmb-empty">暂无可预览的组合</div>';
@@ -612,17 +703,21 @@ function renderCombos(){
   sum.innerHTML = '<b>' + pqs.length + '</b> 个产品组合 × <b>' + conds.length + '</b> 个条件 = <b>'
                 + (pqs.length * conds.length) + '</b> 条查询 · 目标国家：' + esc(cname)
                 + ' · 条件词语言：' + esc(LANG_CN[lang] || lang);
+  const st = siteTerm();          // 国家限定的 site: 后缀（如 site:.fr），空串=不加
   conds.forEach(c => {
     const label = c.parentElement.textContent.trim();
+    const category = (CONDS.find(x => x[0] === c.value) || [])[4] || '辅助线索';
     const tmplMap = COND_TMPL[c.value] || {};
     const tmpl  = tmplMap[lang] || tmplMap.en || '{p}';
     const lines = pqs.map(pq => {
-      const core = tmpl.replace('{p}', pq);
+      let core = tmpl.replace('{p}', pq);
+      if (st) core = core + ' ' + st;      // 位置必须与后端一致：条件模板之后、排除词之前
       return { core: core, full: (core + (excl ? ' ' + excl : '')).trim() };
     });
     COMBO_CACHE.push(...lines.map(l => l.full));
     box.insertAdjacentHTML('beforeend',
-      '<div class="cmb-group"><div class="cmb-head">' + esc(label) + '</div>'
+      '<div class="cmb-group"><div class="cmb-head">' + esc(label)
+          + ' <span class="cmb-category">[' + esc(category) + ']</span></div>'
       + lines.map(l => '<div class="cmb-line">' + esc(l.core)
           + (excl ? ' <span class="cmb-excl">' + esc(excl) + '</span>' : '')
           + ' <span class="cmb-arg" title="这两个参数加在搜索 URL 上，决定谷歌按哪个国家/语言给结果，不写进搜索词">'
@@ -639,9 +734,10 @@ function copyCombos(){
 // 任何影响组合的输入都实时刷新预览
 document.getElementById('products').addEventListener('input', renderCombos);
 document.getElementById('mapsCity').addEventListener('input', renderCombos);
+document.getElementById('rawQueries').addEventListener('input', renderCombos);
 document.querySelectorAll('input[name="match"]').forEach(r => r.addEventListener('change', renderCombos));
 document.addEventListener('change', e => {
-  if (e.target.closest && e.target.closest('#conds, #excludes, #chinaFilters')) renderCombos();
+  if (e.target.closest && e.target.closest('#conds, #excludes, #chinaFilters, #countryLimit')) renderCombos();
 });
 onSource();   // 初始化：按默认数据源摆好界面，并渲染一次预览
 

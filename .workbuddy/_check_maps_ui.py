@@ -48,12 +48,15 @@ try:
     disp = page.run_js("""
       const g = id => document.getElementById(id).style.display;
       return {city:g('mapsCityWrap'), note:g('mapsNote'), pages:g('pagesWrap'),
-              excl:g('excludesWrap'), cond:g('condMapsHint'), china:g('chinaMapsHint')};
+              excl:g('excludesWrap'), cond:g('condMapsHint'), china:g('chinaMapsHint'),
+              limit:g('countryLimit')};
     """)
     print('地图模式下各区块 display：', disp)
     assert disp['city'] == 'block' and disp['note'] == 'block', '地图模式没显示城市框/说明'
     assert disp['pages'] == 'none' and disp['excl'] == 'none', '地图模式应隐藏翻页与排除词'
     assert disp['cond'] == 'block' and disp['china'] == 'block', '地图模式没显示条件/中国过滤提示'
+    # 国家限定只服务网页搜索 → 地图模式整块收起（它靠「城市名 + 视野锁」定位，已是另一套）
+    assert disp['limit'] == 'none', '地图模式应把「国家限定」整块收起'
 
     # 输入城市 → 预览应重绘
     page.run_js("""

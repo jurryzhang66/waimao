@@ -54,7 +54,8 @@ if _ROOT not in sys.path:
 # ⚠️ 这里是「同名 re-export」：外部脚本与 .workbuddy/ 回归脚本都按 `模块名.<名字>` 读取，
 # 所以被搬走的名字必须在这里原样再导出一遍。
 from core.config import (CONDITIONS, COND_TEMPLATE, COND_ROLES, COND_LANGS, cond_template,
-                         KEYWORD_LIB, COUNTRIES, COUNTRY_CENTERS, MAPS_CENTER_DEFAULT,
+                         KEYWORD_LIB, COUNTRIES, COUNTRY_CENTERS, COUNTRY_LIMITS,
+                         COUNTRY_LIMIT_MODES, COUNTRY_LIMIT_DEFAULT, MAPS_CENTER_DEFAULT,
                          EXCLUDE_OPTIONS, EXCLUDE_DEFAULT, CHINA_FILTER_OPTIONS,
                          CHINA_FILTER_DEFAULTS, BLOCK_DOMAINS, BLOCK_SUBSTR,
                          SEARCH_ENGINE_PREFIX)
@@ -71,7 +72,8 @@ from core.state import (BASE_TOKEN, TABLE_ID, LARK_CLI, IMPORT_JSON, COUNTRY_STA
 from core.db import (db_path, maps_place_key, normalize_domain, normalize_email,
                      db_connect, init_customer_db, db_upsert_customer, db_stats,
                      backup_db_before_delete, db_delete_customer, db_fix_website_keys,
-                     db_query_customers, db_facet_counts, QUERY_MAX_LIMIT)
+                     db_query_customers, db_facet_counts, QUERY_MAX_LIMIT,
+                     db_delete_customers_by_ids, QUERY_DELETE_MAX)
 from core import db          # 模块对象：回归脚本要靠 m.db.db_path 才能把打桩打到 core.db 内部
 # 页面模板本体在独立文件 ui/page.html（改样式/文案不用再碰 Python），
 # 这里只把构建结果与构建函数拉回来：路由 `return PAGE_HTML` 与老脚本 `kf._build_page()` 都靠它。
@@ -1179,21 +1181,45 @@ def maps_detail(page, place_url):
 
 # ================= 后台任务 =================
 def run_search(products, cond_keys, countries, pages, exclude, match='or', target_count=10, industry='',
-               auto_enrich=True, lang='', china_filters=None):
+               auto_enrich=True, lang='', china_filters=None, raw_queries=None,
+               country_limit=COUNTRY_LIMIT_DEFAULT):
     """搜索 + 补全一体化闭环：每搜到一个新网站，立刻访问它抓邮箱/电话并评分、回写客户库，
     然后再去搜下一个；凑够 target_count 个新增网站就停。
     lang = 条件词的搜索语言（如 fr），留空则按所搜国家的 hl 自动取，取不到用 en。
     auto_enrich=False 时退化为「只收集网站线索」（邮箱电话留空、评分按无联系方式算），便于快速铺量。
-    目标数量按「本轮新增网站数」计算。整轮结束（含中途停止）写出唯一一份结果 Excel。"""
+    目标数量按「本轮新增网站数」计算。整轮结束（含中途停止）写出唯一一份结果 Excel。
+
+    raw_queries 非空 = **自定义模式**（用户 2026-10-02 拍板）：每条原样当一条查询发给谷歌 ——
+    不套条件模板、不自动加引号、不拼产品词、不拼排除词；并且**强制关掉中国商家过滤**
+    （china_filters 置空）。与产品词/条件/match 互斥，那些参数在自定义模式下全部忽略。
+    目标国家照旧只走 URL 的 gl/hl 并写进结果行的 country，**不写进搜索词**。
+    ⚠️ 注意：「中国商家过滤」与 is_blocked() 的平台黑名单是两层 —— 自定义模式只关前者，
+    亚马逊/维基/领英这类黑名单域名照样会被挡（那是另一个开关，本次不做）。
+
+    country_limit = **国家限定**（可选，默认 'none' 什么都不加）：'cr' 只加 &cr=countryXX（挂 URL，
+    按主机托管国硬过滤）、'site' 只加 site:.xx（拼进搜索词）、'both' 都加。**只对标准网页模式生效** ——
+    自定义模式与地图模式一律不加。⚠️ 2026-09-28 实测：法国加 cr 后条数 10→7、真客户反被挤掉，
+    所以默认关；具体值见 core/config.py 的 COUNTRY_LIMITS。"""
     page = None
-    china_filters = set(CHINA_FILTER_DEFAULTS if china_filters is None else china_filters)
+    raw_queries = [str(q).strip() for q in (raw_queries or []) if str(q).strip()]
+    custom_mode = bool(raw_queries)
+    if country_limit not in COUNTRY_LIMIT_MODES:
+        country_limit = COUNTRY_LIMIT_DEFAULT     # 非法值静默回落「不改」，与其它参数一致
+    if custom_mode:
+        china_filters = set()          # 用户拍板：自定义模式下完全不做中国商家过滤
+        country_limit = 'none'         # 同一纪律：自定义模式也不叠加国家限定
+    else:
+        china_filters = set(CHINA_FILTER_DEFAULTS if china_filters is None else china_filters)
     search_tab_id = None      # 搜索主标签 id：补全会开临时标签，抓完要切回来
     all_rows = []             # 本轮结果（已就地补全），在 finally 里落盘
     search_ok = True
     try:
         init_customer_db()
         STATE['phase'] = 'search'
-        log(f'启动浏览器... 产品 {len(products)} 个 × 条件 {len(cond_keys)} 个 × 国家 {len(countries)} 个')
+        if custom_mode:
+            log(f'启动浏览器... 自定义查询 {len(raw_queries)} 条 × 国家 {len(countries)} 个（原样搜索，不拼任何词）')
+        else:
+            log(f'启动浏览器... 产品 {len(products)} 个 × 条件 {len(cond_keys)} 个 × 国家 {len(countries)} 个')
         page = create_browser_page()
         try:
             search_tab_id = page.tab_id    # 记下搜索主标签，补全用临时标签时才好切回来
@@ -1203,15 +1229,23 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
         # （Updating location…），导致结果页只渲染出搜索框。每个搜索 URL 自带 gl/hl，预热没必要。
 
         # 条件数只用于估算总查询数；真正的公式模板按国家语言在下面逐个组装
-        cond_count = sum(1 for k, _ in CONDITIONS if k in cond_keys)
-        pwords = ['"' + p.strip().strip('"') + '"' for p in products]
-        if match == 'and':
-            pq_list = [' '.join(pwords)]
-        elif match == 'each':
-            pq_list = pwords
+        if custom_mode:
+            # 自定义模式：每条自定义词本身就是一条完整查询，不套模板、不加引号、不拼产品词
+            pq_list = list(raw_queries)
+            cond_count = 1
+            total = len(pq_list) * len(countries)
         else:
-            pq_list = [' OR '.join(pwords)]
-        total = len(pq_list) * cond_count * len(countries)
+            cond_count = sum(1 for k, _ in CONDITIONS if k in cond_keys)
+            pwords = ['"' + p.strip().strip('"') + '"' for p in products]
+            if match == 'and':
+                pq_list = [' '.join(pwords)]
+            elif match == 'each':
+                pq_list = pwords
+            else:
+                # 把产品词 OR 组整体括起来，避免 Google 把角色词只应用到最后一个产品词。
+                pq = ' OR '.join(pwords)
+                pq_list = ['(' + pq + ')' if len(pwords) > 1 else pq]
+            total = len(pq_list) * cond_count * len(countries)
         q_index = 0
         seen = set()
         seen_titles = set()
@@ -1221,20 +1255,38 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                       'mail': 0, 'empty': 0, 'china': Counter()}
 
         for code, cname, gl, hl in countries:
-            country_params = f'&gl={gl}&hl={hl}'
+            # 国家限定（可选）：cr 挂 URL（与 gl/hl 并列）、site: 拼搜索词。
+            # 仅标准模式 —— 自定义模式已在上方整体置 none；地图模式根本不走这个函数。
+            cr_val, site_val = COUNTRY_LIMITS.get(code, ('', ''))
+            cr_param  = f'&cr={cr_val}' if (country_limit in ('cr', 'both') and cr_val) else ''
+            site_term = site_val        if (country_limit in ('site', 'both') and site_val) else ''
+            country_params = f'&gl={gl}&hl={hl}{cr_param}'
             # 条件词按「搜索语言」本地化：法国站用 grossiste/importateur 这类本地词，
             # 否则就是在法语页面里找英文词，命中的多是非目标站。语言优先级：前端传入 → 该国 hl → en。
             lang = (lang or '').strip() or hl or 'en'
-            cond_list = [(name, cond_template(k, lang)) for k, name in CONDITIONS if k in cond_keys]
-            log(f'========== 国家：{cname}（gl={gl} hl={hl} · 条件词语言 {lang}） ==========')
+            if custom_mode:
+                # 占位模板：{p} 原样替换 → 让下面「产品 × 条件」的双层循环照跑，不必另写一套循环
+                cond_list = [('自定义', '{p}')]
+                log(f'========== 国家：{cname}（gl={gl} hl={hl} · 自定义查询原样搜索） ==========')
+            else:
+                cond_list = [(name, cond_template(k, lang)) for k, name in CONDITIONS if k in cond_keys]
+                log(f'========== 国家：{cname}（gl={gl} hl={hl} · 条件词语言 {lang}） ==========')
             for pq in pq_list:
                 for cname2, tmpl in cond_list:
                     if STATE['stop']:
                         log('已停止')
                         return
                     q_index += 1
-                    china_exclude = china_filter_terms(china_filters)
-                    formula = f'{tmpl.replace("{p}", pq)} {exclude} {china_exclude}'.strip()
+                    if custom_mode:
+                        # 原样：不加引号、不拼排除词、不拼中国过滤词（用户拍板「搜索词一个字符都不加」）
+                        formula = pq
+                    else:
+                        china_exclude = china_filter_terms(china_filters)
+                        core = tmpl.replace('{p}', pq)
+                        if site_term:
+                            # site: 位置 = 条件模板之后、排除词之前（前端预览必须同位置，否则对不上）
+                            core = f'{core} {site_term}'
+                        formula = f'{core} {exclude} {china_exclude}'.strip()
                     log(f'[{q_index}/{total}] 搜索({cname}·{cname2})：{pq}')
                     # 打开并确认结果已渲染（内置多次重开，专治谷歌的「壳页面」）
                     open_search(page, formula, country_params)
@@ -2336,14 +2388,32 @@ def api_manual_close_browser():
     return jsonify({'ok': True, 'closed': close_manual_browser()})
 
 
+# 自定义搜索词（主页第 6 卡）单轮条数上限：一条 × 每条抓 pages 页 × 每页约 10 条，
+# 20 条已足够撑满一次 100 条的目标；再多大概率触发谷歌限流（限流要等 90 秒才恢复）。
+RAW_QUERY_MAX = 20
+
+
 @app.route('/api/start', methods=['POST'])
 def api_start():
     if STATE['running']:
         return jsonify({'ok': False, 'msg': '任务正在运行'})
     data = request.get_json()
+    # 自定义搜索词（主页第 6 卡）：一行一条，**原样**当一条查询用。
+    # 空行/纯空白丢弃、去重保序；硬上限防「误粘一大段文本」把整轮拖成几小时（谷歌还会限流）。
+    raw_in = data.get('custom_queries')
+    raw_queries = []
+    if isinstance(raw_in, list):
+        for q in raw_in:
+            if not isinstance(q, str):
+                continue
+            q = q.strip()
+            if q and q not in raw_queries:
+                raw_queries.append(q)
+    if len(raw_queries) > RAW_QUERY_MAX:
+        return jsonify({'ok': False, 'msg': f'自定义搜索词一次最多 {RAW_QUERY_MAX} 条'})
     products = [p.strip() for p in data.get('products', '').splitlines() if p.strip()]
-    if not products:
-        return jsonify({'ok': False, 'msg': '请填写至少一个产品关键词'})
+    if not products and not raw_queries:
+        return jsonify({'ok': False, 'msg': '请填写至少一个产品关键词，或填一条自定义搜索词'})
     cond_keys = data.get('conditions', [])
     countries = [c for c in COUNTRIES if c[0] in data.get('countries', [])]
     if not countries:
@@ -2368,6 +2438,15 @@ def api_start():
     # 数据源：google=谷歌网页搜索（默认，老链路），maps=谷歌地图名录（新链路）
     source = (data.get('source') or 'google').strip()
     city = (data.get('city') or '').strip()             # 仅地图用：城市/地区名，会拼进查询词
+    # 国家限定（主页第 4 步，可选，默认关）：none / cr / site / both。非法值静默回落 none。
+    # 只对网页搜索生效 —— 地图走 run_maps（根本不接收该参数），自定义模式在 run_search 内强制置 none。
+    country_limit = (data.get('country_limit') or COUNTRY_LIMIT_DEFAULT).strip()
+    if country_limit not in COUNTRY_LIMIT_MODES:
+        country_limit = COUNTRY_LIMIT_DEFAULT
+    if source == 'maps' and raw_queries:
+        # 自定义搜索词只服务「谷歌网页搜索」：地图走「关键词库 + 城市 + 身份词」，这里直接忽略
+        log(f'⚠️ 地图模式不使用自定义搜索词，已忽略 {len(raw_queries)} 条（切回谷歌网页搜索可用）')
+        raw_queries = []
     if source == 'maps':
         t = threading.Thread(target=run_maps,
                              args=(products, cond_keys, countries, city, target_count, industry,
@@ -2378,6 +2457,7 @@ def api_start():
     t = threading.Thread(target=run_search,
                          args=(products, cond_keys, countries, pages, exclude, match, target_count, industry,
                                auto_enrich, lang, china_filters),
+                         kwargs={'raw_queries': raw_queries, 'country_limit': country_limit},
                          daemon=True)
     t.start()
     return jsonify({'ok': True})
@@ -2560,6 +2640,42 @@ def api_db_open_folder():
         return jsonify({'ok': True})
     except Exception as e:
         return jsonify({'ok': False, 'msg': str(e)})
+
+
+@app.route('/api/db/delete', methods=['POST'])
+def api_db_delete():
+    """把查询结果里选中的客户从客户库删掉（**不可逆**，删前自动备份客户库）。
+
+    前端固定 POST `{'ids': [主键…]}`：单行 ✕ 就是长度为 1 的数组，走同一条路
+    （少一条代码路径就少一处「只有批量删才备份」之类的漏洞）。
+
+    ⚠️ 只动客户库，**不碰 STATE / MANUAL_STATE**。若「本轮采集」正在进行，被删的这条
+       仍留在它的内存明细里（那份明细不是从库里读的），要一并拿掉请到 /manual 点那行的 ✕，
+       否则本轮生成的结果 Excel 仍会带上它。
+    ⚠️ 锁纪律：本链路全程**不持 STATE_LOCK** —— `backup_db_before_delete()` 内部会调
+       `log()`，而 `log()` 自己要抢那把**非可重入**锁，持锁调用必死锁。
+    ⚠️ 删前备份由 `backup_db_before_delete()` 负责（300 秒节流 + sqlite 在线 backup，
+       文件落 `DB/backups/`）；备份失败**不阻断**删除，只在返回体里如实说明。
+    """
+    p = request.get_json(silent=True)
+    ids = (p or {}).get('ids') if isinstance(p, dict) else None
+    if not isinstance(ids, list) or not ids:
+        return jsonify({'ok': False, 'msg': '没有选中任何行'})
+    if len(ids) > QUERY_DELETE_MAX:
+        return jsonify({'ok': False,
+                        'msg': f'一次最多删 {QUERY_DELETE_MAX} 条，请分批删除'})
+    backup = backup_db_before_delete()              # 锁外：先备份（失败不阻断，返回 ''）
+    try:
+        deleted, missing = db_delete_customers_by_ids(ids)
+    except Exception as e:
+        log(f'⚠️ 客户库查询页删除失败：{type(e).__name__}: {e}')
+        return jsonify({'ok': False, 'msg': f'{type(e).__name__}: {e}'})
+    if deleted:
+        tip = f'（另有 {len(missing)} 条库里已不存在）' if missing else ''
+        log(f'🗑️ 客户库查询页删除 {deleted} 条{tip}'
+            + (f'，已备份：{os.path.basename(backup)}' if backup else '（已有备份，未重复备份）'))
+    return jsonify({'ok': True, 'deleted': deleted, 'missing': missing,
+                    'backup': os.path.basename(backup) if backup else ''})
 
 
 @app.route('/api/stop', methods=['POST'])

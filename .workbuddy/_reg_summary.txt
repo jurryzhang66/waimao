@@ -1,17 +1,216 @@
-# 全量回归验收记录 — 2026-10-01（第四轮：客户库查询页 /db + Excel 导出）
+# ==========================================================================
+# 第八轮 — 2026-10-02：主页新增「国家限定」四选一（模块 M15，默认关）
+# ==========================================================================
 # 命令：D:\Users\admin\AppData\Local\Programs\Python\Python313\python.exe .workbuddy/_run_all_reg.py
-# 最终结果：**22 项全部 EXIT=0**（用时 68.2s；驱动脚本把每项输出写到 .workbuddy/_reg__<名字>.log）
-# 上一轮（计数口径拆开报 + 去重键不变量）的记录是同名文件的历史版本：20 项 107.4s。
-# 本轮的起点是用户需求：「做一个数据库查询页面 + 导出功能：筛选国家/行业等条件 → 看结果 → 导出 Excel」。
-#   AskUserQuestion 拍板 4 项：① 全套实用筛选（关键词/行业/国家/来源/评级/评分区间/有无邮箱电话联系页/
-#   采集时间/排序分页）② 导出「客户库全字段」而非结果表 10 列 ③ 存档 + 浏览器下载 ④ 飞书暂时不用。
+# 最终结果：**23 项全部 EXIT=0**（用时 162.9s；每项输出在 .workbuddy/_reg__<名字>.log）
+#
+# 用户需求（原话）
+#   ① 「系统应该是做有目标国家的数据吧？但是国家的谷歌搜索的后缀没有加上吗？有没有？」
+#   ② 「错了错了，我觉得你不应该犯这么这么低级的错误。据我所知，比如搜索一个国家美国是用
+#       site:.us，英国用 site:.uk」
+#
+# 先澄清的事实（决定「默认关」的前提）
+#   · 25 国 URL（&gl=&hl=）**全部齐全、无缺失**，只是域名字面量写死 https://www.google.com/search?q=
+#   · Google 2025-04 起 ccTLD 做国家定位已弃用，官方口径就是「用 gl/hl，别用域名」→ 现状方向没错
+#   · 我认的错：site: 支持 TLD，site:.uk 能匹配 .co.uk（我曾误判为必须写 co.uk）
+#   · 我坚持的：美国 B2B 以 .com 为主，.us 极少 → site:.us 搜美国会失败
+#
+# 拍板（AskUserQuestion 3 问）
+#   限定手段 = 做一个**选择分支**（多选一）；默认 = **页面勾选、默认关**；范围 = **标准网页模式**
+#   → 走正式 plan 流程（Plan agent → 方案文件 → ExitPlanMode → 用户批准）后才动手
+#
+# ★ 决定「默认关」的那条实测（.workbuddy/memory/2026-09-28.md:186-198）
+#   法国同一查询 "nouilles chinoises" grossiste：
+#     A &gl=fr&hl=fr（现状）  10 条 / .fr 占 50%   ← 最好
+#     B &cr=countryFR&lr=lang_fr   7 条 / 29%      ← 更差
+#     C A+B 叠加               9 条 / 56%
+#     D 无参数（基线）          8 条 / 25%
+#   → cr 按**主机托管国**过滤，而法国 B2B 大量用 .com → **加 cr 反而把真客户挤掉**。
+#   → 故本功能定位成**默认关的可选实验开关**；核心认知：**限定更严 ≠ 更准**。
+#
+# 改动
+#   core/config.py      ★新增★ COUNTRY_LIMITS = {code: (cr, site)}（25 国）+ COUNTRY_LIMIT_MODES
+#                       ('none','cr','site','both') + COUNTRY_LIMIT_DEFAULT='none'。
+#                       **独立字典**（与 COUNTRY_CENTERS 同理），**不动 COUNTRIES 4 元组**。
+#   core/ui.py          import 加 COUNTRY_LIMITS；_build_page() 生成 limits_js 并
+#                       replace('COUNTRY_LIMITS_PLACEHOLDER', …)。**刻意不动 counts_js**（字段顺序重排过）
+#   ui/page.html        第 4 步卡内、#pagesWrap 之后加 #countryLimit 四选一（name="country_limit"，
+#                       none 默认 checked）+ 提示；新增 countryLimit() / effectiveLimit() / siteTerm()；
+#                       countryParams() 末尾挂 &cr=；renderCombos() 标准分支拼 site:；
+#                       onSource() 切地图整块 display:none；委托选择器加 #countryLimit；
+#                       start() body 加 country_limit（14→15 字段）。**零 CSS 改动**
+#   客户开发工具.py      import 加三常量；run_search(..., country_limit=COUNTRY_LIMIT_DEFAULT) + docstring；
+#                       入口兜底（非法值回落 none + custom_mode 强制 none）；国家循环里 cr_param 挂 URL /
+#                       site_term 拼搜索词；api_start 读 body 校验后透传（**不给 run_maps**）
+#   _smoke_search.py    +「国家限定」段（cl_run() 辅助：limit=None = **完全不传该参数**，验证默认路径
+#                       逐字不变）+ HTTP 层（地图不塞 / both 透传 / 非法回落）
+#   _check_page.py      占位符列表 +1；**R5 两条 sha256 重算**；新增 **R11**（页面 8 标识 + 数据层 5 条
+#                       + AST 断言 + signature 默认值）
+#   _check_live_ui.py   +**E 段**（默认 none → cr 只挂 URL → site 只进搜索词 → both → 美国跳过 site:
+#                       → 地图收起 → 自定义互斥；截图 _country_limit.png）
+#   _check_maps_ui.py   加断言：地图模式下 #countryLimit 的 display == 'none'
+#   文档                AI_PROJECT_CONTEXT.md（§3 M1/M10/**M15**/§6.10/§7.1/§8.1/§8.2/§9.2/附录）、
+#                       memory/MEMORY.md、memory/2026-10-02.md、本文件
+#
+# 四条关键判定
+#   1) 分工：cr=countryXX（**大写 ISO**）**只挂 URL**；site:.xx **只进搜索词**；两者都与既有
+#      &gl=&hl= 并联。默认 none 时两步都不发生。
+#   2) 特殊值：美国 ('countryUS','')（site 留空）；伊朗 ('','site:.ir')（不在谷歌 cr 列表）；
+#      ca_fr 内部码 → countryCA。英国 cr='countryGB' 标「待实测」（COUNTRIES 里 gl='uk' 不动）。
+#   3) 互斥纪律：custom_mode → 强制 country_limit='none'（与 china_filters=set() 同一纪律）；
+#      地图模式整块收起 + api_start 忽略。
+#   4) 已知限制（接受 + 记账）：open_search() 最后一轮兜底走 type_search，其 country_params
+#      **不含 cr** → 壳页面兜底轮丢 cr（gl/hl 本来也不含）；site: 在 formula 里**不会丢**。
+#
+# ⚠️ 本轮踩的坑
+#   1) _smoke_search.py 第一次插入了引用不存在变量的半截代码 → 整段重写，改用 f_us_site == f_us_none
+#      **对比法**（避开 -site:.cn 干扰）验证「美国跳过 site」。**插入大段测试代码别引用未定义的局部变量。**
+#   2) R11 断言假红：str(inspect.signature(run_search)) 里是**求值后**的 country_limit='none'，
+#      不是源码文本 COUNTRY_LIMIT_DEFAULT → 改用 sig.parameters['country_limit'].default == 'none'。
+#   3) R5 双基线必红（预期内）→ 两条一起重算。
+#   4) site: 与「找采购决策人（领英）」条件**互斥**：领英模板本身是 site:linkedin.com/in …，
+#      叠加 site:.fr 必 0 结果。
+#
+# 验证
+#   _smoke_search.py    全通过（国家限定段 + HTTP 层）
+#   _check_page.py      R1–R11 全绿
+#   _check_live_ui.py   真机 A–E 全绿（E 段截图 _country_limit.png，433374 bytes）
+#   _check_maps_ui.py   全通过（含 countryLimit 隐藏断言）
+#   _run_all_reg.py     **23 项全 EXIT=0，162.9s**（终态；见下「回归假红事件」）
+#
+# ⚠️ 回归假红事件（本轮最大的坑，**与本次代码改动无关**）
+#   全量回归**跑红了两次**，最后查明根因 = **系统盘 C: 只剩 2.34 GB**：
+#     第 1 次  22/23  _check_manual_ui 报 `attempt to write a readonly database`（core/db.py:292）  219.1s
+#     第 2 次  17/23  **6 项齐红**（_smoke_manual_session / _smoke_query / _smoke_annotate /
+#                     _check_feishu_records / _check_maps_ui / _check_manual_ui），报
+#                     `database or disk is full` / `disk I/O error` / `PRAGMA journal_mode=WAL` 失败   163.2s
+#     第 3 次  23/23 ✅ 把 TEMP/TMP/TMPDIR 指到 D: 后立刻全绿                                    161.4s
+#     第 4 次  23/23 ✅ 落地下面那个修法后用**裸命令**复跑，全绿                                  162.9s
+#
+#   根因链条：各回归脚本都用 tempfile.mkdtemp() 建临时客户库 → 默认落**系统盘 C:** 的
+#     C:\Users\admin\AppData\Local\Temp（该目录下 1745 个子目录共 8.5 GB，其中本工具回归产生的
+#     **只有 20.7 MB**）→ C: 写不进去 → SQLite 报的却是「readonly / disk I/O error」这种
+#     **极具误导性**的错。判定依据：单独重跑 _check_manual_ui.py 立刻 EXIT=0；
+#     _smoke_manual_session 第 ⑦ 段明写 disk I/O error；**产品代码一行没动**（core/db.py 本轮未改）。
+#
+#   ✅ 修法（已落地，防复发的根治）：_run_all_reg.py 的 main() 里把子进程环境变量
+#      TMPDIR/TEMP/TMP 钉到 **.workbuddy/_reg_tmp**（在项目盘 D: 上，已被
+#      .gitignore:22 的 `.workbuddy/_*` 忽略）→ **回归不再受系统盘剩余空间影响**；
+#      首行会打印 `临时目录（子进程）：D:\waimao\dp\.workbuddy\_reg_tmp`。
+#   ⛔ 没做的事：**没有去删 C:\...\Temp 里的东西**（属 AppData，是「不许动」的区域）→
+#      只在交付报告里提示用户 C: 空间紧张。
+#   📌 教训：以后回归红了**先看错误类型** —— 出现 disk / readonly / I/O error 一律先查磁盘剩余空间，
+#      别一头扎进业务逻辑。
+#
+# ⚠️ 交付时必须说的
+#   1) **重启工具**才看得到第 4 步卡里的四选一（PAGE_HTML 是 import 期构建一次）。
+#   2) **默认关、行为与现在一字不差** —— 不勾就不会有任何变化。
+#   3) cr 的英国值（countryGB）**待实测**；open_search 兜底路径会丢 cr（gl/hl 本来就丢）。
+#   4) site: 与「找采购决策人（领英）」条件**互斥**，别一起勾。
+#   5) 限定更严 ≠ 更准（法国加 cr 实测 10→7、真客户被挤掉）。
 
-EXIT=0  _check_page             页面文案/占位符/JS 语法/标签配对/数据源切换/端口避让 + R1–R7 + ★新★ R9
+# ==========================================================================
+# 第七轮 — 2026-10-02：主页新增「6. 自定义搜索词」（完全原样搜索，模块 M14）
+# ==========================================================================
+# 命令：D:\Users\admin\AppData\Local\Programs\Python\Python313\python.exe .workbuddy/_run_all_reg.py
+# 最终结果：**23 项全部 EXIT=0**（用时 196.7s；每项输出在 .workbuddy/_reg__<名字>.log）
+#
+# 起点：用户贴出主页第 2~5 卡的 HTML，要求「在这个的下一行，加入一个输入自定义关键词，
+#   不用上面的4个条件的，但是目标国家，要放进搜索结果，不然采到数据后，我以后不好区分是哪的」。
+#
+# 用户逐条拍板的口径（**6 条，实现时不得偏离**）：
+#   1) 完全原始查询：一行 = 一条，**原样**发给谷歌（不套条件模板 / 不自动加英文双引号 / 不拼产品词）
+#   2) 搜索词一个字符都不加：排除词（#excludes）与中国过滤词（#chinaFilters）都不拼
+#   3) 国家只做「标记」：不写进搜索词 → 后端国家逻辑**零改动**
+#   4) 与标准模式**互斥**：自定义框有内容就只跑自定义（忽略第 3 步条件勾选，产品词也不再必需）
+#   5) 只服务**谷歌网页搜索**：切地图模式时置灰 + 提示，api_start 里整批忽略
+#   6) **不做中国商家过滤**（用户明确选「完全不过滤」）
+#   继承：采集数量上限 + 就地抓联系方式 + pages 翻页 + 行业标签；不继承：排除词 / match / 中国过滤
+#
+# 三条关键判定（别再重新推导）：
+#   A) 实现方式 = 给 run_search 加**末尾**参数 raw_queries=None（末尾加才不破坏 _smoke_search 的
+#      位置传参），内部 custom_mode 分支：pq_list = raw_queries、cond_count = 1、
+#      cond_list = [('自定义', '{p}')]（**占位模板**，让原有双层循环原样跑）、formula = pq（原样）。
+#      默认 None 时旧路径**逐字不变**。
+#   B) 「不做中国过滤」的正确做法是 custom_mode 时 **china_filters = set()** —— 这样
+#      extract_results() / china_filter_reasons() 两处调用**一个字都不用改**就自动 no-op
+#      （china_filter_reasons 见空集合直接 return []，:166）。⚠️ 但 is_blocked() 的平台黑名单
+#      （BLOCK_DOMAINS / BLOCK_SUBSTR / 搜索引擎域名族）**仍然生效**，与 china_filters 无关。
+#   C) 门槛有**三道**，必须一起放宽：前端 start() 的 `!products.trim()`（324 行）与
+#      `!conditions.length`（325 行）、后端 api_start 的 `if not products`。只改一处 → 用户被
+#      「请填写产品关键词」挡住（前端过不去就发不出请求；后端没改则 400）。
+#
+# 改动清单
+#   ui/page.html              +第 6 卡 #rawCard / #rawQueries / #rawMapsHint（.grid 之后、按钮行之前）
+#                             +rawQueries()（568 行后）、renderCombos() 自定义分支（607 行后）、
+#                              onSource() 置灰（410 行后）、#rawQueries input 监听（643 行后）
+#                             start()：+const raws、+custom_queries: raws、324/325 两处校验放宽
+#                             样式追加进**现有**主 <style> 末尾（.raw-card / .raw-off）
+#   客户开发工具.py            +RAW_QUERY_MAX = 20；api_start 读 custom_queries（清洗/上限/地图忽略）；
+#                             run_search 签名末尾 +raw_queries=None，5 处分支
+#   _check_page.py            **R5 两条 sha256 重算**（TMPL ceb25023… / BUILT 997b881b…）+ 新增 R10
+#   _smoke_search.py          +「自定义模式」段（含标准模式 A/B 对照 + 互斥验证）+「/api/start HTTP 层」段
+#   _check_live_ui.py         +D 段：卡片落位 / 预览切「原样」分支 / 清空回标准模式 / 地图置灰
+#
+# ⚠️ 本轮踩到的坑
+#   1) **target 太小会让第 2 条自定义查询根本不跑**：首跑 target=2，第一条查询就凑够 2 条 →
+#      第二条公式没发出去 → 断言 `formulas == [两条]` 假红。修法不是调大 target（那测的是达标逻辑
+#      不是公式），而是把 extract_results 桩改成**每次返回一批全新域名**。
+#   2) 自定义模式下 `cond_list` 若留空 → 双层循环内层永不进入 → **静默跑 0 条查询**（只写
+#      「本轮新增 0 个网站」，不报错）。占位模板即可复用原循环。
+#   3) 改 page.html 后忘了重算 **_BUILT_SHA** 必红（这次两条一起换了，没踩到，但值得记）。
+#   4) 注意 `'custom_queries'` 是 JSON 键 → 落在 ast.**Constant** 里，不在 ast.Name 里；
+#      R10 的 AST 断言要同时收 Name/Attribute 与字符串常量（沿用「静态断言看代码不看文本」那条课）。
+#
+# 验证
+#   _check_page.py       R1–R10 全绿（R10 = 自定义搜索词静态断言）
+#   _smoke_search.py     EXIT=0：公式逐字原样 / 不拼排除词 / 国家只走 &gl=&hl= / 国家列=法国 /
+#                        中国站被保留（对照组证明标准模式确实会过滤它）/ 互斥成立 /
+#                        /api/start 参数传递与「两边都空仍拦住」「超 20 条拒绝」「地图忽略」
+#   _check_live_ui.py    真机 A–D 全绿：第 6 卡落位(在 .grid 之后、按钮行之前)、
+#                        预览「2 条自定义查询（原样搜索，不拼任何词） · 目标国家：法国」、
+#                        清空即回标准模式、地图模式 disabled=True + 提示 + 底色 rgb(246,247,249)
+#   _run_all_reg.py      **23 项全 EXIT=0，196.7s**（终态代码上复跑两次均全绿）
+#   另存实物截图 .workbuddy/_raw_query_card.png（399284 bytes）
+#
+# 交付时必须说的
+#   1) **重启工具**才看得到第 6 张卡（PAGE_HTML 在 import 期构建一次）。
+#   2) 用法：第 6 卡一行一条 → 只要它非空，本轮就**只跑它**、上面第 3 步的条件被忽略。
+#   3) 想按国家区分数据：同一批词换国家**跑多轮**，结果表「国家」列会分别标记，/db 里按国家筛。
+#   4) ⚠️ 「完全不过滤」的边界：只关掉那 17 项中国过滤；amazon / wikipedia / linkedin 这类
+#      平台黑名单 + 搜索引擎域名族**照样会被挡**（属另一个开关，本次未做）。
+#
+# ================= 以下为第六轮（居中模态框）的记录 =================
+# 全量回归验收记录 — 2026-10-02（第六轮：`/db` 删除确认弹窗改成页面自己的**居中模态框**）
+# 命令：D:\Users\admin\AppData\Local\Programs\Python\Python313\python.exe .workbuddy/_run_all_reg.py
+# 最终结果：**23 项全部 EXIT=0**（用时 129.6s；驱动脚本把每项输出写到 .workbuddy/_reg__<名字>.log）
+# 上一轮（第五轮：`/db` 结果删除 + 「行业为空批量标注」脚本，23 项 76.1s）的记录见本文件下文。
+#
+# 本轮起点：用户贴了张原生 confirm 的截图 ——「删除弹窗确认，移动屏幕中间。现在放在顶部不方便」。
+#   原生 confirm 的位置与样式都由浏览器定（贴窗口顶部），改不了 → 换成页面自己的模态框。
+#
+# 本轮两条关键判定（别再重新推导）：
+#   A) 弹窗 HTML **必须放在 <script> 之前**：/db 的脚本是立即执行的 IIFE，解析到那一刻就
+#      getElementById 取节点；放到脚本后面会拿到 null、绑事件抛 TypeError → **init() 整体中断、
+#      筛选面板全空白**（现象是「0 个筛选框」而不是弹窗报错，极易误判成后端挂了）。实测踩过。
+#   B) 断言「页面里没有原生 confirm」时，**注释里别写带括号的 confirm()** —— 子串匹配会把注释
+#      当代码（「静态断言要看代码不是源码文本」的同一课，只是这次方向反过来：说明写进注释 → 假红）。
+#   （第五轮那三条「按主键删 / 不清库的门 / 删除接口不持锁」仍然有效，见下文第五轮段。）
+#
+
+EXIT=0  _check_page             页面文案/占位符/JS 语法/标签配对/数据源切换/端口避让 + R1–R7 + R9
                                （R9 = `/db` 查询页静态断言：QUERY_HTML 成品、共享样式注入、控件 id、
-                                5 个逻辑函数、/api/db 三接口、`const EMPTY = '{QUERY_EMPTY}'` 前后端一致、
+                                11 个逻辑函数、/api/db 四接口、`const EMPTY = '{QUERY_EMPTY}'` 前后端一致、
                                 **页面零硬编码行业名**、`len(QUERY_EXPORT_COLUMNS)==14`、
                                 `len(EXCEL_HEADER_10)==10`（10 列契约未被动）、路由已注册、
-                                `QUERY_EXPORT_DIRNAME=='查询导出'`、`dirname(query_export_dir())==output_dir()`）
+                                `QUERY_EXPORT_DIRNAME=='查询导出'`、`dirname(query_export_dir())==output_dir()`；
+                                ★新★ 删除部分：`id="ckAll"` / `id="btnDelSel"` / `class="row-ck"` /
+                                `class="row-del"` / `data-id` / 两条 `#resBody` 事件委托 /
+                                `QUERY_DELETE_MAX==500`，以及 **AST 断言**（按主键删、删前备份、
+                                接口里不出现 STATE_LOCK）；
+                                ★新★ 确认弹窗：5 个 `delModal*` id / `askDeleteConfirm(` /
+                                `closeDeleteConfirm(` / 3 处 addEventListener / Esc+Enter，
+                                外加 **`confirm(` 在整页里必须为 0**（居中模态框已替代原生 confirm））
 EXIT=0  _check_startup          pick_port 单测 + 子进程真机启动 e2e
 EXIT=0  _kwlib_check            词库字节约定/规模/键序/行业内部唯一/deep-diff/语言覆盖看板
 EXIT=0  _check_industry_rules   回填行业.py 规则：必须挡住的误判 + 既有行业回归 + 逐条 diff
@@ -20,7 +219,7 @@ EXIT=0  _smoke_search           run_search 闭环打桩（临时库）
 EXIT=0  _smoke_maps             run_maps 闭环打桩（临时库）
 EXIT=0  _smoke_collect          手动采集核心 8 组
 EXIT=0  _smoke_manual_session   12 组 144 项（去重键自愈 / dry-run / apply / 冲突不硬改）
-EXIT=0  _smoke_query            ★新★ **10 组 126 项**（全部跑在 tempfile 临时库 + 临时 output）
+EXIT=0  _smoke_query            **11 组 168 项**（全部跑在 tempfile 临时库 + 临时 output）
                                （打桩：m.db_path / m.db.db_path / m.paths.output_dir / m.paths.ENRICH_FILE
                                 全部关进临时目录 + _under_tmp() 护栏）
                                ① 分面统计 db_facet_counts：四维度 distinct+count、*_blank 空值条数、
@@ -41,13 +240,23 @@ EXIT=0  _smoke_query            ★新★ **10 组 126 项**（全部跑在 temp
                                   `..%2F..%2F客户开发工具.py`、不存在的名字）、send_file 响应要先 close()
                                   才能删文件（否则 WinError 32）
                                ⑩ 导出边界：命中 0 条拒绝导出（不产空表）、超上限明确拒绝并给出条数
+                               ★新★ ⑪ 删除客户：空列表/None/字符串/全非法 id 四次调用**一行都没删**（「不清库」
+                                  那道门）、同 id 传两次只算一条、不存在的 id 如实报 missing、
+                                  删除前**确实落备份且落在临时目录**（`_backups_dir()` 由 `db_path()` 推导，
+                                  漏打桩就会往真实 `DB/backups/` 塞测试垃圾）、300 秒节流生效、
+                                  HTTP 层四种非法 body 被拒、批量删 2 条 + 顺带回报 missing、
+                                  **路由自己也会先备份**（返回的备份文件名在磁盘上真的存在）、
+                                  超 `QUERY_DELETE_MAX` 被拒且没删任何行、
+                                  原有的按网站键删除仍可用（两条路并存不冲突）、
+                                  `paths.ENRICH_FILE` / `STATE['output']` 没被删除链路改动、
+                                  页面上 11 个删除相关标识就位
 EXIT=0  _check_feishu_records   飞书导出：来源渠道按网址回库查、50 分门槛对 [手动采集] 豁免、
                                 空评分行不崩、国家映射、邮箱只取第一个（19 项）
 EXIT=0  _check_maps_ui          地图模式真机 UI + 预览 URL 与后端逐字一致（整页截图「尽力而为」）
 EXIT=0  _check_kwlib_ui         关键词库三级联动真机校验
 EXIT=0  _check_live_ui          主界面真机 UI 截图
 EXIT=0  _check_manual_ui        /manual 真机 UI：A–F 六项 + ✕ 删除子用例 + 计数口径断言
-EXIT=0  _check_query_ui         ★新★ `/db` 真机 UI 校验 A–G（真 Flask + 真 Playwright Chromium，
+EXIT=0  _check_query_ui         `/db` 真机 UI 校验 A–H（真 Flask + 真 Playwright Chromium，
                                 `page.set.download_path()` 指到临时目录防污染用户下载目录）
                                ① 结构与共享样式（`.btn-start` 实测 = rgb(26, 115, 232)，证明
                                   PAGE_CSS_PLACEHOLDER 注入生效）② facets 由接口动态生成（出现历史行业名
@@ -55,7 +264,19 @@ EXIT=0  _check_query_ui         ★新★ `/db` 真机 UI 校验 A–G（真 Fla
                                ④ 多维筛选交互 ⑤ 排序与分页（每页 3 条要**动态注入 option**，
                                   因为 `<select>` 里没有 value=3 时程序化赋值会被浏览器忽略）
                                ⑥ 重置 ⑦ 导出真实落盘；`wait_text()` 轮询等目标态（不 sleep 固定时长）
-                               截图输出 .workbuddy/_query_ui.png（142181 bytes）
+                               ★新★ ⑧ 删除：截图**放在删除之前**（先留一张「满表 + 勾选列 + ✕ 列」全貌）；
+                                  点 ✕ 弹的是**页面自己的居中模态框**（断言 `#delModal` 为
+                                  `position:fixed` + `alignItems/justifyContent=center` + 卡片**中心落在
+                                  视口正中 ±2px**；量位置前先 sleep 0.25s 等 `m-pop` 入场动画落定，
+                                  否则量到起始帧的 translateY(8px)）→ 文案说清「不可撤销/已自动备份/
+                                  对本轮明细的影响」→ 选「取消」或按 **Esc** 时表格、库、备份三样都不动
+                                  （证明请求真没发出去）→ 点「确定删除」后表格减一 + 客户库同步删 +
+                                  删前自动备份 + 日志有记录 → 全选/半选态(`ckAll.indeterminate`)/按钮计数
+                                  三者联动 → 批量删只删勾中的（没勾那条完好）→ 删到空表不报错、正常显示空态
+                                  ⚠️ H 段刻意**不继承**上一段状态：显式把排序设回「评分降序」并
+                                  `wait_names(db_names('score_desc'))` 等**后端顺序与表格逐字一致**才动手
+                                  （F 的 requery 是 async；且断言里的行名现在全部动态取，不写死）
+                               截图输出 .workbuddy/_query_ui.png（150518 bytes）
 EXIT=0  _check_ext              扩展静态校验 67 项（路由在位、DP_SESSION_DELETE 全链路、popup.js 零 fetch）
 EXIT=0  _smoke_ext_content      content.js 运行时（Node + 最小 DOM 桩）51 项
 EXIT=0  _smoke_ext_popup        popup.js 运行时（Node + 最小 DOM 桩）96 项
@@ -225,3 +446,121 @@ EXIT=0  补历史欠账.py --dry      欠账清单（只列不写）
 
 # ⚠️ 交付时必须说的：改 ui/*.html 后**必须重启工具**才生效（PAGE_HTML 是 import 期构建一次）。
 #   用户跑着的旧实例（5000）打 /db 仍是 404；重启后首页顶栏才会出现那两个按钮。
+
+# ============ 第五轮（2026-10-02）：/db 结果删除 + 「行业为空批量标注」脚本 ============
+# 用户需求（原话）：「…/db 这个查询页面，增一个查询结果删除功能，我可以把不想不要客户删除。
+#   还有把现在行业没有标注，全标注成食品」。
+#
+# 拍板（AskUserQuestion 3 问）：
+#   ① 删除交互 = **单行 ✕ + 勾选批量**（每行 ✕ 与复选框都在，另有「🗑️ 删除选中 (N)」+ 表头全选/半选）
+#   ② 标注范围 = **先删掉那 7 条平台页/误采，剩下的 17 条再标成食品**
+#      （7 条 = id 255 `127.0.0.1:8000`、259 `erp.91miaoshou.com`、268/269 `mercadolibre`、
+#        274 `bodegaaurrera`、277 `tripadvisor`、278 `amazon.com.mx`）
+#   ③ 标注实现 = **独立脚本**（默认 dry-run，`--apply` 才写库），不做成页面功能
+#
+# 改动
+#   core/db.py                  +QUERY_DELETE_MAX=500 + db_delete_customers_by_ids(ids)
+#                               （非正整数/布尔一律丢弃 → 去重 → 空就返回 (0, [])「不清库」门；
+#                                返回 (删除条数, 库里没找到的 id 列表)；SQL 全参数化）
+#   客户开发工具.py              +POST /api/db/delete：前端固定传 {'ids': [...]}（单行=长度1的数组，
+#                               两条路合一条），length > QUERY_DELETE_MAX 直接拒；
+#                               backup_db_before_delete() → db_delete_customers_by_ids() → log()
+#                               **全程不持 STATE_LOCK**（backup 内部的 log() 也抢那把非可重入锁）
+#   ui/query.html               表头加全选列 + 尾部空列；每行渲染 .row-ck(勾选) 与 .row-del(✕)，
+#                               都带 data-id；工具条加「🗑️ 删除选中 (N)」+ 说明；
+#                               新增 selectedIds / syncSel / toggleAll / onResBodyClick / deleteRows；
+#                               删除事件**委托到 #resBody**（行是 innerHTML 整表重画的）；
+#                               样式（.res-ck/.row-del/.btn-del/.sel-note）只进本页第二个 <style>
+#   标注空行业.py               ★新建★（150 行，仿 重标行业.py）：默认 dry-run 打印将改的 id 清单；
+#                               `--apply` 写库（写前 sqlite 在线 backup 到 DB/客户库.sqlite3.bak_*）；
+#                               `--industry`（默认 食品）/ `--exclude-id`；
+#                               判定用 `IFNULL(TRIM(industry),'')=''`，并把与查询页「未标注」分面
+#                               （不 TRIM）的口径差异单独报出来
+#   测试三处同步
+#     .workbuddy/_smoke_query.py   10 组 126 项 → **11 组 168 项**（新增 ⑪ 删除段）
+#     .workbuddy/_check_query_ui.py A–G → **A–H**，并修正两处 nth-child 下标
+#                                  （勾选列插到最前 → 公司列 2→3、序号列 1→2）
+#     .workbuddy/_check_page.py    R9 补删除断言（含 **AST 断言**：按主键删 / 删前备份 / 不出现 STATE_LOCK）
+#     .workbuddy/_smoke_annotate.py ★新建★ 33 项（打桩临时库；每次重新加载脚本改写模块级常量，
+#                                 否则 --apply 会直接写真实库）+ `_run_all_reg.py` 22 → **23 项**
+#   文档同步 AI_PROJECT_CONTEXT.md（§2/§3 M13/§5/§6.6/§7/§8/§9.2/附录）、memory/MEMORY.md、
+#            记忆日志 memory/2026-10-02.md
+#
+# ⚠️⚠️ 本轮踩到的一个「假绿」陷阱（写下来别再犯）：
+#   R9 最初用**源码子串**判断删除接口里有 `STATE_LOCK` → 因为我在 docstring 里写了
+#   「本链路全程**不持 STATE_LOCK**」这句说明，断言直接把文档当代码，红了一次；
+#   反过来同样危险：若用子串判断「有没有调 backup_db_before_delete」，把调用删掉但注释留着
+#   就会被漏掉。→ 结论：这类断言必须 **AST 只取标识符**（Name/Attribute），不看注释与字符串。
+#
+# 验证
+#   _smoke_query.py        168 项全通过（EXIT=0）
+#   _check_query_ui.py     真机 A–H 全通过（EXIT=0），截图 .workbuddy/_query_ui.png（150521 bytes）
+#   _check_page.py         R1–R9 全绿
+#   _smoke_annotate.py     **33 项全通过**（EXIT=0；含「--apply 退出码 0」那条 row_factory 回归）
+#   _run_all_reg.py        **23 项全 EXIT=0，76.1s**
+#   `标注空行业.py` 已 **--apply 实跑**（见下）
+#
+# 真实数据修复（用户授权「都替我做完」，已执行）
+#   ① 删 7 条垃圾（白名单校验：id 255/259/268/269/274/277/278，均空行业 + 域名对得上）
+#      → 备份 DB/backups/客户库_删除前_20261002_083924.sqlite3（184320 bytes）
+#      → db_delete_customers_by_ids([...]) = deleted 7 / missing []；310 → **303**
+#   ② `python 标注空行业.py --apply` → 备份 DB/客户库.sqlite3.bak_标注空行业_20261002_083932
+#      → 17/17 全部标成「食品」，行业为空 24 → **0**
+#   （顺序不可反：脚本按「行业为空」取数，先标了就分不出哪 7 条是垃圾。）
+#
+# 真实客户库复核（修复后终态）
+#   **303 条**（谷歌搜索 214 / **手动采集 82** / 谷歌地图 7）、有邮箱 200 / 有电话 99 / 有联系页 36、
+#   website_key 错位 0、测试域名残留 0、行业为空 **0**、评分&评级为空各 8 条。
+#   行业分布：食品 197 / 宠物用品 67 / 家具家居 18 / 户外用品 10 / 汽配 5 / LED照明 5 / 机械零部件 1。
+#   output/ 根 22 份 xlsx；output/查询导出/ 空；DB/backups/ **7 份**（无测试垃圾 —— `_backups_dir()` 由
+#   db_path() 推导，两个测试脚本都打了桩，备份自动落临时目录）；另有 DB/客户库.sqlite3.bak_标注空
+#   行业_20261002_083932 1 份落在 DB 根（脚本设计如此）。
+#
+# ⚠️ 交付时必须说的
+#   1) **重启工具**才看得到新列的删除入口（QUERY_HTML 是 import 期构建一次）。
+#   2) 那 7 条垃圾 + 17 条标注**已替你做完**，备份文件名见上；后悔可整库回滚到任一备份。
+#   3) 飞书「客户信息」表的「行业」选项需人工确认含「食品」（脚本只改本地库）。
+#   4) /db 上的删除入口是留给以后用的：勾选 → 「🗑️ 删除选中」（二次确认 + 删前自动备份）。
+
+# ============ 第六轮（2026-10-02）：删除确认弹窗改成本页的居中模态框 ============
+# 用户需求（原话 + 截图）：「删除弹窝确认，移动屏幕中间。现在放在顶部不方便」
+#   截图里是浏览器**原生 confirm**（标题「127.0.0.1:5000 显示」）—— 它的位置和样式都由浏览器
+#   决定，改不了 → 只能换成页面自己的模态框。
+#
+# 改动
+#   ui/query.html            本页第二个 <style> 加 #delModal（fixed 全屏遮罩 rgba(32,38,45,.42) +
+#                            flex 居中卡片 max-width 440px + m-pop 140ms 入场动画）、.btn-plain /
+#                            .btn-danger；
+#                            弹窗 HTML 放在 `</div>`（wrap 结束）与 `<script>` **之间**；
+#                            新增 askDeleteConfirm(label)→Promise / closeDeleteConfirm(ok)；
+#                            deleteRows 改 `if (!(await askDeleteConfirm(label))) return;`；
+#                            init 里绑 取消 / 确定 / 点遮罩 / Esc / Enter
+#   _check_query_ui.py       H 段重写：+modal_open() / wait_modal(want, desc='删除确认模态框')；
+#                            H1 断言模态框 fixed+居中+卡片中心落视口正中 ±2px、文案含「不可撤销」；
+#                            H1b 新增「Esc 等价于取消」；H2/H4/H5 改成点 #delModalOk
+#   _check_page.py           R9 +12 个模态框标识 + 断言 `confirm(` 在整页里为 0
+#   文档                     AI_PROJECT_CONTEXT.md / memory/MEMORY.md / memory/2026-10-02.md / 本文件
+#
+# ⚠️ 本轮踩到的坑（第一个尤其值得记）
+#   1) **弹窗 HTML 一开始放在 `</script>` 之后 → 整个查询页「异步区空白」**：
+#      `_check_query_ui.py` B 段红 —— 「筛选面板没渲染出来：期望 4，实际 0」，但标题/卡片/样式
+#      全正常、也无任何报错弹窗。原因：/db 的 `<script>` 是**立即执行的 IIFE**，解析到那一刻
+#      就 getElementById('delModalCancel').addEventListener(...) → 节点还没解析出来拿到 null →
+#      抛 TypeError → init() 在这里中断，后面的 `await loadFacets()` 根本没跑。
+#      → **别往接口/后端方向查，先看 DOM 顺序。**
+#   2) 居中位置在弹出**瞬间**量会量到动画起始帧（translateY(8px)）→ 断言红。修法：wait_modal
+#      之后 sleep 0.25s 等 m-pop 动画落定再量。
+#   3) 顺带一处自找的假红：R9 新增的 `assert 'confirm(' not in QUERY_HTML`，被我自己写在
+#      CSS/JS 注释里的「原生 confirm() 的位置…」命中 → 注释改成不带括号（同「静态断言要看代码
+#      不是源码文本」的同一课，只是这次方向反过来）。
+#
+# 验证
+#   _check_query_ui.py  真机 A–H 全通过；模态框实测 [top=275,left=406,w=440,h=224] vs 视口 1251×774
+#                       → 中心 (626,387) ≈ 视口中心 (625.5,387)，正好居中
+#   _check_page.py      R1–R9 全绿
+#   _run_all_reg.py     **23 项全 EXIT=0，129.6s**
+#   另存实物截图 .workbuddy/_del_modal.png（123282 bytes，1280×860 视口）
+#
+# ✅ 遗留已结清（2026-10-02 用户拍板）：`ui/manual.html`（约第 408 行）那处原生 confirm
+#   **保留不改**（别主动去动，改它要同步 _check_manual_ui.py + R7）；同期被用户自己删掉的
+#   DB/backups/ 旧备份与 关键词库.json.bak* **不是 bug、不恢复、不排查**。
