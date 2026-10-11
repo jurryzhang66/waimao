@@ -22,12 +22,21 @@ _PAGE_TEMPLATE_PATH = os.path.join(_app_dir(), 'ui', 'page.html')
 _MANUAL_TEMPLATE_PATH = os.path.join(_app_dir(), 'ui', 'manual.html')
 # 第三个页面（客户库查询）的模板：<项目根>/ui/query.html
 _QUERY_TEMPLATE_PATH = os.path.join(_app_dir(), 'ui', 'query.html')
+# 「本轮明细」共享组件（主页「📥 本轮已入库明细（实时）」与 /manual「③ 本轮采集明细」共用）：
+# <项目根>/ui/live-table.js
+# ⚠️ 它和上面的 <style> 注入是**同一套思路、不同来源**：样式从 page.html 里抽，因为样式本来就
+#    该住在页面模板里；而这个组件不专属于任何一个消费方，所以独立成文件。
+_LIVE_TABLE_JS_PATH = os.path.join(_app_dir(), 'ui', 'live-table.js')
 # 从 page.html 里抽 <style>…</style> 注入副页面 —— 多页共用一份 CSS，样式只维护一处。
 # ⚠️ 这也意味着往 page.html 的 <style> 里加规则会**连带影响** /manual 与 /db 两页；
 #    副页面自己专有的样式请写进它们自带的第二个 <style>。
 #    （page.html 自身另有 _check_page.py R5 的 sha256 基线：故意改它要同步重算基线。）
 _STYLE_RE = re.compile(r'<style>(.*?)</style>', re.S)
 PAGE_CSS_PLACEHOLDER = 'PAGE_CSS_PLACEHOLDER'
+# 「本轮明细」共享组件的占位符：模板里写成 <script>LIVE_TABLE_JS_PLACEHOLDER</script>，
+# 构建时整段替换成 ui/live-table.js 的正文。⚠️ 只注入 / 与 /manual 两页 —— /db 用不上它，
+# 也就没有这个占位符，别顺手给 query 也加上（_inject_live_table_js 会因缺占位符直接报错）。
+LIVE_TABLE_JS_PLACEHOLDER = 'LIVE_TABLE_JS_PLACEHOLDER'
 
 
 def _read_page_template():
@@ -75,6 +84,30 @@ def _inject_page_style(html, path, name):
     return html.replace(PAGE_CSS_PLACEHOLDER, _page_style())
 
 
+def _read_live_table_js():
+    """读「本轮明细」共享组件 ui/live-table.js。缺文件时同样抛带绝对路径的错误。"""
+    try:
+        with open(_LIVE_TABLE_JS_PATH, encoding='utf-8') as f:
+            return f.read()
+    except OSError as e:
+        raise RuntimeError(
+            '「本轮明细」共享组件读取失败：{}\n原因：{}\n'
+            '（ui/live-table.js 随程序一起分发，请确认它没被删除或改名）'.format(
+                _LIVE_TABLE_JS_PATH, e)) from e
+
+
+def _inject_live_table_js(html, path, name):
+    """把 ui/live-table.js 注入页面模板的 LIVE_TABLE_JS_PLACEHOLDER 位置。
+
+    ⚠️ 模板里占位符**自带** <script> 标签，替换进去的是组件正文；它必须排在
+       各页自己的 <script> 之前 —— 两页的脚本会立刻调 makeLiveTable 建实例。
+    """
+    if LIVE_TABLE_JS_PLACEHOLDER not in html:
+        raise RuntimeError(f'{path} 里没有 {LIVE_TABLE_JS_PLACEHOLDER} 占位符，'
+                           f'{name}的「本轮明细」组件无法注入（模板是不是被改坏了？）')
+    return html.replace(LIVE_TABLE_JS_PLACEHOLDER, _read_live_table_js())
+
+
 # 填充页面里的条件和国家（用 Python 注入，避免 JS 里写中文 JSON 出问题）
 def _build_page():
     # (key, 名称, 是否默认勾选, {语言: 公式模板}) —— 模板给前端做「关键词组合预览」，
@@ -110,6 +143,9 @@ def _build_page():
     html = html.replace('MAPS_CENTERS_PLACEHOLDER', _json.dumps(centers_js))
     html = html.replace('MAPS_ROLES_PLACEHOLDER', _json.dumps(roles_js, ensure_ascii=False))
     html = html.replace('COUNTRY_LIMITS_PLACEHOLDER', _json.dumps(limits_js))
+    # 「本轮明细」共享组件（ui/live-table.js）—— 与 /manual 用的是同一份，两页的表格行为
+    # 由此保持同步（原来两份各自实现，修在一边传不到另一边）。
+    html = _inject_live_table_js(html, _PAGE_TEMPLATE_PATH, '自动搜索主页')
     return html
 
 
@@ -123,8 +159,13 @@ def _read_manual_template():
 
 
 def _build_manual_page():
-    """构建手动采集页：把 page.html 的 <style> 整块注入，样式只维护一份。"""
-    return _inject_page_style(_read_manual_template(), _MANUAL_TEMPLATE_PATH, '手动采集页')
+    """构建手动采集页：把 page.html 的 <style> 整块注入，样式只维护一份。
+
+    「本轮明细」共享组件也一并注入（与主页是同一份 ui/live-table.js）——
+    ⚠️ 两页的表格能保持一致，全靠这一行；漏了它这个页面会直接缺 makeLiveTable 而报错。
+    """
+    html = _inject_page_style(_read_manual_template(), _MANUAL_TEMPLATE_PATH, '手动采集页')
+    return _inject_live_table_js(html, _MANUAL_TEMPLATE_PATH, '手动采集页')
 
 
 # ⚠️ 同样必须放文件最后：_build_manual_page() 依赖 _read_manual_template 与 page.html 的样式块

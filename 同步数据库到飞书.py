@@ -126,7 +126,7 @@ def build_record(row):
     rec = {'公司名称': row.get('company_name') or '', '官网': row.get('website') or ''}
     if row.get('phone'):
         rec['电话'] = row['phone']
-    emails = [m.strip() for m in (row.get('email') or '').split(' / ') if EMAIL_OK.match(m.strip())]
+    emails = [m.strip() for m in re.split(r'\s*[,/]\s*', row.get('email') or '') if EMAIL_OK.match(m.strip())]
     if emails:
         rec['邮箱'] = emails[0]   # 飞书「邮箱」字段只接受单个邮箱，其余写入备注
     if row.get('search_formula'):
@@ -142,7 +142,7 @@ def build_record(row):
     if isinstance(row.get('score'), int):
         note = '脚本评分%d分（%s），待人工核实' % (row['score'], row.get('rating') or '未评级')
         if len(emails) > 1:
-            note += '；其他邮箱：' + ' / '.join(emails[1:])
+            note += '；其他邮箱：' + ', '.join(emails[1:])
     else:
         note = '未评分（来自谷歌搜索），待人工核实'
     if row.get('notes'):

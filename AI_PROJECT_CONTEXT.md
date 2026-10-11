@@ -53,8 +53,9 @@
 - 有 **23 项自动化回归**（`.workbuddy/_run_all_reg.py`），改代码后必须全绿。
 - 真实客户库已积累 **303 条**（有邮箱 200 / 有电话 99），用户在日常使用中（数字一直在涨）。
 - 代码已提交并推送到 GitHub：`https://github.com/jurryzhang66/waimao`（**public**，用户知情同意，见 §6.9 风险提示）。
-- **未提交的工作区改动**：最近六轮（计数口径拆分 + 去重键不变量；客户库查询页 `/db`；扩展面板入口；主页顶栏导航；`/db` 结果删除 + 行业为空批量标注脚本；**删除确认改居中模态框**）尚未 commit。
-  ⚠️ `git status` 里会看到若干 `D`（`DB/backups/` 的旧备份 + `关键词库.json.bak*` + `客户库.sqlite3.bak_*`）：**是用户自己清理的，不是 bug、不用恢复**（用户 2026-10-02 确认）。提交 V1.5 时用 `git add -A` 让这些删除自然一并进去即可，**不必单独为它做任何事**。
+- **未提交的工作区改动**：**M16（主页实时明细逐行删除）+ M17（采集数量强必填）+ M18（「本轮明细」共享组件）三轮都还没 commit**。此前八轮已由**用户自己**以「备份1」`f69f1af`（轻量标签 `v1.5`）与「备份2」`d332048`（`v1.5.1`）提交；`v1.5.1` 已含 M14 + M15 + 首页顶栏导航。
+  ⚠️ 用户打的是**轻量标签**（`v1.5` / `v1.5.1`），不是 `V1.x` 那种 `-a -m` 附注标签 → 查「某轮落在哪个提交」用 `git tag -l` + `git for-each-ref refs/tags`，**别只认大写 `V1.x`**。
+  ⚠️ `git status` 里若看到若干 `D`（`DB/backups/` 的旧备份 + `关键词库.json.bak*` + `客户库.sqlite3.bak_*`）：**是用户自己清理的，不是 bug、不用恢复**（用户 2026-10-02 确认）。提交时用 `git add -A` 让这些删除自然一并进去即可，**不必单独为它做任何事**。
 
 ---
 
@@ -75,9 +76,10 @@ D:\waimao\dp\
 │   ├── db.py                  SQLite：建表 / 去重键 / upsert / 统计 / 键修复 / 删除+备份 / **分页查询+分面统计**
 │   └── ui.py                  页面模板加载与占位符注入（构建 PAGE_HTML / MANUAL_HTML / QUERY_HTML）
 ├── ui/
-│   ├── page.html            ★ 主界面模板（651 行，含顶栏导航）。**sha256 有基线（R5），故意改要同步重算**
-│   ├── manual.html          ★ 手动采集页模板（426 行），复用 page.html 的 <style> 块
-│   └── query.html           ★ 客户库查询页模板，同样复用 page.html 的 <style> 块
+│   ├── page.html            ★ 主界面模板（819 行，含顶栏导航）。**sha256 有基线（R5），故意改要同步重算**
+│   ├── manual.html          ★ 手动采集页模板（395 行），复用 page.html 的 <style> 块
+│   ├── query.html           ★ 客户库查询页模板（571 行），同样复用 page.html 的 <style> 块
+│   └── live-table.js        ★ 「本轮明细」共享组件（254 行，见 M18）：主页与 /manual 的同一张表 + 同一个居中确认框
 ├── extension/               ★ Chrome MV3 扩展（「外贸客户采集助手」）
 │   ├── manifest.json          权限仅 activeTab/scripting/contextMenus/storage
 │   ├── background.js        ★ Service Worker：**全扩展唯一 fetch 出口** + 消息路由
@@ -183,7 +185,7 @@ D:\waimao\dp\
 - **核心文件**：`客户开发工具.py`
 - **实现方法**：
   - `enrich(page, url)`：`page.new_tab()` 开临时标签 → `tab.html` 跑正则 → 没邮箱就试 `CONTACT_PATHS` 前两个 → 收尾关标签。**必须**用 `_back_to_search(page, tab_id)` 切回搜索主标签，否则下一步导航会落到客户站。
-  - `clean_emails` 过滤噪声域（wixpress/shopify/schema.org…），每站最多留 3 个。
+  - `clean_emails` 过滤三类误报：① 文件扩展名被当成 TLD（srcset 里的 `xxx_1512x@2x.png`）② 埋点/第三方宿主（`sentry.io`、`jsdelivr.net`…）③ 32 位 hex 的 local part。判据集中在 `_is_noise_email()`，每站最多留 3 个。
   - `score_item`：邮箱 +30 / 电话 +15 / 联系页 +10 / 客户身份词（`CTYPE_WORDS`）+25 / 产品词 +10 / 非博客页 +10，满分 90。
   - `rating`：≥70 重点客户，≥50 普通客户，否则观察。
   - `enrich_core`：批处理历史欠账，入口是 CLI `补历史欠账.py`。
@@ -212,20 +214,28 @@ D:\waimao\dp\
     ① 秒级 —— 扩展送来的当前页 HTML 直接跑正则（不开浏览器）
     ② 联系页 —— `requests` 抓页面自带的 contact 链接（找不到才按 `CONTACT_PATHS` 猜）
     ③ 升级 —— 开 Chromium 跑完整 `enrich()`（3–10s，含 JS 渲染与反爬绕过）
-  - 收尾统一走 `_commit_candidate()`（评分 → `db_upsert_customer` → 返回 11 键行）。
-  - **采集即落库**：`_commit_candidate` 当场写 SQLite；「本轮明细」只是内存清单，决定 Excel 有哪些行。
+  - 收尾统一走 `_manual_row()`（评分 → 返回 11 键行，**不写库**）。
+  - ⛔ **入库时机 = 点「🏁 结束并生成 Excel」那一刻（2026-10-11 改）**：采集时**一行都不写** SQLite，
+    采到的行只活在内存 `MANUAL_STATE['session_rows']` 里；`_flush_manual_session()` 里**先 `db_upsert_customer`
+    逐条入库、成功后才写结果 Excel**（保证「表里有的库里都有」）。动机：把国家/行业填错的那一轮可以直接
+    丢掉，不会提前污染客户库。代价（用户拍板接受）：没点「结束」就关掉工具，这一轮明细就没了。
+    ⚠️ `run_search` / `run_maps`（自动那两条链路）**没改**，仍是「边采边落库」。
   - **本轮会话语义**：`session_active / session_rid_seq / session_rows / added / existed / failed / upgraded`。点「开始本轮」开轮；**扩展单点若本轮未开，自动替用户开轮**（`_ensure_manual_session`）；口径（行业/国家）只在开轮那一刻记下。
-  - 结束：`_flush_manual_session()` → `_save_enrich_excel()` **新建**一份结果文件并成为「最新结果文件」；**空轮不落盘**；**失败保留数据**可一键重试。
+  - 结束：`_flush_manual_session()` → **先入库、再** `_save_enrich_excel()` **新建**一份结果文件并成为「最新结果文件」；**空轮不落库不落盘**；**失败保留数据**可一键重试（入库用 upsert，重试幂等）。
   - 批量任务（`/api/manual/batch`）是**本轮内的一个可选子过程**，单线程串行；批量还在跑时点「结束」只置挂起标志，由 worker 的 `finally` 收尾落盘。
-  - **逐行删除**（✕）：`POST /api/manual/session/delete`，按 `rid` 定位，**明细 + 客户库双删**，删前自动备份。
+  - **逐行删除**（✕）：`POST /api/manual/session/delete`，按 `rid` 定位。**默认只删内存明细、不碰库**（本轮的行还没入库；灰字行更是别人的老客户）。唯一例外：`kind='added'` **且** `db_has_customer(url)` 为真（来源＝「已入库但结果 Excel 没写成功」那种保留行）→ 这时才走 `_delete_customer_and_backup()` 连库一起删。
+  - **本轮内去重**：`_session_has_url(url)` 按 `normalize_domain` 比 `session_rows` 里 kind='added' 的行 —— 因为本轮采的还没入库，`db_has_customer()` 看不见它们（踩过：同一个站在一份表里出现 3 次）。
 - **与其他模块的关系**：喂给 M6（客户库）、M7（结果 Excel）、M8（飞书）；被 M5（扩展）调用。
 - **依赖**：Flask、`requests`、DrissionPage（第③级）、`core/state.MANUAL_STATE`
-- **是否可复用**：✅ 高 —— 「三级抓取」的降级策略、「本轮会话」的攒批+一次性落盘模式、「删除双删+删前备份」的骨架都可复用。
+- **是否可复用**：✅ 高 —— 「三级抓取」的降级策略、「本轮会话」的攒批+一次性落盘模式、「按需删库+删前备份」的骨架都可复用。
 - **当前完成状态**：✅ 已投产（最活跃的一路，库内 69 条手动采集）
 - **修改时注意**（本节是全项目坑最密的地方）：
   - ⚠️⚠️ **`log()` 内部会抢 `STATE_LOCK`（非可重入）→ 任何 `log` 必须在 `with STATE_LOCK` 块外调；DB 与文件 IO 一律锁外**。历史踩过 2 次死锁。删除路由的骨架就是这条纪律的样板（①锁内定位 ②锁外备份+删库 ③锁内改内存 ④锁外 log）。
-  - ⚠️⚠️ **「已采 N 条」≠「结果 Excel 行数」**：明细行数 = 新增 + 已在库（老客户也留一行灰字痕），而 Excel **只写新增**。三处 UI 都必须把两个口径一起报出来（`已采 17 条 · 新增 13 · 已在库 4`）。这是用户明确反馈过的问题。
-  - ⚠️ 删除必须**双删**：只删明细是假删除（库里那条还在 → 下次采到同站判「已在客户库」跳过 → 永远采不回来 → 飞书仍带它）。
+  - ⚠️⚠️ **UI 必须报两组数：「有效数」/「采集总数」**。有效数 = 新增（＝真正入库、＝结果 Excel 行数）；采集总数 = 明细行数 = 新增 + 已在库（老客户也留一行灰字痕）；**Excel 只写新增**。扩展面板与 `/manual` 的徽章/状态行按 `有效 13 / 采集总数 17 · 已在库 4` 报（`liveBadgeText()` / `breakdownText()`，见 **M19**）。2026-10-10 用户点名：老写法只报一个「已采 N 条」＝总数，会把重复条目也当成成功数。
+  - ⚠️ 删除**不再是无条件双删**（2026-10-11 改）：手动链路本轮的行还没入库，删它只动内存明细；
+    只有「已入库但 Excel 没写成功」的保留行才连库一起删（判据 `kind='added' and db_has_customer(url)`）。
+    灰字 `kind='existed'` 行**永远不碰库**。⚠️ 但「Excel 里有的，库里必须都有」这条不变量仍要守住 ——
+    所以入库排在写表之前，且被删的行既不入库也不进 Excel。
   - ⚠️ 删除按 **`rid`** 定位，不能按 url（同一 url 在一轮里可能既有 `added` 又有 `existed`）。
   - ⚠️ `MANUAL_STATE` 是**独立状态**，绝不复用 `STATE['stop']`（会把自动搜索一起杀掉）。
   - ⚠️ `MAX_CONTENT_LENGTH = 2MB`（扩展会送整页 HTML）。
@@ -299,6 +309,11 @@ D:\waimao\dp\
 - **当前完成状态**：✅ 已投产（`output/` 20 份）
 - **修改时注意**：
   - ⛔ **10 列硬契约**（顺序与列名一个都不能改）：`公司/页面标题, 网站网址, 邮箱, 电话, 联系页, 评分, 评级, 摘要, 搜索公式, 国家`。飞书导出（`build_feishu_records`）与空库迁移（`init_customer_db`）都按**下标**读。
+  - ⛔ **多值分隔符**：「邮箱」列用**逗号**（`EMAIL_SEP = ', '`），「电话」列仍用 `' / '`（用户明确保留，两者刻意不同）。
+    这个分隔符在**写**（`_row10` / `_save_enrich_excel` / 写库 email 字段 / 实时明细 JSON）与**读**（`split_emails()` / `同步数据库到飞书.py` / `gen_import.py`）两侧**必须一起改** ——
+    飞书导出是**从结果 Excel 读回再拆**的，只改写侧会让 `EMAIL_OK` 对整串失配 → **邮箱整列静默丢光**。
+    `split_emails()` 用 `re.split(r'\s*[,/]\s*')` 兼容新旧两种分隔符，所以 2026-10-11 之前的存量数据仍读得出来
+    （库内 73 条多邮箱记录已于当天刷成逗号）。守卫：`_check_live_ui.py`（页面 DOM）、`_check_feishu_records.py` ⑤（写侧 + 旧斜杠读回）、`_smoke_ext_popup.js`（插件明细）。
   - ⚠️ `paths.ENRICH_FILE` 是**全项目唯一会被重新赋值的模块级变量** → 内部一律写 `paths.ENRICH_FILE`，对外靠入口的 PEP 562 `__getattr__` 转发。
   - ⚠️ Excel 被用户打开着会 `PermissionError` → 已有退避重试 + 另存新文件的降级路径，别简化掉。
 
@@ -382,7 +397,10 @@ D:\waimao\dp\
 - **是否可复用**：⚠️ 中等 —— 「模板文件 + import 期注入占位符」的模式可复用；页面本身与本业务强绑定。
 - **当前完成状态**：✅ 已投产
 - **修改时注意**：
-  - ⚠️ **`ui/page.html` 的 sha256 被 `_check_page.py` R5 用两条基线守着**：`_TMPL_SHA`（模板文本，当前 `f90082ea…`）+ `_BUILT_SHA`（`_build_page()` 结果）。**故意改主页必须同步重算这两条**（V1.5 加顶栏导航时重算过一次）；它的价值是「误格式化/误翻译把转义改变形时立刻抓到」。副页面专有的样式写进 `ui/manual.html` / `ui/query.html` 自带的第二个 `<style>` —— 混进 page.html 那份会连带影响三页。
+  - ⚠️ **`ui/page.html` 的 sha256 被 `_check_page.py` R5 用两条基线守着**：`_TMPL_SHA`（模板文本）+ `_BUILT_SHA`（`_build_page()` 结果）。**故意改主页必须同步重算这两条**（已重算过多次：顶栏导航 / M14 / M15 / M16 / M17 各一次）—— ⛔ **别在本文件里写死 hash**，一律以 `_check_page.py` 顶部的常量为准。它的价值是「误格式化 / 误翻译把转义改变形时立刻抓到」。副页面专有的样式写进 `ui/manual.html` / `ui/query.html` 自带的第二个 `<style>` —— 混进 page.html 那份会连带影响三页。
+  - 📌 **主页卡片顺序（`ui/page.html`，编号硬编码在 `<h3>` 文字里，没有 CSS 计数器 / `<ol>`）**：
+    `1. 本次任务采集数量`(M17) → `2. 目标国家` → `📋 产品关键词库`（**刻意无编号**）→ `.grid` 内 `3. 产品关键词` / `4. 搜索条件` / `5. 参数` / `6. 关键词组合预览` → `7. 自定义搜索词`(`#rawCard`) → `.btn-row` → `📥 本轮已入库明细`。
+    ⛔ **插卡/挪卡必须整轮重排编号**，并同步改这些**用户可见**的提示语：`start()` 的两条 alert（「或在第 7 步填一条自定义搜索词」）、组合预览里的占位（「请先填写「3. 产品关键词」，并至少勾选一个「4. 搜索条件」」）、`#rawCard` 的说明（「上面第 4 步勾选的条件」/「目标国家（第 2 步）」）。漏改**不报任何错**，只是提示语指到错的步骤 —— `_check_page.py` R13 与 `_check_live_ui.py` G 段一起守着。
   - ⚠️ 改 `ui/*.html` 后**必须重启工具**（import 期构建）。
   - ⚠️ `MANUAL_HTML` / `QUERY_HTML` / `PAGE_HTML` 是模块级常量，不在函数里构建。
   - ✅ 首页顶栏有 `.nav` 导航（V1.5 加）：`📝 手动采集页` → `/manual`、`📊 客户库查询` → `/db`。R6 有断言守着这两个 `href` —— ⚠️ href 写错或被人删掉**不会有任何运行时报错**，只会静默少一个入口。
@@ -444,7 +462,7 @@ D:\waimao\dp\
 
 ### M14. 自定义搜索词（完全原样搜索）
 
-- **功能作用**：主页第 6 卡。用户自己写完整谷歌查询（一行一条），**原样**发出去 —— 不套条件模板、不自动加英文双引号、不自动拼产品词、不拼排除词、不做中国商家过滤。用于标准模式覆盖不到的长尾查询（例如手写 `-site:.cn`、`OR`、`(...)`、指定城市名）。
+- **功能作用**：主页第 7 卡。用户自己写完整谷歌查询（一行一条），**原样**发出去 —— 不套条件模板、不自动加英文双引号、不自动拼产品词、不拼排除词、不做中国商家过滤。用于标准模式覆盖不到的长尾查询（例如手写 `-site:.cn`、`OR`、`(...)`、指定城市名）。
 - **所在位置**：`ui/page.html` 的 `#rawCard` / `#rawQueries`（卡片 + `rawQueries()` + `renderCombos()` 分支 + `start()` 校验 + `onSource()` 置灰）；后端 `客户开发工具.py` 的 `api_start`（读 `custom_queries`、`RAW_QUERY_MAX = 20`）与 `run_search(..., raw_queries=None)`。
 - **核心文件**：`ui/page.html`、`客户开发工具.py`
 - **实现方法**：
@@ -472,7 +490,7 @@ D:\waimao\dp\
 
 ### M15. 国家限定（可选，默认关）
 
-- **功能作用**：主页第 4 步「参数」卡里的**四选一**（`none` / `cr` / `site` / `both`），在现有 `&gl=&hl=`（软偏好，不排除任何页面）之外，再叠一层更强的国家限定。**默认 `none`，行为与旧版一字不差**；只对「谷歌网页搜索」的**标准模式**生效。
+- **功能作用**：主页第 5 步「参数」卡里的**四选一**（`none` / `cr` / `site` / `both`），在现有 `&gl=&hl=`（软偏好，不排除任何页面）之外，再叠一层更强的国家限定。**默认 `none`，行为与旧版一字不差**；只对「谷歌网页搜索」的**标准模式**生效。
 - **所在位置**：`core/config.py`（`COUNTRY_LIMITS` / `COUNTRY_LIMIT_MODES` / `COUNTRY_LIMIT_DEFAULT`）、`core/ui.py`（注 `COUNTRY_LIMITS_PLACEHOLDER`）、`ui/page.html`（`#countryLimit` 四选一 + `countryLimit()` / `effectiveLimit()` / `siteTerm()` / `countryParams()` / `renderCombos()`）、`客户开发工具.py`（`run_search(country_limit=)` 与 `api_start` 透传）。
 - **核心文件**：`core/config.py`、`ui/page.html`、`客户开发工具.py`
 - **实现方法**：
@@ -494,6 +512,75 @@ D:\waimao\dp\
 
 ---
 
+### M16. 首页「本轮已入库明细（实时）」逐行删除
+
+- **功能作用**：主页 `/` 的「📥 本轮已入库明细（实时）」表**每一行加一个 ✕**（与 `/manual` 的「③ 本轮采集明细」体验一致），把不需要的那一条就地删掉 —— 同时从**客户库**和**本轮结果**里拿掉。**只在采集中（`running and phase=='search'`）可点**；采集结束 / 导出期 ✕ 自动置灰并提示去 `/db` 清理。确认走页面自己的**居中模态框**（不用原生 `confirm`）。
+- **所在位置**：`ui/page.html`（`.live-wrap` 表格的 9 列表头 + 一行 `<script>LIVE_TABLE_JS_PLACEHOLDER</script>` + 薄封装 `renderRows` / `syncLiveEditable` / `onLiveBodyClick` / `deleteLiveRow`）；**表格与居中模态框本体已搬进共享组件 `ui/live-table.js`（见 M18）**；后端 `客户开发工具.py` 的 `POST /api/live/delete`（`api_live_delete`）+ 共用 `_delete_customer_and_backup()`；`core/state.py` 的 `STATE['rows_deleted']`；两个 worker（`run_search` / `run_maps`）的 `finally` 落盘前过滤。
+- **核心文件**：`ui/page.html`、`客户开发工具.py`、`core/state.py`
+- **实现方法**：
+  1. **墓碑而非直接改 `rows`**：结果 Excel 是在 worker 的 `finally` 里用**它自己的局部 `all_rows`**写出的（与 `STATE['rows']` 不是同一个列表，但两者下标对齐）→ 只删 `STATE['rows']` 是**假删除**（那条仍进 Excel / 飞书）。所以删除时往 `STATE['rows_deleted']` 记一笔（该行的 `n`），worker 落盘前 `results = [r for i, r in enumerate(all_rows, 1) if i not in dead]`。**没人删过时这个过滤是恒等的**（对既有测试零影响）。
+  2. **`n` 是稳定键**：行号 `n = len(all_rows)`（1 起、本轮内单调递增、不复用），前端 ✕ 带 `data-n`，后端按 `n` 定位。
+  3. **四段式锁纪律**（见 §4.3）：①锁内校验 `running and phase=='search'` + 定位 `url` ②锁外 `backup_db_before_delete()` + `db_delete_customer(url)`（**两句已抽成共用 `_delete_customer_and_backup()`**，与 `/api/manual/session/delete` 同源）③锁内 `pop` 该行 + 记墓碑 + 重算 `result_count` ④锁外 `log()`。
+  4. **墓碑清零点**：`api_start` + 两个 worker 的开头都要 `STATE['rows_deleted'] = []`（防直调 worker 时跨轮串味 —— 上一轮的墓碑会误杀这一轮同号的行）。
+- **与其他模块的关系**：复用 M6 的 `backup_db_before_delete()` / `db_delete_customer()`（与 `/db` 删除同源），复用 M11 的轮询（`poll()` 里算 `liveEditable`）；产出影响 M7（结果 Excel 行数）与 M8（飞书）。
+- **依赖**：M6 的删除 + 备份件。
+- **是否可复用**：**「墓碑 + 落盘前过滤」**这个模式可复用（任何「运行中允许从 UI 摘掉一条、但真正的落盘发生在另一个局部列表里」的场景）。
+- **当前完成状态**：✅ 已投产（2026-10-02 新增，代码已改完 + 单测全绿，尚未 git commit）
+- **修改时注意**：
+  - ⛔ **必须有 `phase` 门禁**：导出飞书时 `STATE['running']` 仍是 `True` 但 `phase=='export'`，而 `STATE['rows']` 还留着**上一轮**的行 → 此时允许删会删掉「Excel 早已写好」的库行。只有 `running and phase=='search'` 才放行。
+  - ⛔ **`n` 必须防 bool**：`isinstance(True, int)` 为真 → `int(True)==1` 会**误删第一行** → 先 `if isinstance(raw, bool): raw = None`。
+  - ⛔ **共享样式命名**：`ui/page.html` 的第一段 `<style>` 会被注入 `/manual` `/db`（见 §6.2）→ 新选择器一律加 **`livedel-` 前缀**（`delModal` / `modal` / `btn-danger` / `row-del` / `live-del` 已被别处占用）。R12 有**负向断言**盯着这几个名字不许出现。
+  - ⚠️ **增量重画的失效判据**（**M18 起这段在 `ui/live-table.js::render()` 里**）：原先只在 `rows.length < renderedRows` 时清表重画 → 「删 1 条 + 加 1 条」净长度不变会**漏重画**（✕ 停在错行）→ 补一条 `rows[last][key] !== renderedTail`。`reset()` 里 `renderedTail` 必须与 `renderedRows` **一起**清零，否则新开始的一轮可能一直空白。
+  - ⚠️ **只删库 + 记墓碑，不动 `MANUAL_STATE` 的内存明细**：若同一轮里该站也在手动采集明细中，要另外去 `/manual` 点 ✕。
+  - ⚠️ **竞态窗口**：删库与「worker 落盘」之间有窗口；且**被删的不回填** → 最终 Excel 行数可能 < 目标条数，属预期。刷新页面（`/api/status` 轮询）期间也有短暂不一致。
+  - ⚠️ 改 `ui/page.html` 后**必须重启工具**，且**必须重算 R5 两条 sha256**。
+
+---
+
+### M17. 主页「1. 本次任务采集数量」（提为第 1 张卡 + 强必填）
+
+- **功能作用**：本轮最多新增多少个客户（10~100），三条采集链路（标准网页搜索 / 自定义搜索词 / 谷歌地图）共用。**强必填**：清空后点「开始搜索」被前端拦下、零请求。
+- **所在位置**：`ui/page.html`（`#targetCount` 卡 + `start()` 读值）；`客户开发工具.py::api_start`。
+- **修改时注意**：
+  - ⛔ 编号**硬编码在 `<h3>` 里**，插卡/挪卡要**整轮重排**，并同步三处用户可见提示语（`start()` 两条 alert、`#comboSummary` 占位、`#rawCard` 说明）。
+  - ⛔ 强必填 = **两道兜底一起删**：前端只许 `el.valueAsNumber`（不许 `|| '10'`）、后端只许 `data.get('target_count')`（不许第二个缺省值参数）。只删一边 = 假必填。R13（AST + 负向）与 `_check_live_ui.py` G 段真机守着。
+  - ⚠️ 输入框**仍预填 `value="10"`**（「清空就拦」才是必填的体现）；后端校验**刻意留在产品词校验之后**。
+- **当前完成状态**：✅ 已投产（2026-10-02，与 M16 同一批未 commit）。
+
+---
+
+### M18. 「本轮明细」共享组件（主页 + `/manual` 同一张表）
+
+- **功能作用**：主页「📥 本轮已入库明细（实时）」与 `/manual`「③ 本轮采集明细」的**表格渲染 + 逐行 ✕ 删除 + 居中确认框**合并成**一份实现**。两页表头**逐字一致**（9 列，含「行业 / 国家」），✕ 都弹同一个居中模态框（Esc/点遮罩=取消，Enter=确定）。
+- **所在位置**：`ui/live-table.js`（工厂 `makeLiveTable(cfg)`，全局只暴露这一个名字）；`core/ui.py` 的 `LIVE_TABLE_JS_PLACEHOLDER` + `_read_live_table_js()` + `_inject_live_table_js()`；两页模板各一行 `<script>LIVE_TABLE_JS_PLACEHOLDER</script>`。
+- **为什么要抽**：这两块原是两份近逐字重复的代码，**重复的真实代价已经发生过** —— 主页上一轮修的两处（末行判据、居中确认框）在 `/manual` 上一直没生效，而 `/manual` 的「行业 / 国家」两列主页也没有。
+- **两页的差异全部走 `cfg`**：`keyField`（主页 `n` / 手动 `rid`）、`endpoint`、`showExisted`（只有 `/manual` 渲染「已在客户库」痕迹行）、`badgeTitle`（→ `breakdownText`）、`canDelete()`、`editHint`/`readHint`、`afterRemove()`（`/manual` 删完重拉 `loadManualState()`，主页 `poll()`）。
+- **⛔ 五条硬约束**（文件头注释里也有）：
+  1. **闭包 + 只暴露 `makeLiveTable`**：跨 `<script>` 的顶层 `let/const` 与另一段 `<script>` 里的 `function` **重名 = `SyntaxError: Identifier 'X' has already been declared` → 整段脚本一个字符都不执行 → 症状是「页面控件全空白」**（极易误判成后端挂了）。两页要用的东西走薄封装。
+  2. `livedel-*` 类名与 `#liveDelModal` 是**共享**的（写在 `ui/page.html` 第一个 `<style>` 里，由 `PAGE_CSS_PLACEHOLDER` 注入三页）→ 一律硬编码在组件里；**注释里也别写** `/db` 或 `delModal`/`row-del`/`live-del` 那批字面量（R12 的负向断言按**子串**判，写上就假红，这个坑踩过两次）。
+  3. 模态框 DOM 由组件在**初始化时**建好（两页不再手写标记）→ 所以**组件必须先于各页自己的脚本执行**（模板里就是这么排的）。也顺带避开「JS 要取的节点必须在脚本之前」那个老坑。
+  4. **两张表的外部契约一个字都不能改**：轮询接口、删除接口路径、请求体的键、返回体字段名（`ok/deleted/rows/backup/msg`）都被回归脚本按名断言。
+  5. 改 `ui/live-table.js` 后**必须重启工具**（`PAGE_HTML`/`MANUAL_HTML`/`QUERY_HTML` 在 import 期构建一次）；旧实例打新路由是 404。
+- **回归怎么守**：`_check_page.py` R12 现在**同时**断言「同一份组件文本在 `PAGE_HTML` 与 `MANUAL_HTML` 里都出现」+「两页 `<thead>` 逐字相等」→ **只改一页立刻红**；`_check_live_ui.py` 按真实 DOM 断言 9 列与「行业/国家」两列的**数据**（只加表头不加单元格 = 空列，看不出来）；`_check_manual_ui.py` E 段改为「点 ✕ → 等居中模态框 → 点确定删除」。
+- **当前完成状态**：✅ 已投产（2026-10-03）；全量回归 23 项 EXIT=0；尚未 git commit。
+- **已知未做（拍板推迟到下一轮）**：主页**暂不**显示「已在客户库」痕迹行（`showExisted:false`）。要补的话不是前端改个开关就行：需要 ① `run_search`/`run_maps` 的跳过分支记 `{kind:'existed', …}` ② **另开一个 key 空间**（不能混进 `STATE['rows']`，否则 `n == len(all_rows)` 的对齐与墓碑全乱）③ `/api/live/delete` 的 `{n}` 契约放宽 ④ 重新定义 `result_count` 口径。
+
+---
+
+### M19. 「本轮明细」计数改报两组数（有效数 / 采集总数）
+
+- **功能作用**：扩展面板与 `/manual` 的「本轮采集明细」徽章、状态行**不再只报一个「已采 N 条」**（那＝总数，会把「已在客户库」的重复也当成成功数），改成同时报**两组数**：
+  - **有效数** ＝ 真正写进客户库、也写进结果 Excel 的新客户 ＝ `st.added`。
+  - **采集总数** ＝ 本轮明细行数 ＝ `session_rows.length` ＝ 新增 + 已在库。
+- **所在位置**：`ui/live-table.js`（新增可选 `cfg.badgeText(st, n)`，默认 `n + ' 条'` → 主页行为一字不变）；`ui/manual.html`（`liveBadgeText()` + `renderSessionStatus()` + `breakdownText()` + 徽章初始文案）；`extension/popup.js`（`renderSession` 的徽章 / 悬停 / 状态行）+ `popup.html` 徽章初始文案。**后端一行没动** —— `added`/`existed`/`session_rows` 本来就自洽，删除路由已按 `kind` 回退计数。
+- **⚠️ 为什么 `badgeText` 走 `cfg` 而不是硬编码**：共享组件同时服务主页（`showExisted:false`，只有新增 → 报「N 条」就够）与 `/manual`（`showExisted:true` → 要两组数）。硬编码会连主页一起改，而用户这次明确「只改扩展面板 + `/manual`」。`reset()` 也会调 `badgeText(null, 0)` → 回调**必须能在 `st` 为 `null` 时安全求值**。
+- **回归怎么守**：`_check_page.py` R7 逐字清单换成本次新文案 + `badgeText:` 那一行；`_check_manual_ui.py` E 段断言徽章 == `有效 2 / 共 3`、状态行含 `有效 2 · 采集总数 3 · 已在库 1`，并新增 `liveBadgeText(null, 0)` 纯函数断言；`_smoke_ext_popup.js` 四处徽章文案断言同步。
+- **⚠️ `_BUILT_SHA` 要重算、`_TMPL_SHA` 不用**：组件正文被注入构建结果 → 只有 `_BUILT_SHA` 变（`ui/page.html` 模板本身没动）。
+- **当前完成状态**：✅ 已投产（2026-10-10）；全量回归 23 项 EXIT=0；尚未 git commit（与 M16/M17/M18 同批）。
+- **已知未做**：主页「📥 本轮已入库明细（实时）」的徽章仍只报「N 条」—— 用户这次明确只要改扩展面板与 `/manual`；且主页那张表 `showExisted:false`，N 本来就是有效数，口径已经对齐。
+
+---
+
 ## 4. 核心实现方式
 
 > 只记「怎么实现」，不贴代码。
@@ -502,9 +589,9 @@ D:\waimao\dp\
 
 ```
                         ┌──────────────────────────────────────────┐
-  用户填表单            │  run_search（谷歌网页搜索）               │
-  ↓                    │   run_maps（谷歌地图名录）                │
-Flask /api/start ──────┤   collect_from_html（手动采集/扩展）       │
+  用户填表单            │  run_search（谷歌网页搜索） ★当场入库     │
+  ↓                    │   run_maps（谷歌地图名录）  ★当场入库     │
+Flask /api/start ──────┤   collect_from_html（手动采集/扩展）☆入库延后│
                        └──────────────┬───────────────────────────┘
                                       ↓ 逐条
                           score_item() 评分 / rating() 分级
@@ -518,9 +605,16 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
                        build_feishu_records() → import_records.json → lark-cli → 飞书
 ```
 
+> ★ 自动两条链路：`db_upsert_customer()` 就在「逐条」这一步。
+> ☆ 手动采集（2026-10-11 起）：这一步**不写库**，入库被推迟到「整轮结束」——
+>    `_flush_manual_session()` 先逐条 `db_upsert_customer()`，成功后才 `_save_enrich_excel()`。
+
 **关键点**：
-- 采集**当场**写 SQLite（`_commit_candidate`），Excel 是**整轮结束时**才落盘。
-- 手动采集的「本轮明细」只是内存清单，决定 Excel 有哪些行；Excel **只写新增**。
+- **手动采集（`collect_from_html`）**：`_manual_row()` **不写库**，只在内存攒 `session_rows`；
+  入库发生在用户点「🏁 结束并生成 Excel」时的 `_flush_manual_session()`（先 `db_upsert_customer` 再落 Excel）。
+  2026-10-11 改 —— 动机是「把国家/行业填错的那一轮可以直接丢掉，不污染客户库」。
+- **自动两条链路（`run_search` / `run_maps`）**：仍是**采集当场**写 SQLite；Excel 是**整轮结束时**才落盘。
+- 手动采集的「本轮明细」决定 Excel 有哪些行；Excel **只写新增**。
 - 飞书导出**不重新抓取**，只读「最新结果文件」。
 
 **查询/导出链路（与上面完全解耦的单向只读支线）**：
@@ -544,7 +638,7 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 
 | 状态对象 | 位置 | 语义 | 前端怎么读 |
 |---|---|---|---|
-| `STATE` | `core/state.py` | **自动链路**（搜索 / 地图 / 导出）的运行状态：`running/phase/logs/result_count/rows/done/output/stop` | `GET /api/status?since=N`（增量拉日志） |
+| `STATE` | `core/state.py` | **自动链路**（搜索 / 地图 / 导出）的运行状态：`running/phase/logs/result_count/rows/rows_deleted/done/output/stop`（`rows_deleted` = 本轮在首页被逐行删掉的 `n`，落盘前过滤用，见 **M16**） | `GET /api/status?since=N`（增量拉日志） |
 | `MANUAL_STATE` | `core/state.py` | **手动采集**专用：批量任务子状态（running/stop/total/done/current）+ 本轮会话语义（session_* / added/existed/failed/upgraded）+ 扩展心跳（ext_last_seen） | `GET /api/manual/state`（还附带最近 50 条手动采集记录） |
 | `STATE_LOCK` | `core/state.py` | 两套状态**共用同一把** `threading.Lock`（**非可重入**） | — |
 
@@ -556,7 +650,7 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 
 > **任何 `log()` 调用必须在 `with STATE_LOCK` 块外；DB IO 与文件 IO 一律在锁外。**
 
-横切一切写状态的地方（`_flush_manual_session`、`_manual_batch_worker`、`api_manual_session_delete` 都踩过这个坑）。标准骨架（四段式）：
+横切一切写状态的地方（`_flush_manual_session`、`_manual_batch_worker`、`api_manual_session_delete`、`api_live_delete` 都踩过这个坑）。标准骨架（四段式）：
 
 ```
 ① 锁内：定位/快照，取出需要的信息
@@ -576,7 +670,7 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 
 ### 4.5 页面/组件如何通信
 
-- **无框架、无构建**。Python 在 import 期读 `ui/*.html`，把数据以 JSON 注入 `*_PLACEHOLDER`，结果整页返回。
+- **无框架、无构建**。Python 在 import 期读 `ui/*.html`，把数据以 JSON 注入 `*_PLACEHOLDER`，结果整页返回。**注入的既可以是数据，也可以是「共享代码文本」**：`<style>` 走 `PAGE_CSS_PLACEHOLDER`（从 `ui/page.html` 抽给 `/manual` `/db`），`ui/live-table.js` 走 `LIVE_TABLE_JS_PLACEHOLDER`（从独立文件注入主页与 `/manual`）。两种都发生在 **import 期** → 改完**必须重启工具**。
 - 前端与后端只通过 **HTTP 轮询**通信（无 WebSocket、无 SSE）。
 - 扩展与工具只通过 **HTTP + 自定义头**通信；扩展内部只通过 `chrome.runtime.sendMessage` 通信（`fetch` 只在 service worker 里）。
 
@@ -624,7 +718,7 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 | `db_has_customer()` | `客户开发工具.py` | 「要不要跳过这个站」的只读判断 |
 | `backup_db_before_delete()` | `core/db.py` | **WAL 安全备份**骨架（sqlite3 在线 `backup()` + 节流 + 失败不阻断）——任何「删数据前先备份」都该用它 |
 | `db_fix_website_keys(apply=False)` | `core/db.py` | 「扫全库找不一致 + dry-run / apply 两模式」的骨架 |
-| `clean_emails()` / `clean_phones()` | `客户开发工具.py` | 邮箱/电话抽取 + 噪声域过滤（`NOISE_EMAIL` 表可直接搬） |
+| `clean_emails()` / `clean_phones()` | `客户开发工具.py` | 邮箱/电话抽取 + 误报过滤（`_is_noise_email()` 走 `NOISE_EMAIL_TLDS` / `NOISE_EMAIL_HOSTS` / `NOISE_EMAIL_DIM_RE` / `NOISE_EMAIL_HEX_RE` 四组常量；宿主用**后缀**匹配，不是子串） |
 | `_sanitize_page_html()` | `客户开发工具.py` | 把整页 HTML 压到能安全跑正则的规模（先粗截、再剥 script/style/svg/template） |
 | `_find_contact_url()` | `客户开发工具.py` | 从页面里找自带联系页链接（比盲猜 `/contact` 准） |
 | `enrich(page, url)` | `客户开发工具.py` | 完整抓取策略（含联系页兜底） |
@@ -651,7 +745,8 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 | 扩展端口发现 + 身份校验 | `extension/ports.js` + `background.js::discover()` | 并行探候选端口 + `app` 字段验身份 |
 | Shadow DOM + `adoptedStyleSheets` 悬浮按钮 | `extension/floating-css.js` + `content.js` | 跨 CSP、跨 shadow 边界的注入方案 |
 | 「唯一 fetch 出口」架构 | `extension/background.js` | popup/content 一律发消息，SW 代发请求 |
-| 事件委托删除行 | `ui/manual.html::onSessionBodyClick` + `extension/popup.js::onSessionListClick` | 行是 innerHTML 拼的、会整表重建 → **只能**委托 |
+| 事件委托删除行 | **`ui/live-table.js::onClick`** + `extension/popup.js::onSessionListClick` | 行是 innerHTML 拼的、会整表重建 → **只能**委托 |
+| 「一个共享组件服务多个页面」的注入式共享 | `core/ui.py::_inject_live_table_js()` + `ui/live-table.js` | 独立 `.js` 文件 + `LIVE_TABLE_JS_PLACEHOLDER`（与 `<style>` 注入**同构**）：两页差异全走 `cfg`，页面各留薄封装 → 根治「两份近逐字重复的代码，改一边传不到另一边」。⛔ 全局只许暴露工厂名（跨 `<script>` 重名 = 整页空白），详见 M18 |
 | 「facets 驱动的筛选面板」模式 | `ui/query.html::loadFacets()` | 勾选项全部由后端 distinct 接口生成，页面里零硬编码枚举 —— 将来新增行业/来源，页面一个字都不用改 |
 | 「查询条件 → 导出」一整套 | `ui/query.html` + `/api/db/*` | 换张表/换个库就能复用的筛选+分页+导出页面，是目前项目里最完整的一个 CRUD 只读视图 |
 | 「勾选 + 单行 ✕ 双入口同一接口」删除模式 | `ui/query.html::deleteRows()` / `selectedIds()` / `syncSel()` | 单行就是长度为 1 的数组 → 只有一个后端路径，不会出现「批量删才备份」这类分支漏洞；`ckAll.indeterminate` 处理半选态 |
@@ -715,10 +810,18 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 
 MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限制；更重要的是：把 fetch 集中到一处，才能统一做**端口发现、身份校验、超时、错误兜底**。回归脚本把「`popup.js` 里 `fetch(` 出现 0 次」写成**硬断言**。
 
-### 6.6 为什么删除要「明细 + 客户库双删 + 删前备份」
+### 6.6 为什么删除要「删明细时按需删库 + 删前备份」
 
-- **双删**：采集即落库，只删明细是**假删除** —— 库里那条还在，下次再采到同一个站会被 `db_has_customer` 判「已在客户库」跳过，**永远采不回来**，飞书导出也仍会带它。
 - **按 `rid` 删**（`/manual`）：同一 url 在一轮里可能既有 `added` 又有 `existed`。
+- **手动链路默认不删库**（2026-10-11 改）：手动采集的行**本轮还没入库**（入库在「结束」那一刻）
+  → 删它只是把它从「待入库清单」里拿掉，客户库本来就没有、也不该平白备份一份。
+  灰字 `kind='existed'` 行是**别人早采过的老客户**，同样绝不连带删库。
+- **唯一的例外（必须双删）**：`kind='added'` **且** `db_has_customer(url)` 为真 —— 来源是
+  「本轮已入库成功、但结果 Excel 被占用没写成功」那种按「失败不清数据」保留在明细里的行。
+  这时库里确实有它 → 只删内存仍会退化回**假删除**（下次采到同站被判「已在客户库」跳过、
+  **永远采不回来**，飞书导出也仍会带它）。判据刻意写成「`kind='added'` and 库里真有它」。
+- **顺带守住的不变量**：入库排在写表**之前**，所以「结果 Excel 里出现过的行，客户库里一定有」——
+  这正是「下次再采到同站不会被当成新客户重复进表」的前提。
 - **按主键 `id` 删**（`/db` 查询页）：查询结果每行都带着主键，主键无歧义，不存在「键错位删错人」；两条路都**不做 email 兜底**（email 兜底是 upsert 的合并口径，用它来删会删到「被合并进来的另一家」）。
 - **删前备份**：不可逆操作；用 sqlite3 在线 `backup()`（WAL 下裸拷贝会漏数据）。两条路共用 `backup_db_before_delete()`（300 秒节流）。
 - **「不清库」的门**：两条路的入口都必须能挡住空 key / 空 id —— `db_delete_customer('')` 与 `db_delete_customers_by_ids([])` 都**直接返回 0**。少了这道门，一次空输入就等于 `DELETE FROM customers`。
@@ -726,7 +829,7 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 
 ### 6.7 为什么 Excel「只写新增」，不写「已在库」
 
-避免导出飞书时重复推送同一家公司。**代价**是「已采 N 条」> 「Excel 行数」。用户拍板维持这个行为，但要求 UI **把两个口径一起报出来**（这是后续必须一直守住的约定）。
+避免导出飞书时重复推送同一家公司。**代价**是「采集总数」>「有效数（＝Excel 行数）」。用户拍板维持这个行为，但要求 UI **把两组数一起报出来**（`有效 X / 采集总数 Y`）—— 这是后续必须一直守住的约定。
 
 ### 6.8 为什么 `website_key` 必须恒等于 `normalize_domain(website)`
 
@@ -749,6 +852,18 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 - **10 列硬契约**不可改（见 §7 相关注意事项）。
 - **自动搜索的两条链路一次性把结果落到「最新结果文件」**，手动采集则一轮一份 —— 两套语义刻意不同。
 - 国家筛选**默认**只用 `gl` / `hl`；`cr` 与 `site:` 做成**默认关**的可选开关（**M15**）。`lr` 仍不加。2026-09-28 实测：法国加 `cr` 后条数 10→7、`.fr` 占比反降、真客户被挤掉（法国 B2B 多用 `.com`）→ 故**默认关**。
+
+### 6.11 为什么把两页的「本轮明细」抽成一个共享组件（M18）
+
+主页「📥 本轮已入库明细（实时）」与 `/manual`「③ 本轮采集明细」在**数据来源上确实不同**（一个是自动链路的 `STATE['rows']`，一个是手动会话的 `session_rows`、还多一类「已在客户库」痕迹行），所以最初是各写一份。**但两份代码是近逐字重复的**，而重复的代价已经真实发生过：主页上一轮修的两处（末行判据 `renderedTail`、删除确认改居中模态框）**一直没传到 `/manual`**，而 `/manual` 的「行业 / 国家」两列主页也没有 —— 于是「同一件事在两个页面表现不一样」成了常态。
+
+抽法上做过三个取舍：
+
+1. **不是「把页面的能力合并到一起」，而是「一份实现 + 每页一份配置」**。差异全部收敛进 `cfg`：主键字段（主页 `n`、手动 `rid`）、删除接口、是否渲染「已在客户库」痕迹行、徽章悬停文案、可删条件、提示语、删完的回调。**共性（9 列表头、✕ 弹居中模态框、增量重画判据、事件委托）一行都不用抄两遍。**
+2. **共享的是 `ui/live-table.js` 这个独立文件，不是「写进某一页再抠出来」**：`ui/page.html` 自己的注释就警告过「抠 `<script>` 的正则很脆」；而 `<script src>` 又会撞掉所有按 `m.PAGE_HTML` 做逐字子串的断言（项目也没有 `static/` 目录）。最终复用**已有**的注入机制形态：新增 `LIVE_TABLE_JS_PLACEHOLDER`，由 `core/ui.py` 在 import 期把文件内容替换进去 —— 与 `<style>` 的 `PAGE_CSS_PLACEHOLDER` 完全同构，三条断言（组件文本两页都在、两页表头逐字相等）自然就有了落脚点。
+3. **后端那半边也一起抽**：两个删除接口的「先备份 + 再删库」是同构的 `backup_db_before_delete()` + `db_delete_customer(url)`，抽成 `_delete_customer_and_backup()`，并顺手用 AST 把「它必须在 `STATE_LOCK` 之外被调、体内不许有 `with`」钉死（原先只有口头纪律）。
+
+**代价（必须知道）**：组件改一处、两页同时变 —— 所以「只改一页」这种曾经正常的操作，现在会被 R12 的两页表头比对直接拦下；而组件里的**任何**顶层重名都会让**两页一起**白屏（见 §9.2 #38）。
 
 ---
 
@@ -802,7 +917,7 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 - 阶段 B 拆包：`google_search` / `google_maps` / `tasks` / `feishu` 尚未从入口拆出。
 - 飞书「客户信息」表的「来源渠道」**需要人工**加 `手动采集` 选项（否则导出时该值会被降级成「谷歌搜索」）；「行业」选项也还是旧四值（缺 `食品` 之外的新规范名）。
 - `chrome://extensions` 加载扩展、装/改扩展后刷新已开页面（人工步骤）。
-- **最近六轮改动尚未 git commit**（是否打 V1.5 推远端待拍板）。
+- **M16 / M17 / M18（第九～十一轮）尚未 git commit**；此前八轮用户已自己提交（「备份1」`f69f1af` = `v1.5`、「备份2」`d332048` = `v1.5.1`，都是**轻量标签**）。这三轮是否一并提交 / 推远端待拍板。
 
 ---
 
@@ -821,10 +936,13 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 | 结果 Excel（10 列契约 / 命名 / 最新文件） | ✅ |
 | 飞书导出（含手动采集豁免） | ✅ |
 | 关键词库三级联动 + 条件词多语言化 | ✅ |
-| 计数口径拆分显示（已采 N = 新增 X + 已在库 Y） | ✅ |
+| 计数报两组数（有效 X = 新增 / 采集总数 Y = 新增 + 已在库）（**M19**） | ✅ |
 | 客户库查询页 `/db`（多维筛选 + 分页 + 导出 Excel + **勾选/✕ 删除客户** + 居中模态框二次确认） | ✅ |
-| 主页「6. 自定义搜索词」（**M14**：原样搜、不套条件模板、不做中国过滤、国家只做标记） | ✅ |
+| 主页「7. 自定义搜索词」（**M14**：原样搜、不套条件模板、不做中国过滤、国家只做标记） | ✅ |
 | 主页「国家限定」四选一（**M15**：`none`/`cr`/`site`/`both`，默认关、仅标准网页模式） | ✅ |
+| 主页「本轮已入库明细（实时）」逐行删除（**M16**：仅采集中可点、居中模态框确认、墓碑保证「不进本轮 Excel」） | ✅ |
+| 主页「1. 本次任务采集数量」提为第 1 张卡 + **强必填**（**M17**：原 1~6 号整体顺延、三条链路统一、清空即拦且零请求） | ✅ |
+| 主页 + `/manual` 的「本轮明细」合并成**一个共享组件**（**M18**：`ui/live-table.js`，两页表头逐字一致含「行业/国家」、✕ 共用一个居中模态框；`/manual` 的原生确认框就此消失） | ✅ |
 | 首页顶栏导航（→ `/manual`、`/db`，V1.5 加） | ✅ |
 | 数据修复脚本（`重标行业.py` / **`标注空行业.py`**） | ✅ |
 | 项目拆包（`core/` + `ui/`） | ✅ |
@@ -833,8 +951,11 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 
 ### 8.2 正在开发 / 刚完成未提交
 
-- **最近一轮**（主页新增「国家限定」四选一 = **M15**：`core/config.py` 加 `COUNTRY_LIMITS` 数据层、`core/ui.py` 注入 `COUNTRY_LIMITS_PLACEHOLDER`、`ui/page.html` 四选一 + 4 个 JS 函数、`客户开发工具.py` 的 `run_search(country_limit=)` / `api_start` 透传；`_check_page.py` R5 基线重算 + 新增 **R11**；`_smoke_search.py` 补国家限定段 + HTTP 层；`_check_live_ui.py` 新增 **E 段**；`_check_maps_ui.py` 加「地图收起」断言）：**代码已改完、23 项回归全绿，尚未 git commit**。
-- 再往前七轮（① 计数口径拆分 + 去重键不变量；② 客户库查询页 `/db` + 2 个新回归项；③ 扩展面板「客户库查询」入口；④ 主页顶栏导航；⑤ `/db` 结果删除 + `标注空行业.py`；⑥ `/db` 删除确认改居中模态框；⑦ 主页「6. 自定义搜索词」= **M14**）也都在等待一并提交 —— 是否打 **V1.5** 待用户拍板。
+- **最近一轮（第十一轮）**（把主页与 `/manual` 的「本轮明细」抽成共享组件 = **M18**：新增 `ui/live-table.js`（工厂 `makeLiveTable(cfg)`，两页差异全走 cfg）+ `core/ui.py` 加 `LIVE_TABLE_JS_PLACEHOLDER` 注入（与 `<style>` 注入同构）+ 主页表补齐「行业 / 国家」两列、两页各留薄封装，主页那 46 行 `renderRows` 与整套模态框代码、`/manual` 的 `renderSession` 与原生 `confirm` 一并删除；后端把两个删除接口的「先备份 + 再删库」抽成共用 `_delete_customer_and_backup()`；`_check_page.py` **R12** 改为「两页表头逐字相等 + 组件文本两页都在」并把 AST 断言重定向到新 helper、`_check_live_ui.py` **F 段**加「9 列 + 行业/国家数据」真实 DOM 断言、`_check_manual_ui.py` **E 段**改成「点 ✕ → 等居中模态框 → 确定删除」、`_smoke_search.py` 修掉一处「备份名同秒重名」的**假红**）：**代码已改完、23 项回归全绿、真机截图存档，尚未 git commit**。
+- 再往前一轮 = **M17**（把「本次任务采集数量」提成「1.」独立卡并改成**强必填** = `ui/page.html` 插入新卡 + 整轮重排编号（原 1~6 → 2~7）+ `start()` 去掉兜底默认值改 `valueAsNumber` 且校验提到最前、`客户开发工具.py` 的 `api_start` 对缺键/空串**显式拒绝**；`_check_page.py` R5 基线重算 + 新增 **R13**、`_smoke_search.py` 6 处 payload 补字段 + 必填负向断言、`_check_live_ui.py` 新增 **G 段**真机）：**尚未 git commit**。
+- 再往前一轮 = **M16**（主页「本轮已入库明细（实时）」逐行删除 = 墓碑 `STATE['rows_deleted']` + `POST /api/live/delete` + 居中模态框；`_check_page.py` **R12**、`_smoke_search.py` 两段、`_check_live_ui.py` **F 段**）—— 同样**尚未 commit**。
+- 更早的八轮（① 计数口径拆分 + 去重键不变量；② 客户库查询页 `/db` + 2 个新回归项；③ 扩展面板「客户库查询」入口；④ 主页顶栏导航；⑤ `/db` 结果删除 + `标注空行业.py`；⑥ `/db` 删除确认改居中模态框；⑦ 主页「7. 自定义搜索词」= **M14**；⑧ 主页「国家限定」四选一 = **M15**）**已由用户自己提交**（见 §8.4：提交「备份1」`f69f1af` = 轻量标签 `v1.5`、「备份2」`d332048` = 轻量标签 `v1.5.1`；`v1.5.1` 已含 M14 + M15 + 顶栏导航）。
+- ⚠️ **用户会自己动手做备份提交**，信息固定为「备份N」、打的是**轻量标签**（`v1.5` / `v1.5.1`，**不是** `V1.x` 那种 `-a -m` 附注标签）→ 查「某轮落在哪个提交」要 `git tag -l` + `git for-each-ref refs/tags` 对照，**别只认大写 `V1.x`**。M16 / M17 / M18 是否要一并提交 / 推远端，等用户拍板。
 
 ### 8.3 未完成
 
@@ -857,7 +978,7 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 | 结果 Excel | `output/` 22 份 |
 | 查询导出 | `output/查询导出/`（用完可删，已 gitignore） |
 | 库备份 | `DB/backups/` 7 份（清理前 / 污染前 / 删除前 ×N / 修键前）；另有 `DB/客户库.sqlite3.bak_标注空行业_20261002_083932` 1 份 |
-| git | `main` 最新提交 `37de110`（**最近七轮的改动都还没提交**）；标签 V1.0～V1.4（均为附注标签） |
+| git | `main` 最新提交 `d332048`「备份2」（**M16 / M17 / M18 尚未提交**）；**用户自建**轻量标签 `v1.5`=`f69f1af`「备份1」、`v1.5.1`=`d332048`「备份2」；附注标签 V1.0～V1.4 |
 
 ---
 
@@ -872,6 +993,7 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 3. **修改前先寻找现有实现**：§5「可复用功能」列了全部可复用件。本项目最常见的浪费就是重复实现已有能力（比如又写一个「抓邮箱」或又写一个「备份数据库」）。
 4. **不要在不了解现有实现的情况下重构**。特别是：
    - ⚠️ `ui/page.html`（有 sha256 基线：故意改要**同步**重算 R5 的 `_TMPL_SHA` / `_BUILT_SHA`）
+   - ⛔ `ui/live-table.js`（**两页共用的「本轮明细」组件**：改一处同时影响主页与 `/manual`；全局只许暴露 `makeLiveTable`，见 M18 / §9.2 #37~#40）
    - ⛔ `run_search` / `run_maps`（跑通的链路，回归守着）
    - ⛔ Excel 的 10 列契约
    - ⛔ `website_key` 不变量
@@ -887,9 +1009,9 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 | 3 | 改 `extension/` 或 `ui/*.html` 后以为立刻生效 | 重启工具 + `chrome://extensions` 点「重新加载」 |
 | 4 | 改了 `ui/page.html` 却忘了重算 R5 基线 | 改它没问题，但必须**同时**更新 `_TMPL_SHA` 与 `_BUILT_SHA`（漏一条就红）。给副页面加**专有**样式仍要写进 `ui/manual.html` / `ui/query.html` 的第二个 `<style>` —— page.html 那份是三个页面共用的 |
 | 5 | 按 url 删明细行 | 必须按 `rid` |
-| 6 | 只删明细不删客户库 | **双删**，否则那是假删除 |
+| 6 | 只删明细不删客户库（**自动链路**，或手动那条「已入库但 Excel 没写成功」的保留行） | 那种情况必须**双删**，否则是假删除；手动的普通行与灰字行则**不许**动库 |
 | 7 | 让 `popup.js` 直接 `fetch` | 必须经 `chrome.sendMessage` → background 代发（0 次 `fetch(` 是硬断言） |
-| 8 | 让明细行数 = Excel 行数 | Excel **只写新增**；UI 必须把「已采 / 新增 / 已在库」一起报出来 |
+| 8 | 让明细行数 = Excel 行数 | Excel **只写新增**；UI 必须把「有效数 / 采集总数」两组数一起报出来 |
 | 9 | 用 `from core.paths import ENRICH_FILE` | 它是唯一会被重新赋值的模块级变量 → 一律 `paths.ENRICH_FILE` |
 | 10 | 在 `core/` 里用相对导入 / 在入口用相对导入 | 入口只能**绝对导入**（外部脚本无包上下文） |
 | 11 | 并行 Edit 同一个文件 | 会静默覆盖，串行改 |
@@ -908,6 +1030,20 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 | 24 | 以为 `site:.us` 能筛出美国客户 / 把 `site:` 当「限国家」 | `site:` 是**限域名**，靠 ccTLD 与国家强绑定才等效，**美国是例外**（`.com` 为主、`.us` 极少）→ M15 里美国 `site` 留空。且 `site:.uk` **能**匹配 `.co.uk`（`site:` 支持 TLD），不必写 `co.uk`。核心认知：**「限定更严 ≠ 更准」**（法国加 `cr` 实测 10→7 条、真客户反被挤掉） |
 | 25 | 用 `str(inspect.signature(fn))` 做**文本**断言默认值 | 签名里是**求值后**的 `country_limit='none'`，不是源码文本 `COUNTRY_LIMIT_DEFAULT` → 改用 `sig = inspect.signature(fn); sig.parameters['country_limit'].default == 'none'`（`_check_page.py` R11 踩过） |
 | 26 | 回归整体变红就一头扎进业务逻辑查 | 先看**错误类型**：出现 `disk I/O error` / `database or disk is full` / `attempt to write a readonly database` → **先查磁盘剩余空间**。2026-10-02 实测：`C:` 只剩 2.34 GB 时 6 项 DB 相关回归集体假红（临时客户库默认落系统盘 `C:`）。根治 = `_run_all_reg.py` 已把子进程 `TMPDIR/TEMP/TMP` 钉到 `.workbuddy/_reg_tmp`（项目盘），**别再改回系统 TEMP** |
+| 27 | 给「运行中可删」的实时明细只判 `STATE['running']` | 导出飞书时 `running` 仍是 `True`、`phase=='export'`，而 `STATE['rows']` 还留着**上一轮**的行 → 允许删会删掉「Excel 早已写好」的库行。**必须判 `running and phase=='search'`**（2026-10-02 M16） |
+| 28 | 整表增量重画只按「长度变小」判失效 | 「删 1 条 + 加 1 条」净长度不变 → **漏重画**（行内 ✕ 停在错行）。补一条 `rows[last].n !== renderedTail`；且 `start()` 里 `renderedTail` 必须与 `renderedRows` **一起**清零，否则新一轮一直空白（2026-10-02 M16） |
+| 29 | 给「结果落盘前过滤」加了墓碑，却只在 `api_start` 清零 | 直调 worker 的路径不会经过 `api_start` → 上一轮的墓碑**跨轮误杀**这一轮同号的行。**两个 worker 的开头也要清 `STATE['rows_deleted'] = []`**（2026-10-02 M16） |
+| 30 | 往 `ui/page.html` 共享 `<style>` 里加「通用名」选择器 | 那份 CSS 被注入 `/manual` `/db` → `.modal` / `.btn-danger` / `.row-del` / `.live-del` / `#delModal` 全是别处已占用的名字，撞了会静默改外观。**新选择器一律加专属前缀**（本轮用 `livedel-`），`_check_page.py` R12 有**负向断言**盯着这些名字不许出现 |
+| 31 | 用 `int(raw)` 解析前端传来的行号 `n` | Python `isinstance(True, int)` 为真 → `int(True) == 1` → **误删第一行**。解析前先 `if isinstance(raw, bool): raw = None`（2026-10-02 M16） |
+| 32 | 用 `ast.Name` 断言「代码里用了 `STATE['xxx']`」 | 字典取值是 `ast.Subscript`（`value` 为 `ast.Name('STATE')`、`slice` 为 `ast.Constant`），**不是** `ast.Name`。写个小助手收集 `STATE[...]` 的常量键再断言（`_check_page.py` R12 踩过） |
+| 33 | 做「必填」时只删了**一处**兜底默认值 | 前端 `parseInt(x.value \|\| '10')` 与后端 `data.get('target_count', 10)` 是**两道独立的兜底**，删一边等于没必填（另一边照样静默补默认值）。**两处一起删**，并各留一条负向断言（`_check_page.py` R13 用 AST 断言后端那侧没有第二个参数） |
+| 34 | 挪动/插入主页卡片后只改了 `<h3>` 里的编号 | 编号还会出现在**用户可见的提示语**里：`start()` 的两条 alert、组合预览的占位文案（`#comboSummary`）、`#rawCard` 的说明段。漏改**不报任何错**，只是提示语指到错的步骤。R13 + `_check_live_ui` G 段一起守 |
+| 35 | 搬走一个代码块时顺手「润色」了里面的文案 | 页面里有些文案是**别处断言的锚点**（例：`_check_page.py` 的 `expects` 里有 `'按新增个数计'`，它就在被搬走的采集数量 `.note` 里）。搬迁时文本要**逐字保留**，只改位置 |
+| 36 | 用 `parseInt(el.value)` 读数字输入框 | 空串 → `NaN`（这条对了），但 `parseInt('1e2') === 1`，而数字框里 `1e2` 是合法的 100。**一律用 `el.valueAsNumber`**（空/非法得 `NaN`，语义与输入框一致） |
+| 37 | 把「两个页面共用的 UI」塞进**其中一个页面的模板**里共享 | 想在 `ui/page.html` 里写一段 `<script>` 再正则抠出来注入另一页 → 抠 `<script>` 的正则极脆（页面自己就警告过这一点），而且它本来就住在某个消费者的模板里。**正解：独立文件 + 新占位符**（`ui/live-table.js` + `LIVE_TABLE_JS_PLACEHOLDER`，与 `<style>` 的 `PAGE_CSS_PLACEHOLDER` 注入机制同构）；也别用 `<script src>`（会撞掉所有按 `m.PAGE_HTML` 做**逐字子串**的断言，且项目没有 `static/` 目录）（2026-10-03 M18） |
+| 38 | 共享组件里用顶层 `let/const`，页面里又有同名 `function` | 跨 `<script>` 的**顶层 `let/const` 与另一段脚本里的 `function` 重名 → `SyntaxError: Identifier 'X' has already been declared`**。静态检查（`node --check`）只查单段脚本，抓不到跨段冲突；而浏览器是**整段脚本一个字符都不执行** → 症状是「页面控件全空白」，极易误判成后端挂了。**组件一律闭包，全局只暴露一个工厂名**（`makeLiveTable`），两页各留薄封装（2026-10-03 M18） |
+| 39 | 用「备份目录里文件名的集合差集」断言「删前备份发生过」 | `backup_db_before_delete()` 的备份名**只精确到秒**（`客户库_删除前_%Y%m%d_%H%M%S`）→ 同一秒内删两次，第二次**直接覆盖同名文件** → 差集是空的 → **假红**（`_smoke_search.py` 实测踩过：段④ 与前一段「运行中删除」落在同一秒）。改判「接口返回的那个文件**这次有没有被写过**」（新增，或 mtime 变新）。⚠️ 生产环境有 300 秒节流，不会撞名 —— 纯**测试侧**脆弱点（2026-10-03） |
+| 40 | 泛化/重构后，把「逐字子串断言」当成碰都不能碰的圣旨 | 反过来也错：`ui/live-table.js` 一到位，`fetch('/api/live/delete')` 整串就不存在了。**该改的是断言而不是代码** —— 拆成「页面的 cfg 里确实写了这个接口」+「组件确实 `fetch(endpoint)`」两条一起钉，语义反而更强。R12 里那批 verbatim 断言（`renderedTail` / `closest('.livedel-btn')` / `classList.toggle('livedel-ro'` / `id="liveDelModal"`）**逐条对着新代码重新对过一遍**才算改完（2026-10-03 M18） |
 
 ### 9.3 改完必须做的
 
@@ -944,6 +1080,11 @@ MV3 的 CSP 禁止扩展页面执行远程脚本、也对 `fetch` 来源有限�
 | 改页面 | `ui/page.html` / `ui/manual.html` / `ui/query.html`（⚠️ 改了 `page.html` 必须重算 R5 两条基线） |
 | 改客户库查询页 | `ui/query.html` + `core/db.py` 末段「客户库查询」+ 入口 `/api/db/*`（⚠️ 导出必须落 `output/查询导出/` 子目录） |
 | 改查询结果的删除 | `core/db.py::db_delete_customers_by_ids` + `客户开发工具.py::api_db_delete` + `ui/query.html::deleteRows`（⛔ 不持锁、必须按主键、删前备份；R9 有 AST 断言） |
+| 改首页「本轮已入库明细」的逐行删除 | `客户开发工具.py::api_live_delete` + `core/state.py::STATE['rows_deleted']` + **`ui/live-table.js`（共享组件，见 M18）**（⛔ 仅采集中可点、墓碑保证不进 Excel、新样式加 `livedel-` 前缀；R12 有断言） |
+| 改「本轮明细」这张表（加列 / 改渲染 / 改确认框） | **`ui/live-table.js` 一处改、两页同时变**（主页 `/` 与 `/manual`）—— 两页差异只走 `cfg`（keyField / endpoint / showExisted / badgeTitle / canDelete / afterRemove）；⛔ 改完必须**重启工具**，并同时跑 `_check_page.py` R12 + `_check_live_ui.py` + `_check_manual_ui.py`（见 **M18**） |
+| 改主页卡片顺序 / 编号 | `ui/page.html` 的 `<h3>` 文字（编号是**硬编码**的，没有计数器）**+ 三处用户可见提示语**（`start()` 的 alert、`#comboSummary` 占位、`#rawCard` 说明）；⛔ 必须重算 R5 两条基线，并同步 R13 / `_check_live_ui` G 段（见 **M11** 的「主页卡片顺序」） |
+| 改采集数量的必填规则 | `ui/page.html::start()`（读值只用 `valueAsNumber`，⛔ 不许兜底默认值）+ `客户开发工具.py::api_start`（`data.get('target_count')` ⛔ 不许带缺省值）—— 两处必须同时改，见 **M17** / §9.2 #33 |
+| 结果 Excel 行数比实时明细少 | 正常，三个原因：① excel 只写新增（老客户不写）② 明细里被 ✕ 删过（见 **M16**）③ 本轮 0 新增则不产出文件 |
 | 把原生弹窗换成居中模态框 | `ui/query.html`（`#delModal` 样式 + HTML + `askDeleteConfirm`/`closeDeleteConfirm`）—— ⛔ 弹窗 HTML 必须放 `<script>` **之前**；H 段断言「居中 ±2px」、R9 断言整页无 `confirm(` |
 | 加/改筛选维度 | `core/db.py` `_query_where()` + `db_facet_counts()`（前端零改动，选项自动出现） |
 | 清垃圾/误采记录 | `/db` 筛出来 → 勾选 → 「删除选中」（删前自动备份）；或按 id 直接删 |

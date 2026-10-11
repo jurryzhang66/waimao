@@ -8,12 +8,12 @@
 于是这一轮就等价于证明了「扩展 ↔ 工具」的接口契约成立：
   · /api/ping 的身份字段与端口发现优先级
   · /api/collect 的 X-DP-Ext 门禁、payload 形状、以及后端 collect_from_html 的返回结构
-  · 采集结果真的落进了客户库（source='手动采集'）；node 侧的 ⑨ 用例再走一遍
-    DP_MANUAL_STATE / DP_SESSION_DELETE / DP_SESSION_FINISH
+  · 采集结果**不会当场落库**（2026-10-11 起改成「点『结束并生成 Excel』才一次性入库」）；
+    node 侧的 ⑨ 用例走一遍 DP_MANUAL_STATE / DP_SESSION_DELETE / DP_SESSION_FINISH
     （即 popup 的「本轮采集明细」/ 行尾 ✕ 删除 / 「结束并生成 Excel」）：
-    先删掉一条（明细 + 客户库双删），再把剩下的落成结果 Excel —— python 侧只复核结果，
-    不再自己点一次
-    ⚠️ 因为删掉了一条，所以这里的期望是「库里 1 条 / Excel 1 行」，不是 2。
+    先从明细里拿掉一条（本轮还没入库 → 客户库删 0 条、也不产生备份），
+    再由「结束」这一步把剩下的那条入库 + 落成结果 Excel —— python 侧只复核结果，不再自己点一次
+    ⚠️ 所以这里的期望是「库里 1 条 / Excel 1 行」（被拿掉的那条始终没进过库）。
   · 工具没在运行时的离线提示
 
 外加三组只能用 test_client 验的（浏览器侧才讲 CORS 预检，够不着）：CORS 只回显
@@ -40,7 +40,27 @@ sys.stdout.reconfigure(encoding='utf-8')
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, '客户开发工具.py')
 BK = os.path.join(ROOT, '.workbuddy')
-NODE = r'C:\Users\admin\.workbuddy\binaries\node\versions\22.22.2-3\node.exe'
+
+
+def _find_node():
+    """定位 managed node.exe。
+
+    ⛔ 别把版本号写死：本机从 22.22.2-3 升到 22.22.2-6 时，写死的路径直接
+    FileNotFoundError —— 看着像「回归红了」，其实是环境漂移的假红。
+    """
+    base = os.path.join(os.environ.get('USERPROFILE') or r'C:\Users\admin',
+                        '.workbuddy', 'binaries', 'node', 'versions')
+    try:
+        for d in sorted(os.listdir(base), reverse=True):
+            p = os.path.join(base, d, 'node.exe')
+            if os.path.isfile(p):
+                return p
+    except OSError:
+        pass
+    return r'C:\Users\admin\.workbuddy\binaries\node\versions\22.22.2-3\node.exe'
+
+
+NODE = _find_node()
 HARNESS = os.path.join(BK, '_smoke_ext_bg.js')
 
 _LOAD_N = [0]
@@ -258,12 +278,12 @@ def main():
     conn.close()
     for r in rows:
         print('   库里：', dict(r))
-    check(len(rows) == 1, f'客户库里剩 1 条（node 侧 ⑨ 删掉了 1 条，实际 {len(rows)}）')
+    check(len(rows) == 1, f'客户库里 1 条（node 侧 ⑨ 从明细拿掉 1 条，剩 1 条在「结束」时入库；实际 {len(rows)}）')
     check(all(r['source'] == '手动采集' for r in rows), 'source 全部是「手动采集」')
     check(all((r['search_formula'] or '').startswith('[手动采集]') for r in rows),
           'search_formula 全部带 [手动采集] 前缀（飞书会据此豁免低分门槛）')
     keys = sorted(r['website_key'] for r in rows)
-    check(keys == ['plasticbagpc.com'], f'被删的那条真从库里消失，去重键正确：{keys}')
+    check(keys == ['plasticbagpc.com'], f'被拿掉的那条始终没进库，去重键正确：{keys}')
     check(any(r['industry'] == '塑料包装袋' for r in rows), '手选的行业写进了库')
     check(any(r['country'] == '德国' for r in rows), 'opts.country 写进了库')
 

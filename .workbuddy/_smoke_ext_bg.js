@@ -420,18 +420,20 @@ async function deadSuite() {
   check(ms && typeof ms.now === 'number' && typeof ms.ext_last_seen === 'number',
         '状态里带 now / ext_last_seen（面板可据此算扩展心跳）');
 
-  // ---- 删除单条（popup 行尾 ✕ 发出来的 DP_SESSION_DELETE）：明细 + 客户库双删 ----
-  // 采集那一刻就已经落库了（_commit_candidate → db_upsert_customer），所以删除必须是双删；
-  // 只删明细是假删除：下次再采到同一站会被判「已在客户库」跳过、永远采不回来。
+  // ---- 删除单条（popup 行尾 ✕ 发出来的 DP_SESSION_DELETE）----
+  // ⚠️ 2026-10-11 起手动采集是「点『结束并生成 Excel』才一次性入库」，所以本轮 kind='added'
+  //    的行**此刻还不在客户库里** → 删它只从「待入库清单」里拿掉：deleted=0、不该产生备份。
+  //    （「已入库但 Excel 没写成功」那种例外行才需要双删，覆盖见 _smoke_manual_session.py ⑪c。）
   const delRow = ((ms && ms.session_rows) || []).find((r) => r.url === 'https://flatbag-maker.de/');
   check(delRow && typeof delRow.rid === 'number', '明细行带 rid（删除按行号定位，不按 url）',
         JSON.stringify(delRow && { rid: delRow.rid, url: delRow.url }));
   const del = await msg(listeners, 'DP_SESSION_DELETE', { rid: delRow && delRow.rid });
   console.log('  删除返回：', JSON.stringify(del));
   check(del && del.ok === true, '删除单条 → ok', JSON.stringify(del));
-  check(del && del.deleted === 1, '客户库里同步删掉 1 条', 'deleted=' + (del && del.deleted));
+  check(del && del.deleted === 0, '本轮还没入库 → 客户库删 0 条',
+        'deleted=' + (del && del.deleted));
   check(del && del.rows === 2, '删完明细剩 2 条（3 条里拿掉 1 个 added）', 'rows=' + (del && del.rows));
-  check(del && !!del.backup, '删前自动备份客户库（返回备份文件名）', 'backup=' + (del && del.backup));
+  check(del && del.backup === '', '没动库就不该平白备份一份', 'backup=' + (del && del.backup));
   const msDel = await msg(listeners, 'DP_MANUAL_STATE');
   const delUrls = ((msDel && msDel.session_rows) || []).map((r) => r.url);
   check(delUrls.indexOf('https://flatbag-maker.de/') < 0, '被删的那条已不在明细里',

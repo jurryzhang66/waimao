@@ -127,7 +127,13 @@ try:
             break
 
     assert url, '没从输出里拿到 URL —— 工具没起来。子进程输出：\n  ' + '\n  '.join(lines)
-    assert got_port != 5000, f'本机 5000 被系统保留，不该还去用 5000（实际 {got_port}）'
+    # ⚠️ 这里原来是 `assert got_port != 5000, '本机 5000 被系统保留，不该还去用 5000'`。
+    #    那是一句**环境快照**：5000 在不在 Windows 的 TCP 排除区间里，会随 Hyper-V/WinNAT
+    #    的状态漂移（重启、系统更新后就不一样）。本次复现时 `netsh int ipv4 show
+    #    excludedportrange protocol=tcp` 已经没有 5000（最早的一段是 5357），5000 能正常
+    #    bind，于是工具按设计挑中 5000，而这条断言却把「环境变好了」判成失败 —— 典型假红
+    #    （与 MEMORY.md 里「别写死端口原因 10013」同一类毛病）。
+    #    真正要守的不变量是「pick_port 挑出来的端口必须真的能用」，由下面两条断言覆盖：
     assert can_bind(got_port), f'输出的端口 {got_port} 实际绑不上'
 
     # 等 Flask 真正 listening

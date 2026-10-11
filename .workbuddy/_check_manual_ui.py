@@ -7,8 +7,9 @@
   C. 「重新探测」能把本实例认出来（打 /api/ping 看到 app=waimao-dp）
   D. 心跳区显示「从未收到扩展请求」→ 模拟一次带 Origin 的预检后变成「在线」
   E. 「本轮采集明细」表能增量渲染 session_rows（含「已在库」行、绿色等宽、「未抓到」、状态行三分支），
-     计数拆开报「已采 N 条 · 新增 X · 已在库 Y」（差额就是 Excel 少写的那部分），
-     点行尾 ✕ 能「明细 + 客户库」双删（删前自动备份客户库）
+     计数报**两组数**「有效 X · 采集总数 Y · 已在库 Z」（有效＝真正入库的新客户＝结果 Excel 行数），
+     点行尾 ✕ 弹**居中确认框**（不是原生确认框），确定后从明细里拿掉；若那条**确实已在客户库**
+     （＝「结束」时入库成功、但结果 Excel 没写成功的那种例外行）则明细 + 客户库双删并删前自动备份
   F. 批量提交空内容要给出 alert 而不发请求；提交 1 条非法网址要优雅失败
 不联网；客户库与结果输出都已打桩到临时目录（E 段的删除会真的走 DB）。
 """
@@ -21,6 +22,7 @@ import time
 
 SRC = r'D:\waimao\dp\客户开发工具.py'
 PNG = r'D:\waimao\dp\.workbuddy\_manual_ui.png'
+PNG_MODAL = r'D:\waimao\dp\.workbuddy\_manual_del_modal.png'
 
 spec = importlib.util.spec_from_file_location('kf', SRC)
 m = importlib.util.module_from_spec(spec)
@@ -169,11 +171,13 @@ try:
                             " document.getElementById('btnSessionFinish').disabled];")
     print('渲染行数：', n, '| 徽章：', badge, '| 状态：', status, '| 空态：', empty_disp)
     assert n == 3, f'应渲染 3 行，实际 {n}'
-    assert '3' in badge, f'徽章不对：{badge}'
-    assert '进行中' in status and '已采 3 条' in status, f'状态行不对：{status}'
-    # 计数必须拆开报：明细行数 = 新增 + 已在库，而结果 Excel 只写「新增」。
-    # 只报「已采 3 条」会让人以为表漏写了（实测踩过：已采 17 条、表 13 行）。
-    assert '新增 2 · 已在库 1' in status, f'状态行应拆开报「新增 / 已在库」：{status}'
+    # 徽章报**两组数**：有效（＝新增，真正入库/进结果 Excel 的）/ 共（＝明细行数）。
+    assert badge == '有效 2 / 共 3', f'徽章应报「有效 2 / 共 3」，实际 {badge!r}'
+    assert '进行中' in status, f'状态行不对：{status}'
+    # 两组数必须一起报：有效数 = 真正入库的新客户，采集总数 = 明细行数（含「已在库」的重复）。
+    # 只报一个「已采 N 条」＝总数，会把重复的也算成成功数（用户点名要改，实测踩过已采 17 条、表 13 行）。
+    assert '有效 2 · 采集总数 3' in status, f'状态行应报「有效 / 采集总数」两组数：{status}'
+    assert '已在库 1' in status, f'状态行应说明差额（已在库）：{status}'
     assert empty_disp == 'none', '有数据时占位提示应隐藏'
     assert mail_style == 'live-mail', '有邮箱的行应使用绿色等宽样式'
     assert miss_txt == '未抓到', f'没邮箱应显示「未抓到」，实际 {miss_txt!r}'
@@ -206,24 +210,35 @@ try:
     status2 = page.run_js("return document.getElementById('sessionStatus').textContent;")
     print('追加一行后：', n2, badge2, '|', status2)
     assert n2 == 4, f'增量追加后应是 4 行，实际 {n2}'
-    assert '4' in badge2, f'徽章应跟着更新：{badge2}'
-    assert '已采 4 条 · 新增 3 · 已在库 1' in status2, f'计数应跟着明细走：{status2}'
-    assert '已采 4 条 = 新增 3 + 已在库 1' in (badge2_tip or ''), \
+    assert badge2 == '有效 3 / 共 4', f'徽章应跟着明细更新为「有效 3 / 共 4」：{badge2!r}'
+    assert '有效 3 · 采集总数 4 · 已在库 1' in status2, f'计数应跟着明细走：{status2}'
+    assert '有效 3 条 / 采集总数 4 条 = 新增 3 + 已在库 1' in (badge2_tip or ''), \
         f'徽章悬停应给出算式：{badge2_tip!r}'
 
     # 计数口径的两个纯函数（就是回答「为什么 Excel 行数比已采少」的那两段文案）
     print('breakdownText / roundTally：')
-    bd = page.run_js("return breakdownText({added: 13, existed: 4}, 17);")
-    assert '已采 17 条 = 新增 13 + 已在库 4' in bd, f'算式不对：{bd}'
-    assert '只写「新增」的 13 条' in bd, f'没说清 Excel 只写新增：{bd}'
+    bd = page.run_js("return breakdownText({session_active: true, added: 13, existed: 4}, 17);")
+    assert '有效 13 条 / 采集总数 17 条 = 新增 13 + 已在库 4' in bd, f'算式不对：{bd}'
+    assert '只写「有效（新增）」的 13 条' in bd, f'没说清 Excel 只写有效（新增）：{bd}'
     assert page.run_js("return breakdownText(null, 5);") == '', '拿不到计数时不该硬编算式'
+    # 徽章文案的纯函数：两组数 + 必须能在 st 为 null 时安全求值（共享组件 reset() 会这么调）
+    assert page.run_js("return liveBadgeText({session_active: true, added: 13, existed: 4}, 17);") \
+        == '有效 13 / 共 17', 'liveBadgeText 没报出两组数'
+    assert page.run_js("return liveBadgeText(null, 0);") == '有效 0 / 共 0', \
+        'liveBadgeText 必须能在 st 为 null 时安全求值'
+    # ⚠️ 本轮已结束：后端清了 session_rows 但留着 added/existed 给落盘文案（roundTally）用 ——
+    #    这时徽章必须归零（否则会报出「有效 5 / 共 0」这种自相矛盾的数字），悬停算式也不该再显示。
+    assert page.run_js("return liveBadgeText({session_active: false, added: 5, existed: 2}, 0);") \
+        == '有效 0 / 共 0', '本轮已结束时徽章必须归零'
+    assert page.run_js("return breakdownText({session_active: false, added: 5, existed: 2}, 0);") \
+        == '', '本轮已结束时不该再拼悬停算式（明细已清零）'
     tl = page.run_js("return roundTally({session_active: false, added: 13, existed: 4});")
     assert '本轮写入 13 行新客户' in tl and '另有 4 条已在客户库' in tl, f'落盘口径不对：{tl}'
     assert page.run_js("return roundTally({session_active: false, added: 13, existed: 0});") \
         == '；本轮写入 13 行新客户', '没有「已在库」时不该提它'
     assert page.run_js("return roundTally({session_active: true, added: 13, existed: 4});") == '', \
         '本轮进行中不该显示上一轮的落盘口径（计数已清零、文件名还是旧的）'
-    print('  ✓ 计数拆开报：已采 N 条 = 新增 X + 已在库 Y；落盘行数单独说清')
+    print('  ✓ 计数报两组数：有效 X（＝新增）· 采集总数 Y · 已在库 Z；落盘行数单独说清')
 
     # 状态行另外两个分支（同步取值，免得被下一次轮询覆盖回「进行中」）
     s_done = page.run_js("renderSessionStatus({session_active:false, session_rows:[],"
@@ -237,9 +252,11 @@ try:
     assert '保存失败' in s_err, f'失败文案不对：{s_err}'
     print('  ✓ 本轮明细表渲染正确（绿色等宽 / 「未抓到」/ 「已在客户库」/ 增量追加 / 状态行三分支）')
 
-    # ---- 删除一行（点行尾 ✕）：明细少一行 + 客户库同步删掉，删前自动备份客户库 ----
-    # 先让「将被删的那条」真落在（临时）客户库里 —— 采集那一刻就已经落库了，
-    # 所以删除必须是「明细 + 客户库」双删，否则只是假删除。
+    # ---- 删除一行（点行尾 ✕）：明细少一行；那条若真在库里则连库一起删（删前自动备份）----
+    # ⚠️ 2026-10-11 起手动采集是「点『结束并生成 Excel』才一次性入库」，所以本轮明细里普通的
+    #    kind='added' 行**此刻还不在客户库里** —— 删它只从明细里拿掉、不碰库（用户明确要求
+    #    灰字行更不许动库）。这里要覆盖的是**唯一需要删库的例外**：本条已经入库成功、但结果
+    #    Excel 没写成功（见 _smoke_manual_session.py ⑪c），所以手动把它塞进库来模拟那种状态。
     m.db_upsert_customer({'company_name': 'Trash Bags Wholesale Ltd',
                           'website': 'https://plasticbagpc.com',
                           'email': 'info@plasticbagpc.com', 'phone': '+44 20 7000 1234',
@@ -248,14 +265,29 @@ try:
                           'source': '手动采集'})
     assert m.db_has_customer('https://plasticbagpc.com'), '前置：将被删的那条应已在（临时）库里'
     backups_before = sorted(os.listdir(m.db._backups_dir())) if os.path.isdir(m.db._backups_dir()) else []
-    # confirm 走真实交互路径（这一步不弹窗，由脚本替用户点「确定」）
-    page.run_js("window.confirm = () => true; window.__alerts = [];"
-                " window.alert = s => window.__alerts.push(s);")
-    rid_attr = page.run_js("return document.querySelectorAll('#sessionBody .row-del')[0]"
+    # 确认走的是共享组件（ui/live-table.js）的**居中模态框**，与主页那张表同一套 —— 不再是
+    # 原生确认框。所以要模拟真实交互：点 ✕ → 等模态框弹出 → 点「确定删除」。
+    page.run_js("window.__alerts = []; window.alert = s => window.__alerts.push(s);")
+    rid_attr = page.run_js("return document.querySelectorAll('#sessionBody .livedel-btn')[0]"
                            ".getAttribute('data-rid');")
     print('第 1 行 ✕ 的 data-rid：', rid_attr)
     assert rid_attr == '1', f'第 1 行的 ✕ 应带 data-rid=1，实际 {rid_attr!r}'
-    page.run_js("document.querySelectorAll('#sessionBody .row-del')[0].click();")
+    page.run_js("document.querySelectorAll('#sessionBody .livedel-btn')[0].click();")
+    shown = False
+    for _ in range(20):
+        time.sleep(0.1)
+        if page.run_js("return document.getElementById('liveDelModal')"
+                       ".classList.contains('show');") is True:
+            shown = True
+            break
+    assert shown, '点 ✕ 没弹出居中确认框（共享组件没接上？）'
+    # 与主页同一套模态框 → 同样存一张「打开着」的视口截图当证据（截图失败不判红）
+    try:
+        page.get_screenshot(path=PNG_MODAL)
+        print('截图（模态框打开）：', PNG_MODAL, os.path.getsize(PNG_MODAL), 'bytes')
+    except Exception as _ex:
+        print('  ⚠️ 模态框截图失败（不影响断言）：', type(_ex).__name__)
+    page.run_js("document.getElementById('liveDelModalOk').click();")
     for _ in range(25):
         time.sleep(0.2)
         if page.run_js("return document.querySelectorAll('#sessionBody tr').length;") == 3:
@@ -264,7 +296,7 @@ try:
     badge3 = page.run_js("return document.getElementById('sessionCount').textContent;")
     print('删除一行后：', n3, badge3)
     assert n3 == 3, f'删除后应剩 3 行，实际 {n3}'
-    assert '3' in badge3, f'徽章应跟着变成 3：{badge3}'
+    assert badge3 == '有效 2 / 共 3', f'删除后徽章应回退成「有效 2 / 共 3」：{badge3!r}'
     assert m.db_has_customer('https://plasticbagpc.com') is False, '被删的那条应已从客户库消失'
     backups_after = sorted(os.listdir(m.db._backups_dir())) if os.path.isdir(m.db._backups_dir()) else []
     backup_new = [f for f in backups_after if f not in backups_before]
@@ -274,7 +306,7 @@ try:
     first_txt = page.run_js("return document.querySelectorAll('#sessionBody tr')[0].textContent;")
     print('删除后第一行：', first_txt)
     assert 'Wicket Bag' in first_txt, f'删完第一行应变成原第 2 条（不是整体清表），实际 {first_txt!r}'
-    print('  ✓ 每行 ✕ 删除：明细减一 + 客户库同步删 + 删前自动备份')
+    print('  ✓ 每行 ✕ 删除：明细减一；本条确实在库里时连库一起删 + 删前自动备份')
 
     # ---------- F. 输入校验 ----------
     page.run_js("window.__alerts = []; window.alert = s => window.__alerts.push(s);")

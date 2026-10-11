@@ -75,13 +75,43 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
 .nav-a { display:inline-block; background:#fff; color:#1a73e8; border:1px solid #dbe4f0; border-radius:8px;
   padding:8px 14px; font-size:13px; font-weight:600; text-decoration:none; }
 .nav-a:hover { background:#e8f0fe; border-color:#1a73e8; }
-/* 自定义搜索词卡片（第 6 卡）。⚠️ 与上面 .nav 同理：这几条也会被注入副页面，
+/* 自定义搜索词卡片（第 7 卡）。⚠️ 与上面 .nav 同理：这几条也会被注入副页面，
    但 .raw-card / .raw-off 只在主页用到，在那两页是无害的死规则 → 不必另开 <style>
    （更不许在本 <style> 之前插新块：_STYLE_RE.search() 只取第一个）。 */
 .raw-card textarea { width:100%; box-sizing:border-box; font-family:inherit; font-size:13px;
   line-height:1.7; padding:8px 10px; border:1px solid #d0d5dd; border-radius:6px; resize:vertical; }
 .raw-card textarea:disabled { background:#f6f7f9; color:#9aa0a6; cursor:not-allowed; }
 .raw-off { color:#b26a00; }
+/* 「📥 本轮已入库明细（实时）」逐行删除（点 ✕ 删掉这一条）。
+   ⚠️ 这段同样会被注入 manual.html / query.html。那两页各自已经有一套删除按钮与居中弹窗的
+      样式（delModal 系、modal 系、btn-plain / btn-danger，以及它们各自的 row-del / live-del
+      删除按钮），名字很近、极易撞车 —— 所以这里**必须**用 livedel- 前缀另起一套：复用上面
+      任一个都会和它们的本页样式互相污染，而哪条生效取决于文档顺序，症状极难排查。
+   ⚠️ 上面那几个名字在注释里都**不写前导的 . 和 #**：/db 页的负向断言是按子串判的，
+      写全了就假红（这条坑在 _check_page.py R9 的注释里也记着）。 */
+th.livedel-col, td.livedel-cell { width:38px; text-align:center; }
+.livedel-btn { border:0; background:transparent; color:#9aa0a6; cursor:pointer;
+  font-size:13px; font-weight:400; padding:2px 6px; border-radius:4px; line-height:1.4; }
+.livedel-btn:hover { color:#d93025; background:#fdeceb; }
+/* 采集已结束（或正在导出飞书）→ 整表只读：置灰 + 吃掉点击 */
+.live-wrap.livedel-ro .livedel-btn { color:#dcdfe3; cursor:not-allowed; pointer-events:none; }
+#liveDelModal { position:fixed; inset:0; z-index:1000; display:none; padding:20px;
+  background:rgba(32,38,45,.42); align-items:center; justify-content:center; }
+#liveDelModal.show { display:flex; }
+#liveDelModal .livedel-box { background:#fff; border-radius:12px; width:100%; max-width:440px;
+  padding:22px 24px 18px; box-shadow:0 12px 40px rgba(0,0,0,.22); animation:livedel-pop .14s ease-out; }
+@keyframes livedel-pop { from { transform:translateY(8px); opacity:0; } to { transform:none; opacity:1; } }
+#liveDelModal .livedel-t { font-size:16px; font-weight:600; color:#202124; margin-bottom:12px; }
+#liveDelModal .livedel-b { margin:0 0 18px; padding-left:20px; color:#5f6368; font-size:13px; line-height:1.9; }
+#liveDelModal .livedel-b li { list-style:disc; }
+#liveDelModal .livedel-f { display:flex; justify-content:flex-end; gap:10px; }
+.livedel-plain { background:#fff; color:#3c4043; border:1px solid #dadce0; border-radius:8px;
+  padding:8px 18px; font-size:13px; font-weight:600; cursor:pointer; }
+.livedel-plain:hover { background:#f6f8fa; }
+.livedel-danger { background:#d93025; color:#fff; border:1px solid #d93025; border-radius:8px;
+  padding:8px 18px; font-size:13px; font-weight:600; cursor:pointer; }
+.livedel-danger:hover { background:#c5221f; }
+.livedel-danger:disabled { background:#e8a5a1; border-color:#e8a5a1; cursor:not-allowed; }
 </style>
 </head>
 <body>
@@ -94,8 +124,17 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
     <a class="nav-a" href="/db">📊 客户库查询</a>
   </div>
 
+  <!-- 采集数量（第 1 卡）：刻意排在「目标国家」之前 —— 先定这一轮要多少条，再谈怎么搜。
+       三种链路（标准网页搜索 / 自定义搜索词 / 谷歌地图）都按它停；强必填，
+       清空后点「开始搜索」会被拦住（start() 里不做任何兜底默认值）。 -->
   <div class="card" style="margin-bottom:16px;">
-    <h3>1. 目标国家（单选，下拉选择）</h3>
+    <h3>1. 本次任务采集数量（必填，10-100）</h3>
+    <input type="number" id="targetCount" value="10" min="10" max="100" step="1" style="width:80px; margin:6px 0;">
+    <div class="note">本轮最多新增多少个新客户（10-100）；按新增个数计，不按是否抓到联系方式计。SQLite 客户库总量不设上限。<br>标准网页搜索 / 自定义搜索词 / 谷歌地图 三种链路都按这个数量停。</div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px;">
+    <h3>2. 目标国家（单选，下拉选择）</h3>
     <select id="countries" onchange="onCountry()" style="max-width:420px;"></select>
   </div>
 
@@ -114,7 +153,7 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
 
   <div class="grid">
     <div class="card" style="grid-column: span 1;">
-      <h3>2. 产品关键词（一行一个）</h3>
+      <h3>3. 产品关键词（一行一个）</h3>
       <textarea id="products" rows="4" placeholder="Cat Litter Box Liners&#10;Cat Litter Liners"></textarea>
       <div class="note">每行会自动加英文双引号做精确匹配</div>
       <div style="margin-top:10px; font-size:13px; color:#444; line-height:1.9;">
@@ -126,13 +165,13 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
     </div>
 
     <div class="card" id="condCard">
-      <h3>3. 搜索条件（勾选要跑的）</h3>
+      <h3>4. 搜索条件（勾选要跑的）</h3>
       <div id="conds"></div>
       <div class="note" id="condMapsHint" style="display:none;">地图模式只用「<b>第一个勾选条件</b>」的身份词拼进查询词（如法国用 grossiste）。<br>⚠️ 这一步不能省：实测只搜「nouilles」返回的全是餐馆，加上 grossiste 才出现食品批发商。其余条件不参与。</div>
     </div>
 
     <div class="card">
-      <h3>4. 参数</h3>
+      <h3>5. 参数</h3>
         <div style="margin:0 0 4px; font-size:14px;">数据源：</div>
         <label class="cond" style="display:block;"><input type="radio" name="source" value="google" checked onchange="onSource()"> 谷歌网页搜索（按关键词找公司官网）</label>
         <label class="cond" style="display:block;"><input type="radio" name="source" value="maps" onchange="onSource()"> 谷歌地图名录（找有实体地址的本地商家，带电话）</label>
@@ -154,9 +193,6 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
           <label class="cond" style="display:block;"><input type="radio" name="country_limit" value="both"> 两者都加（最强限定，结果会明显变少）</label>
           <div class="note" id="countryLimitHint">自定义搜索词模式下本设置不生效；美国不加 site:（.com 为主，.us 极少）。⚠️ 实测法国加 cr 后条数从 10 掉到 7、真客户反而被挤掉 —— 限定更严 ≠ 更准。</div>
         </div>
-        <br><label style="font-size:14px;">本次任务采集数量：</label>
-        <input type="number" id="targetCount" value="10" min="10" max="100" step="1" style="width:80px; margin:6px 0;">
-        <div class="note">本轮最多新增多少个新客户（10-100）；按新增个数计，不按是否抓到联系方式计。SQLite 客户库总量不设上限</div>
         <div style="margin:12px 0 4px; font-size:14px;">搜索方式：</div>
         <label class="cond"><input type="checkbox" id="autoEnrich" checked> 搜到一个就顺手抓它的联系方式（推荐）</label>
         <div class="note">勾选：每搜到一个新客户，立刻访问它抓邮箱/电话并评分，抓完（或确认抓不到）再搜下一个，凑够数量即停。每条会多花几秒，但不用等全部搜完；结果文件在整轮结束时一次写出。<br>不勾：只收集网站线索，邮箱电话留空，速度快，适合先铺量，稍后再双击「补历史欠账.py」批量补。<br>（地图模式下：地图本来就给电话和地址，不勾就是不再访问官网补邮箱。）</div>
@@ -175,7 +211,7 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
     </div>
 
     <div class="card">
-      <h3>5. 关键词组合预览（实时）</h3>
+      <h3>6. 关键词组合预览（实时）</h3>
       <div class="cmb-sum" id="comboSummary">…</div>
       <div class="cmb-box" id="comboList"></div>
       <div style="margin-top:10px; display:flex; gap:8px; align-items:center;">
@@ -185,18 +221,18 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
     </div>
   </div>
 
-  <!-- 自定义搜索词（第 6 卡）：完全原样发给谷歌 —— 不套条件模板、不自动加引号、不拼排除词，
+  <!-- 自定义搜索词（第 7 卡）：完全原样发给谷歌 —— 不套条件模板、不自动加引号、不拼排除词，
        也不做中国商家过滤；与上面的标准模式互斥（这栏有内容就只跑这里）。
        目标国家只用于给采到的数据打「国家」标记，不会写进搜索词。 -->
   <div class="card raw-card" id="rawCard">
-    <h3>6. 自定义搜索词（原样搜，不套上面的条件）</h3>
+    <h3>7. 自定义搜索词（原样搜，不套上面的条件）</h3>
     <textarea id="rawQueries" rows="4" placeholder="一行一条，原样发给谷歌。例：
 cat litter grossiste -site:.cn
 &quot;pet food&quot; importer Lyon"></textarea>
     <div class="note">
       这里写什么就<b>原样搜什么</b>：不自动加双引号、不套上面的条件词、不拼排除词，也不做中国商家过滤。<br>
-      只要这一栏有内容，本轮就<b>只跑这里</b>，上面第 3 步勾选的条件会被忽略；清空它即恢复正常模式。<br>
-      目标国家（第 1 步）只用于给采到的数据打「国家」标记，<b>不会</b>写进你的搜索词。
+      只要这一栏有内容，本轮就<b>只跑这里</b>，上面第 4 步勾选的条件会被忽略；清空它即恢复正常模式。<br>
+      目标国家（第 2 步）只用于给采到的数据打「国家」标记，<b>不会</b>写进你的搜索词。
     </div>
     <div class="note raw-off" id="rawMapsHint" style="display:none;">
       ⚠️ 地图模式不使用自定义搜索词：它走「关键词库 + 城市 + 身份词」。切回谷歌网页搜索即可使用。
@@ -212,22 +248,26 @@ cat litter grossiste -site:.cn
   </div>
   <div class="status" id="status"></div>
 
-  <div class="card live-wrap">
+  <div class="card live-wrap" id="liveWrap">
     <div class="live-head">
       <h3>📥 本轮已入库明细（实时）</h3>
       <span class="live-badge" id="liveCount">0 条</span>
       <span class="note" style="margin:0;">每搜到一个网站就立刻抓取联系方式并写入 SQLite，写入即在这里出现</span>
+      <span class="note" id="liveDelHint" style="margin:0;"></span>
     </div>
     <div class="live-scroll">
       <table class="live">
         <thead>
           <tr>
-            <th style="width:44px;">#</th>
+            <th style="width:40px;">#</th>
             <th>公司名称 / 官网</th>
-            <th style="width:190px;">邮箱</th>
-            <th style="width:140px;">电话</th>
-            <th style="width:60px;">评分</th>
-            <th style="width:84px;">评级</th>
+            <th style="width:170px;">邮箱</th>
+            <th style="width:120px;">电话</th>
+            <th style="width:56px;">评分</th>
+            <th style="width:80px;">评级</th>
+            <th style="width:90px;">行业</th>
+            <th style="width:80px;">国家</th>
+            <th class="livedel-col"></th>
           </tr>
         </thead>
         <tbody id="liveBody"></tbody>
@@ -239,9 +279,41 @@ cat litter grossiste -site:.cn
   <div class="log" id="log"></div>
 </div>
 
+<!-- 「本轮已入库明细（实时）」的表格渲染与逐行删除（含居中确认框）现在由共享组件
+     ui/live-table.js 提供 —— /manual 的「③ 本轮采集明细」用的是同一份，所以两页里都不再有
+     行模板、删除按钮和确认框的标记（原来这部分是两份近逐字重复的代码，改一边传不到另一边）。
+
+     下面这段是共享组件本体，由 core/ui.py 构建页面时把占位符整段换掉。
+     ⚠️ 它必须排在页面自己的脚本之前：那个脚本一执行就会调 makeLiveTable 建实例。
+     ⚠️ 注释里别写出脚本标签的字面量（连开标签也不行）：_check_page.py 用正则从整页里抠内嵌
+        JS 去喂 node --check，带上它就会从注释处开始截，报一堆莫名其妙的语法错。 -->
+<script>LIVE_TABLE_JS_PLACEHOLDER</script>
+
 <script>
-let since = 0, polling = null, renderedRows = 0;
+let since = 0, polling = null;
+// 现在能不能删：只有「采集进行中」才放行（导出飞书阶段 STATE['rows'] 还挂着上一轮的行，
+// 结果 Excel 早写好了，那时删就是「库删了、表还在」的假删除）。
+// 共享组件不自己猜这个状态，每次 syncLiveEditable() 都回头读这个变量。
+let liveEditable = false;
 let RUN_SOURCE = 'google';   // 本轮数据源：google / maps（由 start() 写入，poll() 用来切换文案）
+
+// 「📥 本轮已入库明细（实时）」= ui/live-table.js 里的共享组件，与 /manual「③ 本轮采集明细」
+// 是同一个实现。两页只有「数据源 / 主键 / 接口 / 门禁 / 是否列老客户」不一样，其余全在组件里。
+const liveTable = makeLiveTable({
+  tbodyId: 'liveBody', emptyId: 'liveEmpty', badgeId: 'liveCount',
+  wrapId: 'liveWrap', hintId: 'liveDelHint',
+  attr: 'data-n', keyField: 'n', endpoint: '/api/live/delete',
+  showExisted: false,                                // 本页只列本轮新入库的，不列「已在客户库」的老客户
+  canDelete: function(){ return !!liveEditable; },   // 由 poll() 按 running && phase==='search' 算出来
+  editHint: '· 可点 ✕ 删掉不要的那条（客户库同步删除，且不进本轮结果 Excel）',
+  readHint: '· 本轮已结束，如需整批清理请到「客户库查询」页删除',
+  afterRemove: function(){ return poll(); }           // 删完立刻重拉一次，表格/徽章不用等下一个整秒
+});
+
+// 下面三个是组件在本页的入口（poll() 与回归脚本都直接调它们），实现都在组件里。
+function renderRows(rows){ return liveTable.render(rows); }
+function syncLiveEditable(n){ return liveTable.syncEditable(n); }
+function deleteLiveRow(n){ return liveTable.remove(n); }
 
 function logBox(msg){
   const b = document.getElementById('log');
@@ -261,38 +333,8 @@ function ratingCls(r){
   return r === '重点客户' ? 'tag-r1' : r === '普通客户' ? 'tag-r2' : 'tag-r3';
 }
 
-// 实时渲染本轮已入库明细。只追加新增行（增量），避免每秒整体重绘导致滚动位置和 hover 状态丢失。
-function renderRows(rows){
-  const tb = document.getElementById('liveBody');
-  const empty = document.getElementById('liveEmpty');
-  const badge = document.getElementById('liveCount');
-  if (!Array.isArray(rows)) return;
-  if (rows.length < renderedRows){ tb.innerHTML = ''; renderedRows = 0; }   // 新一轮任务，清空重来
-  for (let i = renderedRows; i < rows.length; i++){
-    const r = rows[i] || {};
-    const dom = domainOf(r.url);
-    const mails = (r.emails && r.emails.length) ? r.emails.join(' / ') : '';
-    const phones = (r.phones && r.phones.length) ? r.phones.join(' / ') : '';
-    const tr = document.createElement('tr');
-    tr.className = 'row-new';
-    tr.innerHTML =
-      '<td>' + (r.n || (i + 1)) + '</td>' +
-      '<td><a class="live-co" href="' + esc(r.url) + '" target="_blank" rel="noopener" title="' + esc(r.title) + '">' +
-        esc(r.title) + '</a><br><span class="live-dom">' + esc(dom) + '</span></td>' +
-      '<td class="live-cell" title="' + esc(mails) + '">' +
-        (mails ? '<span class="live-mail">' + esc(mails) + '</span>' : '<span class="live-miss">未抓到</span>') + '</td>' +
-      '<td class="live-cell" title="' + esc(phones) + '">' +
-        (phones ? esc(phones) : '<span class="live-miss">未抓到</span>') + '</td>' +
-      '<td class="live-sc">' + (r.score == null ? '' : r.score) + '</td>' +
-      '<td><span class="tag-r ' + ratingCls(r.rating) + '">' + esc(r.rating) + '</span></td>';
-    tb.appendChild(tr);
-  }
-  renderedRows = rows.length;
-  badge.textContent = rows.length + ' 条';
-  if (empty) empty.style.display = rows.length ? 'none' : 'block';
-  const sc = tb.closest('.live-scroll');
-  if (sc) sc.scrollTop = sc.scrollHeight;   // 有新行时自动滚到底部
-}
+// 表格的行渲染、增量重画判据、删除按钮都在 ui/live-table.js 的 makeLiveTable() 里 ——
+// 上面那个 renderRows() 只是本页的入口（poll() 与回归脚本直接调它）。
 
 async function poll(){
   const r = await fetch('/api/status?since=' + since);
@@ -304,6 +346,11 @@ async function poll(){
   document.getElementById('counter').textContent =
     '本轮新增 ' + d.result_count + (RUN_SOURCE === 'maps' ? ' 个商家' : ' 个网站');
   renderRows(d.rows);
+  // 逐行删除只在「采集进行中」放行。⚠️ 不能只看 running：导出飞书阶段 running 也是 True，
+  // 但 phase === 'export' 而 STATE['rows'] 还挂着上一轮的行 —— 那时结果 Excel 早就写好了，
+  // 删了库也改不了表（假删除），所以后端与本处都按 running && phase==='search' 判定。
+  liveEditable = !!(d.running && d.phase === 'search');
+  syncLiveEditable(Array.isArray(d.rows) ? d.rows.length : 0);
   if (d.db_total != null){
     document.getElementById('dbCounter').textContent = 'SQLite 已存 ' + d.db_total + ' 条（已评分 ' +
       (d.db_verified == null ? '-' : d.db_verified) + '）';
@@ -312,8 +359,11 @@ async function poll(){
     clearInterval(polling); polling = null;
     setButtons(false);
     const s = document.getElementById('status');
-    s.innerHTML = '✅ 完成，结果文件：' + (d.output || '') +
-      ' <button class="btn-open" onclick="openFolder()">📂 打开结果文件夹</button>';
+    // 本轮结果可能为空（一条都没采到、或采到的全被 ✕ 删光了）—— 那就别留一句「结果文件：」晾在那
+    s.innerHTML = (d.output
+        ? '✅ 完成，结果文件：' + d.output +
+          ' <button class="btn-open" onclick="openFolder()">📂 打开结果文件夹</button>'
+        : '✅ 完成（本轮未产出结果文件）');
   } else if (d.running){
     setButtons(true);
     const s = document.getElementById('status');
@@ -324,6 +374,16 @@ async function poll(){
                   : '运行中…';
   }
 }
+
+// ---------- 「本轮已入库明细」逐行删除 ----------
+// 只读态置灰、事件委托、居中确认框、发删除请求，全在共享组件里（见文件顶部的 makeLiveTable 配置）。
+// 本页只留两件事：把「现在能不能删」喂给组件（syncLiveEditable），以及把点击转给组件。
+
+function onLiveBodyClick(e){ return liveTable.onClick(e); }
+
+// ⚠️ 事件委托挂 #liveBody（tbody）上，不要逐行绑：行是 innerHTML 拼好再 appendChild 的，
+//    删行后整表会重画，逐行绑的监听会跟着丢。
+document.getElementById('liveBody').addEventListener('click', onLiveBodyClick);
 
 async function loadDbStats(){
   try{
@@ -344,7 +404,10 @@ async function start(){
   const conditions = [...document.querySelectorAll('#conds input:checked')].map(i=>i.value);
     const countries = [document.getElementById('countries').value];
     const pages = document.getElementById('pages').value;
-    const targetCount = parseInt(document.getElementById('targetCount').value || '10');
+    const tcEl = document.getElementById('targetCount');
+    // 强必填（第 1 步）：刻意不做任何兜底默认值 —— 输入框被清空时 valueAsNumber 是 NaN，
+    // 下面那道校验会直接拦住，绝不会偷偷按 10 跑。别在这里补默认值。
+    const targetCount = tcEl ? tcEl.valueAsNumber : NaN;
     const exclude = [...document.querySelectorAll('#excludes input:checked')].map(i=>i.value).join(' ');
     const chinaFilters = [...document.querySelectorAll('#chinaFilters .china-filter:checked')]
       .map(i => i.dataset.key);
@@ -354,14 +417,22 @@ async function start(){
     const lang = curLang();                                                // 条件词语言（随后国家自动联动）
     const source = curSource();                                            // google=网页搜索 / maps=谷歌地图
     const city = curCity();                                                // 仅地图用
-    const raws = rawQueries();                                             // 第 6 卡自定义搜索词；地图模式下恒为空
+    const raws = rawQueries();                                             // 第 7 卡自定义搜索词；地图模式下恒为空
     const countryLimitVal = countryLimit();                                // 国家限定四选一（none/cr/site/both，仅标准模式生效）
-    if (!raws.length && !products.trim()){ alert('请填写产品关键词，或在第 6 步填一条自定义搜索词'); return; }
-    if (source !== 'maps' && !raws.length && !conditions.length){
-      alert('请至少勾选一个搜索条件，或在第 6 步填一条自定义搜索词'); return; }
-    if (!Number.isInteger(targetCount) || targetCount < 10 || targetCount > 100){
-      alert('本次任务采集数量只能设置为 10-100 的整数'); return;
+    // 采集数量是第 1 步，所以**先校验它**（三种链路都必填：标准网页 / 自定义搜索词 / 谷歌地图）
+    if (!Number.isFinite(targetCount)){
+      alert('请先填写本次任务采集数量（第 1 步，10-100 的整数）');
+      if (tcEl){ tcEl.focus(); tcEl.select(); }
+      return;
     }
+    if (!Number.isInteger(targetCount) || targetCount < 10 || targetCount > 100){
+      alert('本次任务采集数量只能填 10-100 的整数');
+      if (tcEl){ tcEl.focus(); tcEl.select(); }
+      return;
+    }
+    if (!raws.length && !products.trim()){ alert('请填写产品关键词，或在第 7 步填一条自定义搜索词'); return; }
+    if (source !== 'maps' && !raws.length && !conditions.length){
+      alert('请至少勾选一个搜索条件，或在第 7 步填一条自定义搜索词'); return; }
     const r = await fetch('/api/start', { method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({products, conditions, countries, pages, target_count: targetCount, exclude,
@@ -372,10 +443,11 @@ async function start(){
   RUN_SOURCE = source;
   logBox(source === 'maps' ? '====== 开始谷歌地图采集 ======' : '====== 开始搜索 ======');
   since = 0;
-  renderedRows = 0;                                     // 清空上一轮的实时明细，等后端 rows 到达后重建
-  document.getElementById('liveBody').innerHTML = '';
-  document.getElementById('liveCount').textContent = '0 条';
-  document.getElementById('liveEmpty').style.display = 'block';
+  // 清空上一轮的实时明细，等后端 rows 到达后重建。
+  // ⚠️ 组件内部会把「已渲染行数」与「已渲染末行主键」两个游标**一起**清零 —— 只清前者的话，
+  //    新一轮首帧若「条数没变少 + 末行主键恰好等于上一轮遗留的值」，增量判定会以为无需重画
+  //    → 表格永久空白。
+  liveTable.reset();
   document.getElementById('status').textContent = '运行中...';
   setButtons(true);
   polling = setInterval(poll, 1000);
@@ -618,9 +690,9 @@ function countryParams(){
   return s;
 }
 
-function esc(s){
-  return String(s).replace(/[&<>"]/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[ch]));
-}
+// ⚠️ 本脚本里 esc() 只留文件顶部那一个（空值安全的）。原先这里又定义了一遍，是**非**空值安全的
+//    （null 会变成字符串 "null"），而函数声明后者覆盖前者 —— 即真正生效的一直是这一份弱版本。
+//    删掉它让空值安全的那份生效；顺带避免「同一个函数在文件里有两个定义」这种排查陷阱。
 // 产品词 → 查询片段。组合规则与后端 run_search 完全一致：
 // OR → 所有词用括号包住后用 OR 连接；AND → 空格连接；分别搜 → 每词一条
 function productQueries(){
@@ -634,7 +706,7 @@ function productQueries(){
   const joined = pwords.join(' OR ');
   return [pwords.length > 1 ? '(' + joined + ')' : joined];
 }
-// 自定义搜索词（第 6 卡）：按行取，去掉空行与首尾空格。
+// 自定义搜索词（第 7 卡）：按行取，去掉空行与首尾空格。
 // 有内容即进入「自定义模式」—— 原样发给谷歌，与标准模式互斥（后端 run_search 同步实现）。
 function rawQueries(){
   const el = document.getElementById('rawQueries');
@@ -662,7 +734,7 @@ function renderCombos(){
     const hl    = curLang() || COUNTRY_LANG[code] || 'en';
     const gl    = COUNTRY_GL[code] || code;
     if (!pqs.length){
-      sum.textContent = '请先填写「2. 产品关键词」';
+      sum.textContent = '请先填写「3. 产品关键词」';
       box.innerHTML = '<div class="cmb-empty">暂无可预览的地图查询</div>';
       return;
     }
@@ -680,7 +752,7 @@ function renderCombos(){
       + '</div>');
     return;
   }
-  // 自定义搜索词（第 6 卡）：有内容就以它为准 —— 预览必须与后端实搜一致，
+  // 自定义搜索词（第 7 卡）：有内容就以它为准 —— 预览必须与后端实搜一致，
   // 所以这里也按「原样」，不拼排除词、不加引号。
   const raws = rawQueries();
   if (raws.length){
@@ -696,7 +768,7 @@ function renderCombos(){
     return;
   }
   if (!pqs.length || !conds.length){
-    sum.textContent = '请先填写「2. 产品关键词」，并至少勾选一个「3. 搜索条件」';
+    sum.textContent = '请先填写「3. 产品关键词」，并至少勾选一个「4. 搜索条件」';
     box.innerHTML = '<div class="cmb-empty">暂无可预览的组合</div>';
     return;
   }

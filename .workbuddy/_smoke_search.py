@@ -367,6 +367,65 @@ assert f_raw == ['cat litter grossiste'], f'自定义模式应原样：{f_raw}'
 assert p_raw == ['&gl=fr&hl=fr'], f'自定义模式不该加 cr：{p_raw}'
 print('  ✓ 互斥：自定义模式下国家限定被完全关掉')
 
+# ---- 运行中删除 → 那条**不进结果 Excel**（墓碑过滤） ----
+# 背景：结果 Excel 是 run_search 的 finally 用**它自己的局部 all_rows**写出的，与 STATE['rows']
+# 不是同一个列表。所以「页面上点 ✕」必须同时往 STATE['rows_deleted'] 记一笔，finally 才有据可滤。
+# 这段走的是**真实路径**：采集跑到第 2 条时，用 flask test_client 真打一次 /api/live/delete。
+# ⚠️ 必须放在下面「/api/start 的 HTTP 层」之前 —— 那一段会把 m.run_search 换成假实现。
+# ⚠️ 删除接口要求 running and phase=='search'，所以这里得先把 STATE 摆成「采集中」。
+#    （run_search 的 finally 会自己把 running 置回 False，不用手动复位。）
+LIVE_ITEMS = [{'title': f'Live Co {i}', 'url': f'https://liveco{i}.example.com/',
+               'snippet': 'wholesale distributor'} for i in (1, 2, 3)]
+LIVE_DEL = {'jd': None, 'enrich_n': 0}
+
+
+def fake_extract_live(page, seen_titles, china_filters=None):
+    # 一页直接给够 3 条，跑一轮就达标（不要靠多页凑，否则断言看不到「第 2 条处理时删第 1 条」）
+    return (list(LIVE_ITEMS), 0, {})
+
+
+def fake_enrich_live(page, url):
+    calls['enriched'].append(url)
+    # ⚠️ 不能用 len(calls['enriched']) 当计数：reset_calls() 只清 saved/formulas/params，不清 enriched，
+    #    整脚本跑下来它是累积的，永远等不到第 2 次。
+    LIVE_DEL['enrich_n'] += 1
+    if LIVE_DEL['enrich_n'] == 2:
+        # 第 2 条正在处理时，模拟用户在上面的实时明细里点了第 1 条的 ✕。
+        # （此时 worker 没持 STATE_LOCK —— enrich 的调用点在锁外，不会死锁。）
+        with m.app.test_client() as c:
+            LIVE_DEL['jd'] = c.post('/api/live/delete', json={'n': 1}).get_json()
+    return {'emails': [], 'phones': [], 'contact_url': ''}
+
+
+print('\n---- 运行中删除 → 不进结果 Excel ----')
+_orig_extract = m.extract_results
+_orig_enrich = m.enrich
+m.extract_results = fake_extract_live
+m.enrich = fake_enrich_live
+LIVE_DEL['enrich_n'] = 0
+reset_calls([])
+m.STATE.update(running=True, phase='search', rows=[], rows_deleted=[], result_count=0,
+               output='', stop=False)
+m.run_search(['cat litter'], ['wholesale'], FR, 1, '-alibaba', 'or', 3, '食品', True)
+jd = LIVE_DEL['jd'] or {}
+assert jd.get('ok') is True, f'采集进行中删一条应成功：{jd}'
+assert jd.get('deleted') == 1, f'客户库应同步删掉 1 条：{jd}'
+saved = calls['saved'] or []
+assert len(saved) == 2, f'删掉 1 条后落盘应只剩 2 条（墓碑过滤没生效就会是 3）：{len(saved)}'
+saved_urls = {r['url'] for r in saved}
+assert 'https://liveco1.example.com/' not in saved_urls, \
+    f'被删的那条仍进了结果 Excel（＝假删除）：{saved_urls}'
+assert saved_urls == {'https://liveco2.example.com/', 'https://liveco3.example.com/'}, \
+    f'留下来的应该是第 2、3 条：{saved_urls}'
+assert m.STATE['rows_deleted'] == [1], f'墓碑没记下：{m.STATE["rows_deleted"]}'
+assert len(m.STATE['rows']) == 2, f'内存明细应剩 2 条：{len(m.STATE["rows"])}'
+assert m.STATE['result_count'] == 2, \
+    f'计数应跟着表格走（否则「本轮新增 N 个网站」比表格多 1）：{m.STATE["result_count"]}'
+print(f'  ✓ 采集中删掉第 1 条：客户库删 1 条、内存明细 2 条、计数 2、落盘 2 条且不含被删那条')
+m.extract_results = _orig_extract
+m.enrich = _orig_enrich
+m.STATE.update(rows=[], rows_deleted=[], result_count=0)
+
 # ---- /api/start 的 HTTP 层：自定义词要真能送进去，且「产品词必填」这条校验要跟着放宽 ----
 # 用「打桩 worker」验证**参数传递**（不起真线程、不联网、不写库）：
 # api_start 里的 threading.Thread(target=run_search, ...) 是在调用时才查全局名，
@@ -395,28 +454,39 @@ def post_start(payload):
         return c.post('/api/start', json=payload).get_json()
 
 
-print('\n---- /api/start：自定义词的参数传递与校验 ----')
+print('\n---- /api/start：采集数量强必填 + 自定义词的参数传递与校验 ----')
+# ⓪ 采集数量（主页第 1 卡）**强必填**：缺字段 / 空串都必须被拒，绝不能静默按 10 跑
+#    （旧行为是 data.get('target_count', 10) → 缺键静默取 10，等于没必填）。
+#    ⚠️ 这三条都要带上 products，否则会先撞上「产品关键词」那条校验、根本测不到这一条。
+r = post_start({'products': 'x'})
+assert not r.get('ok') and '本次任务采集数量' in r.get('msg', ''), \
+    f'缺 target_count 应被拒（旧行为是静默取 10）：{r}'
+r = post_start({'products': 'x', 'target_count': ''})
+assert not r.get('ok') and '本次任务采集数量' in r.get('msg', ''), f'空串 target_count 应被拒：{r}'
+r = post_start({'products': 'x', 'target_count': 10})
+assert r.get('ok'), f'带合法 target_count 应放行：{r}'
+print('  ✓ 采集数量强必填：缺字段 / 空串都被拒（不再静默取 10），带合法值才放行')
 # ① 只填自定义词、产品词留空 → 必须放行（否则前端等于逼用户填一个用不上的产品词）
 spy_run['kw'] = None
-r = post_start({'products': '', 'custom_queries':
+r = post_start({'products': '', 'target_count': 10, 'custom_queries':
                 ['cat litter grossiste', '   ', 'cat litter grossiste', 123]})
 assert r.get('ok'), f'只填自定义词应放行，实际：{r}'
 assert spy_run['kw'] and spy_run['kw'].get('raw_queries') == ['cat litter grossiste'], \
     f'自定义词没传给 run_search（或空行/重复/非字符串没清干净）：{spy_run["kw"]}'
 print('  ✓ 只填自定义词即可开始；空行/重复/非字符串已清洗后再传给 run_search')
 # ② 两边都空 → 仍然要拦住（别把老校验一起放没了）
-r = post_start({'products': '', 'custom_queries': []})
+r = post_start({'products': '', 'target_count': 10, 'custom_queries': []})
 assert not r.get('ok') and '产品关键词' in r.get('msg', ''), f'两边都空应拦住，实际：{r}'
 print('  ✓ 产品词与自定义词都空时仍然拦住（老校验没被放没）')
 # ③ 超上限 → 拒绝（防误粘一大段文本把整轮拖成几小时）
-r = post_start({'products': 'x',
+r = post_start({'products': 'x', 'target_count': 10,
                 'custom_queries': [f'q{i}' for i in range(m.RAW_QUERY_MAX + 1)]})
 assert not r.get('ok') and str(m.RAW_QUERY_MAX) in r.get('msg', ''), f'超上限应拒绝，实际：{r}'
 print(f'  ✓ 超过 {m.RAW_QUERY_MAX} 条直接拒绝')
 # ④ 地图模式 → 自定义词被忽略，且不许塞给 run_maps
 spy_run['kw'] = None
 spy_maps['kw'] = None
-r = post_start({'products': 'x', 'custom_queries': ['zzz'], 'source': 'maps'})
+r = post_start({'products': 'x', 'target_count': 10, 'custom_queries': ['zzz'], 'source': 'maps'})
 assert r.get('ok'), f'地图模式应正常开始，实际：{r}'
 assert spy_maps['kw'] is not None, '地图模式没走 run_maps'
 assert spy_run['kw'] is None, '地图模式不该调用 run_search'
@@ -425,15 +495,125 @@ assert 'country_limit' not in (spy_maps['kw'] or {}), '国家限定被塞给了 
 print('  ✓ 地图模式下自定义词与国家限定都被忽略（仍走 run_maps）')
 # ⑤ 国家限定：透传给 run_search；非法值回落 none
 spy_run['kw'] = None
-r = post_start({'products': 'x', 'country_limit': 'both'})
+r = post_start({'products': 'x', 'target_count': 10, 'country_limit': 'both'})
 assert r.get('ok'), f'带国家限定应正常开始，实际：{r}'
 assert spy_run['kw'].get('country_limit') == 'both', \
     f'国家限定没透传给 run_search：{spy_run["kw"]}'
 spy_run['kw'] = None
-post_start({'products': 'x', 'country_limit': '乱写'})
+post_start({'products': 'x', 'target_count': 10, 'country_limit': '乱写'})
 assert spy_run['kw'].get('country_limit') == 'none', \
     f'非法限定值应回落 none：{spy_run["kw"]}'
 print('  ✓ 国家限定透传给 run_search；非法值回落 none')
+
+# ---- /api/live/delete 的 HTTP 层：校验、双删、墓碑、删前备份与节流 ----
+# 这一支的三条静默失效：① 采集结束后还放行（库删了、结果 Excel 早写好了 → 假删除）；
+#                      ② 非法/缺失的行号被当成合法（`n=True` 在 Python 里是 1，会误删第一条）；
+#                      ③ 只删内存不删库（下次采到同站被判「已在客户库」永久跳过）。
+print('\n---- /api/live/delete：主页实时明细逐行删除 ----')
+m.db_upsert_customer({'company_name': 'Live Del One', 'website': 'https://live-del-1.it/',
+                      'snippet': 'x', 'search_formula': 'f', 'country': '意大利', 'industry': '食品'})
+m.db_upsert_customer({'company_name': 'Live Keep Two', 'website': 'https://live-keep-2.it/',
+                      'snippet': 'x', 'search_formula': 'f', 'country': '意大利', 'industry': '食品'})
+assert m.db_has_customer('https://live-del-1.it/'), '前置：待删的那条应先落库'
+assert not m.db_has_customer('https://live-nodb-3.it/'), '前置：第 3 条库里本来就没有'
+
+
+def live_row(n, title, url, score=50):
+    return {'n': n, 'title': title, 'url': url, 'emails': [], 'phones': [], 'contact_url': '',
+            'score': score, 'rating': '普通客户' if score >= 50 else '观察',
+            'industry': '食品', 'country': '意大利'}
+
+
+LIVE_ROWS = [live_row(1, 'Live Del One', 'https://live-del-1.it/'),
+             live_row(2, 'Live Keep Two', 'https://live-keep-2.it/'),
+             live_row(3, 'Live No Db', 'https://live-nodb-3.it/', score=10)]
+
+
+def live_post(payload, running=True, phase='search'):
+    """打一次删除接口，并先把 STATE 摆成指定的运行态。"""
+    m.STATE.update(running=running, phase=phase)
+    with m.app.test_client() as c:
+        return c.post('/api/live/delete', json=payload).get_json()
+
+
+def live_reset():
+    m.STATE.update(rows=[dict(r) for r in LIVE_ROWS], rows_deleted=[], result_count=3,
+                   running=True, phase='search')
+
+
+live_reset()
+# ① 采集已结束 → 必须拒绝（前后端同判据：running and phase=='search'）
+jr = live_post({'n': 1}, running=False)
+assert jr.get('ok') is False, f'采集已结束时不该放行：{jr}'
+# ② 导出飞书阶段 → 也必须拒绝（running 是 True，但结果 Excel 早写好了）
+jex = live_post({'n': 1}, running=True, phase='export')
+assert jex.get('ok') is False, f'导出飞书阶段不该放行（库删了表还在 = 假删除）：{jex}'
+# ③ 非法/缺失行号一律拒绝，且不许动数据
+for _bad in ({}, {'n': 'abc'}, {'n': True}, {'n': 0}, {'n': -1}, {'n': None}):
+    jb = live_post(_bad)
+    assert jb.get('ok') is False, f'非法入参应拒绝：{_bad} → {jb}'
+    assert len(m.STATE['rows']) == 3, f'被拒的请求不该动明细：{_bad}'
+    assert m.STATE['rows_deleted'] == [], f'被拒的请求不该留墓碑：{_bad}'
+jsome = live_post({'n': 999})
+assert jsome.get('ok') is False, f'删不存在的行号应拒绝：{jsome}'
+print('  ✓ 采集已结束 / 导出飞书阶段 / 非法与缺失行号 / 不存在的行号 —— 全部拒绝且不动数据')
+
+# ④ 合法删除：双删 + 墓碑 + 计数 + 删前备份
+live_reset()
+# ⚠️ 备份判据必须看 **mtime**，不能只看「目录里有没有多出一个文件名」：
+#    core/db.py 的备份名只精确到**秒**（`客户库_删除前_%Y%m%d_%H%M%S`），而本脚本前面那段
+#    「运行中删除」也已经真删过一次、也写过一份备份。两次若落在**同一秒** → 第二次会直接覆盖
+#    同名文件 → 文件名的集合差集是空的 → 这条断言会**假红**（已经真的红过一次，别改回去）。
+#    所以改判「接口返回的那个文件名，这一次是不是被写过」：新文件（before 里没有）或 mtime 变新，都算。
+BDIR = m.db._backups_dir()
+
+
+def _bak_snap():
+    return {f: os.path.getmtime(os.path.join(BDIR, f)) for f in os.listdir(BDIR)} \
+        if os.path.isdir(BDIR) else {}
+
+
+snap_before = _bak_snap()
+m.db._DELETE_BACKUP_MIN_INTERVAL = 0        # 强制这一次一定备份（否则被 300 秒节流挡掉）
+m.db._last_delete_backup_at = 0
+jd = live_post({'n': 1})
+assert jd.get('ok') is True, f'采集中删一条应成功：{jd}'
+assert jd.get('deleted') == 1, f'客户库里应真删掉 1 条：{jd}'
+assert jd.get('rows') == 2, f'删完明细应剩 2 条：{jd}'
+assert jd.get('backup'), f'返回里没带备份文件名（删前备份没生效）：{jd}'
+backup_path = os.path.join(m.db._backups_dir(), jd['backup'])
+assert os.path.isfile(backup_path), f'备份文件没真的落盘：{backup_path}'
+assert _under_tmp(backup_path), f'备份被写到了真实 DB/backups/：{backup_path}'
+assert len(m.STATE['rows']) == 2 and [r['n'] for r in m.STATE['rows']] == [2, 3], \
+    f'内存明细应剩下 n=2,3：{m.STATE["rows"]}'
+assert m.STATE['rows_deleted'] == [1], f'墓碑没记下：{m.STATE["rows_deleted"]}'
+assert m.STATE['result_count'] == 2, f'计数应跟着表格走：{m.STATE["result_count"]}'
+assert m.db_has_customer('https://live-del-1.it/') is False, '被删的那条应真的从客户库消失'
+assert m.db_has_customer('https://live-keep-2.it/') is True, '没被删的那条不该连坐'
+snap_after = _bak_snap()
+assert jd['backup'].startswith('客户库_删除前_'), \
+    f'返回的备份名应带「客户库_删除前_」前缀：{jd["backup"]}'
+assert snap_before.get(jd['backup']) != snap_after.get(jd['backup']), \
+    f'删除前应自动备份客户库（{jd["backup"]} 不是这次新写的快照）：{snap_after}'
+print(f'  ✓ 双删生效（客户库 -1、明细剩 n=2,3、计数 2），删前备份落在临时目录')
+
+# ⑤ 300 秒节流：紧接着再删一条，不该再产备份
+m.db._DELETE_BACKUP_MIN_INTERVAL = 300
+before2 = sorted(os.listdir(m.db._backups_dir()))
+jk = live_post({'n': 2})
+assert jk.get('ok') is True and jk.get('backup') == '', f'节流期间不该再备份：{jk}'
+assert sorted(os.listdir(m.db._backups_dir())) == before2, '节流期间 backups 目录不该新增文件'
+assert m.STATE['rows_deleted'] == [1, 2], f'第二条的墓碑也没记下：{m.STATE["rows_deleted"]}'
+assert m.db_has_customer('https://live-keep-2.it/') is False, '第二条也该从客户库删掉'
+# ⑥ 库里本来就没有的站：删得掉明细，但客户库返回 0（不是报错）
+jn = live_post({'n': 3})
+assert jn.get('ok') is True and jn.get('deleted') == 0, \
+    f'库里没有的站应正常返回 deleted=0（不能报错）：{jn}'
+assert m.STATE['rows'] == [], f'明细应被删空：{m.STATE["rows"]}'
+assert m.STATE['result_count'] == 0, f'删空后计数应归零：{m.STATE["result_count"]}'
+print('  ✓ 300 秒节流生效；库里没有的站正常返回 deleted=0（明细照删、不报错）')
+m.db._DELETE_BACKUP_MIN_INTERVAL = 300
+m.STATE.update(rows=[], rows_deleted=[], result_count=0, running=False, phase='')
 
 print('\n✅ 冒烟测试全部通过')
 

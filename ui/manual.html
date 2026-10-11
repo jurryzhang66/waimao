@@ -21,12 +21,9 @@
 .steps code { background:#f1f3f4; padding:1px 6px; border-radius:4px; font-family:Consolas,monospace; }
 .warn { background:#fff8e6; border:1px solid #f0d9a0; border-radius:8px; padding:10px 12px;
   font-size:13px; color:#8a6d1f; margin-top:10px; line-height:1.7; }
-/* ③ 本轮明细每行的删除按钮。⚠️ 写在本页这个 <style> 里，别混进 page.html 那份公共样式 ——
-   那份被 _page_style() 注入到全部三个页面，往里头加本页专有的事会顺带影响 / 与 /db。 */
-.live-del-th, .live-del { width:38px; text-align:center; }
-.row-del { border:0; background:transparent; color:#9aa0a6; cursor:pointer;
-  font-size:13px; padding:2px 6px; border-radius:4px; line-height:1.4; }
-.row-del:hover { color:#d93025; background:#fdeceb; }
+/* ③ 本轮明细每行的删除按钮、只读置灰与居中确认框，都用共享块里的 livedel- 前缀 ——
+   那套样式写在 ui/page.html 的第一个 <style> 里，由 _page_style() 注入本页，
+   与主页「📥 本轮已入库明细（实时）」是同一套。本页不再自带一份删除按钮样式。 */
 </style>
 </head>
 <body>
@@ -87,7 +84,7 @@
   <div class="card live-wrap" style="margin-bottom:16px;">
     <div class="live-head">
       <h3>③ 本轮采集明细</h3>
-      <span class="live-badge" id="sessionCount">0 条</span>
+      <span class="live-badge" id="sessionCount">有效 0 / 共 0</span>
       <span class="status" id="sessionStatus">本轮未开始</span>
       <button class="btn-start" id="btnSessionStart" onclick="sessionStart()">🟢 开始本轮采集</button>
       <button class="btn-stop" id="btnSessionFinish" onclick="sessionFinish()" disabled>🏁 结束并生成 Excel</button>
@@ -95,9 +92,19 @@
     </div>
     <div class="live-scroll">
       <table class="live">
-        <thead><tr><th>#</th><th>公司 / 官网</th><th>邮箱</th><th>电话</th>
-          <th>评分</th><th>评级</th><th>行业</th><th>国家</th>
-          <th class="live-del-th"></th></tr></thead>
+        <thead>
+          <tr>
+            <th style="width:40px;">#</th>
+            <th>公司名称 / 官网</th>
+            <th style="width:170px;">邮箱</th>
+            <th style="width:120px;">电话</th>
+            <th style="width:56px;">评分</th>
+            <th style="width:80px;">评级</th>
+            <th style="width:90px;">行业</th>
+            <th style="width:80px;">国家</th>
+            <th class="livedel-col"></th>
+          </tr>
+        </thead>
         <tbody id="sessionBody"></tbody>
       </table>
       <div class="live-empty" id="sessionEmpty">本轮还没有采集到条目…</div>
@@ -120,6 +127,16 @@
 
   <div class="log" id="log"></div>
 </div>
+
+<!-- 「③ 本轮采集明细」的表格渲染与逐行删除（含居中确认框）现在由共享组件
+     ui/live-table.js 提供 —— 自动搜索主页的「📥 本轮已入库明细（实时）」用的是同一份，
+     所以两页里都不再有行模板、删除按钮和确认框的标记。
+
+     下面这段是共享组件本体，由 core/ui.py 构建页面时把占位符整段换掉。
+     ⚠️ 它必须排在页面自己的脚本之前：那个脚本一执行就会调 makeLiveTable 建实例。
+     ⚠️ 注释里别写出脚本标签的字面量（连开标签也不行）：_check_page.py 用正则从整页里抠内嵌
+        JS 去喂 node --check，带上它就会从注释处开始截，报一堆莫名其妙的语法错。 -->
+<script>LIVE_TABLE_JS_PLACEHOLDER</script>
 
 <script>
 let since = 0, polling = null;
@@ -170,20 +187,51 @@ function renderHeart(st){
 }
 
 // ==================== 本轮采集明细（实时） ====================
-// 游标式增量追加：只渲染 session_rows 里比上次多的那几条，新行带 .row-new 淡入。
-// 与自动搜索页的 renderRows() 同一套写法（那边渲染 STATE['rows']，表头少两列）。
-let renderedSession = 0;
+// 表格本身（行渲染 / 增量重画判据 / 删除按钮 / 居中确认框）是共享组件 ui/live-table.js ——
+// 与自动搜索主页的「📥 本轮已入库明细（实时）」是同一份实现，本页只负责喂数据、收点击。
+const sessionTable = makeLiveTable({
+  tbodyId: 'sessionBody', emptyId: 'sessionEmpty', badgeId: 'sessionCount',
+  attr: 'data-rid', keyField: 'rid', endpoint: '/api/manual/session/delete',
+  showExisted: true,                              // 本页要把「已在客户库」的跳过期也留一行痕
+  canDelete: function(){ return true; },          // 结束时后端会把 session_rows 清空，天然没有可删的行
+  badgeText: function(st, n){ return liveBadgeText(st, n); },   // 徽章报两组数：有效 / 共
+  badgeTitle: function(st, n){ return breakdownText(st, n); },
+  afterRemove: function(){ return loadManualState(); },
+  // ⚠️ 确认框 / ✕ 的 title 必须按**本页语义**改写（组件默认那套是给主页自动搜索写的）。
+  //    手动采集是「点『🏁 结束并生成 Excel』才一次性入库」，所以本轮明细里的行**通常还没进
+  //    客户库** —— 删它只是从「待入库清单」里拿掉，客户库不动、也不该平白备份一份。
+  //    只有「已入库成功、但结果 Excel 没写成功」的例外行才会连客户库一起删（那时才备份）。
+  removeTitle: '从本轮明细里删掉这一条',
+  modal: { body: [
+    '删掉后不再进入本轮结果 Excel（点「结束」时那次入库也就不会写它）',
+    '本轮的行通常还没进客户库（入库在点「🏁 结束并生成 Excel」那一刻）→ 客户库不动、也不备份',
+    '灰字「已在客户库」行是别人的老客户，删除只动明细、绝不删库'
+  ]},
+});
 
-// ==================== 计数口径：为什么「已采条数」≠「Excel 行数」 ====================
-// 这是最容易被当成 bug 的地方，两个口径必须一起报：
-//   · 「已采 / 明细行数」＝ session_rows 的长度 ＝ 新增 + 已在库（每条点过都留一行痕）
-//   · 结果 Excel 只写「新增」—— 已在客户库的老客户刻意不重复进表（否则导飞书会重复推送）
-// 所以 Excel 行数天然小于「已采条数」，差额就是「已在库」那部分。
+// ==================== 计数口径：有效数 / 采集总数（两组数） ====================
+// 徽章与状态行都报**两组数**，不再把两者混成一个「已采 N 条」：
+//   · 有效数   ＝ 真正写进客户库、也写进结果 Excel 的新客户 ＝ st.added
+//   · 采集总数 ＝ 本轮点过/采过的全部明细行 ＝ session_rows 的长度 ＝ 新增 + 已在库
+// 差额就是「已在客户库」的重复条目（后端刻意留一行灰字痕，好回答「我刚点的那条去哪了」）。
+// 老写法只报「已采 N 条」（＝总数），会把重复的也算进成功数，看着像多采了。
+function liveBadgeText(st, n){
+  n = n || 0;
+  // ⚠️ 只用「本轮进行中」时的 st.added：本轮结束后端会把 session_rows 清空、但 added/existed
+  //    刻意留着给「本轮写入 X 行」那句落盘文案用（见 _flush_manual_session）——
+  //    这时明细是空的，直接取 st.added 会报出「有效 5 / 共 0」这种自相矛盾的数字。
+  var a = (st && st.session_active) ? (st.added || 0) : 0;
+  return '有效 ' + a + ' / 共 ' + n;
+}
+
 function breakdownText(st, n){
   if (!st || (st.added == null && st.existed == null)) return '';
+  // 本轮已结束时明细已清零（added/existed 只是留给 roundTally 的）→ 别再拿它们拼算式，
+  // 否则悬停会显示「有效 5 条 / 采集总数 0 条」这种自相矛盾的数字。
+  if (!st.session_active) return '';
   const a = st.added || 0, e = st.existed || 0;
-  return '已采 ' + n + ' 条 = 新增 ' + a + ' + 已在库 ' + e +
-         '；结果 Excel 只写「新增」的 ' + a + ' 条';
+  return '有效 ' + a + ' 条 / 采集总数 ' + n + ' 条 = 新增 ' + a + ' + 已在库 ' + e +
+         '；结果 Excel 只写「有效（新增）」的 ' + a + ' 条';
 }
 
 // 轮已结束时，把「这份表里到底写了几行」直接说在结果文件那行上。
@@ -197,52 +245,8 @@ function roundTally(st){
          (e ? '，另有 ' + e + ' 条已在客户库、未重复写入' : '');
 }
 
-function renderSession(rows, st){
-  const tb = document.getElementById('sessionBody');
-  const empty = document.getElementById('sessionEmpty');
-  rows = Array.isArray(rows) ? rows : [];
-  // 行数变少（开了新一轮 / 本轮被清空）→ 整体重来，否则游标会错位
-  if (rows.length < renderedSession){ tb.innerHTML = ''; renderedSession = 0; }
-  for (let i = renderedSession; i < rows.length; i++){
-    const r = rows[i] || {};
-    const old = r.kind === 'existed';        // 「已在客户库，跳过」的轻量行（只有 title/url）
-    const mails  = (!old && r.emails && r.emails.length)  ? r.emails.join(' / ')  : '';
-    const phones = (!old && r.phones && r.phones.length)  ? r.phones.join(' / ')  : '';
-    const tr = document.createElement('tr');
-    tr.className = 'row-new';
-    tr.innerHTML =
-      '<td>' + (i + 1) + '</td>' +
-      '<td><a class="live-co" href="' + esc(r.url) + '" target="_blank" rel="noopener" ' +
-        'title="' + esc(r.title) + '">' + esc(r.title) + '</a><br>' +
-        '<span class="live-dom">' + esc(domainOf(r.url)) + '</span></td>' +
-      '<td class="live-cell">' + (old ? '<span class="live-miss">已在客户库</span>'
-            : (mails ? '<span class="live-mail">' + esc(mails) + '</span>'
-                     : '<span class="live-miss">未抓到</span>')) + '</td>' +
-      '<td class="live-cell">' + (old ? '<span class="live-miss">—</span>'
-            : (phones ? esc(phones) : '<span class="live-miss">未抓到</span>')) + '</td>' +
-      '<td class="live-sc">' + (old ? '' : (r.score == null ? '' : r.score)) + '</td>' +
-      '<td>' + (old ? '' : '<span class="tag-r ' + ratingCls(r.rating) + '">' +
-                          esc(r.rating) + '</span>') + '</td>' +
-      '<td>' + esc(r.industry || '') + '</td>' +
-      '<td>' + esc(r.country || '') + '</td>' +
-      // 第 9 列：✕ 删掉这一条（明细 + 客户库双删，删前后端自动备份客户库）。
-      // data-rid 是后端发的本轮内唯一行号 —— 同一个网址在同一轮里可能有两条
-      // （一条 added、一条 existed），所以不能靠 url 定位。缺 rid 时留空、点了不动作。
-      '<td class="live-del"><button type="button" class="row-del" data-rid="' +
-        esc(r.rid == null ? '' : String(r.rid)) +
-        '" title="从本轮明细和客户库删掉这一条">✕</button></td>';
-    tb.appendChild(tr);
-  }
-  renderedSession = rows.length;
-  const badge = document.getElementById('sessionCount');
-  badge.textContent = rows.length + ' 条';
-  // 徽章数的是「明细行数」＝ 新增 + 已在库；而结果 Excel 只写「新增」。
-  // 只报一个数会让人以为表漏写了，悬停把这道算式讲清楚。
-  badge.title = breakdownText(st, rows.length);
-  empty.style.display = rows.length ? 'none' : 'block';
-  const sc = tb.closest('.live-scroll');
-  if (sc) sc.scrollTop = sc.scrollHeight;      // 始终停在最新一条
-}
+// 本页的表格入口：loadManualState() 每秒调一次，回归脚本也直接调它。
+function renderSession(rows, st){ return sessionTable.render(rows, st); }
 
 // 本轮状态行：进行中 / 上一轮已生成 / 落盘失败（红字，保留数据可直接重试）
 function renderSessionStatus(st){
@@ -255,12 +259,10 @@ function renderSessionStatus(st){
   }
   el.style.color = '';
   if (st.session_active){
-    const bits = ['已采 ' + n + ' 条'];
-    // ⚠️ 必须把「新增 / 已在库」拆开报：明细行数 = 新增 + 已在库，而 Excel 只写新增。
-    //    只报「已采 N 条」会让人以为表漏写了（实测踩过：已采 17 条、表里 13 行）。
-    if (st.added != null || st.existed != null){
-      bits.push('新增 ' + (st.added || 0) + ' · 已在库 ' + (st.existed || 0));
-    }
+    // ⚠️ 两组数必须一起报：有效数 = 真正入库的新客户（＝结果 Excel 行数），
+    //    采集总数 = 明细行数（含「已在客户库」的重复）。只报总数会被当成成功数。
+    const bits = ['有效 ' + (st.added || 0) + ' · 采集总数 ' + n];
+    if (st.existed != null) bits.push('已在库 ' + (st.existed || 0));
     if (st.session_industry) bits.push('行业 ' + st.session_industry);
     if (st.session_country) bits.push('国家 ' + st.session_country);
     if (st.running) bits.push('批量 ' + (st.done || 0) + '/' + (st.total || 0));
@@ -308,8 +310,10 @@ async function sessionStart(){
     body: JSON.stringify({industry: document.getElementById('industry').value,
                           country: document.getElementById('country').value})})).json();
   if (!d.ok){ alert(d.msg); return; }
-  renderedSession = 0;
-  document.getElementById('sessionBody').innerHTML = '';
+  // 清空上一轮明细。组件内部会把「已渲染行数」与「已渲染末行主键」两个游标**一起**清零 ——
+  // 只清前者的话，新一轮首帧若「条数没变少 + 末行主键恰好等于上一轮遗留的值」，增量判定会
+  // 以为无需重画 → 表格永久空白。
+  sessionTable.reset();
   logBox('====== 已开始本轮采集 ======');
   loadManualState();
 }
@@ -393,28 +397,17 @@ async function closeBrowser(){
 
 async function openFolder(){ await fetch('/api/open_folder', {method:'POST'}); }
 
-// 「本轮明细」每行的 ✕：从本轮明细 + 客户库都删掉这一条，且不再进入本次生成的结果 Excel。
+// 「本轮明细」每行的 ✕：把这一条从本轮明细里拿掉。
+// 2026-10-11 起手动采集是「点『🏁 结束并生成 Excel』才一次性入库」，所以本轮的行**通常还没进
+// 客户库** → 删它只是从「待入库清单」里拿掉（客户库不动、也不备份）；灰字「已在客户库」行更是
+// 别人的老客户，绝不连带删库。只有「已入库但 Excel 没写成功」的例外行才会连库一起删。
+// 确认框（居中模态框）、POST、日志、重拉都在共享组件里 —— 与主页那张表是同一套实现，
+// 所以本页不再有自己的确认与请求代码。
 // ⚠️ 事件委托挂在 #sessionBody（tbody）上，不要逐行绑：行是 innerHTML 拼好再 appendChild 的，
-//    且 sessionStart() 换轮和「行数变少」时都会 innerHTML=''，逐行绑的监听会跟着丢。
-function onSessionBodyClick(e){
-  const btn = (e.target && e.target.closest) ? e.target.closest('.row-del') : null;
-  if (!btn) return;
-  const rid = btn.getAttribute('data-rid');
-  if (rid === null || rid === '') return;   // 没有 rid 的行（如人工造的假数据）不动作
-  deleteSessionRow(Number(rid));
-}
+//    且换轮和「行数变少」时都会整表重画，逐行绑的监听会跟着丢。
+function onSessionBodyClick(e){ return sessionTable.onClick(e); }
 
-async function deleteSessionRow(rid){
-  if (!confirm('确定删除这一条吗？\n\n会同时从「本轮明细」和「客户库」删掉它，\n'
-             + '也不会进入本次生成的结果 Excel。\n（后端会先自动备份一份客户库）')) return;
-  const d = await (await fetch('/api/manual/session/delete', {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({rid})})).json();
-  if (!d.ok){ alert(d.msg || '删除失败'); return; }
-  logBox('🗑️ 已删除一条' + (d.deleted ? '（客户库同步删掉 1 条）' : '（客户库里没有这条记录）')
-         + (d.backup ? '，已备份：' + d.backup : '（本轮已有备份，未重复备份）'));
-  loadManualState();
-}
+function deleteSessionRow(rid){ return sessionTable.remove(rid); }
 
 loadIndustries();
 probe();

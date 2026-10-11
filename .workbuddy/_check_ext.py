@@ -29,7 +29,28 @@ sys.stdout.reconfigure(encoding='utf-8')
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXT = os.path.join(ROOT, 'extension')
 ENTRY = os.path.join(ROOT, '客户开发工具.py')
-NODE = r'C:\Users\admin\.workbuddy\binaries\node\versions\22.22.2-3\node.exe'
+
+
+def _find_node():
+    """定位 managed node.exe。
+
+    ⛔ 别把版本号写死：本机从 22.22.2-3 升到 22.22.2-6 时，写死的路径直接
+    FileNotFoundError —— 看着像「回归红了」，其实是环境漂移的假红。
+    取 versions/ 下最新的一个（版本号字典序即可），最后才退回旧写死路径。
+    """
+    base = os.path.join(os.environ.get('USERPROFILE') or r'C:\Users\admin',
+                        '.workbuddy', 'binaries', 'node', 'versions')
+    try:
+        for d in sorted(os.listdir(base), reverse=True):
+            p = os.path.join(base, d, 'node.exe')
+            if os.path.isfile(p):
+                return p
+    except OSError:
+        pass
+    return r'C:\Users\admin\.workbuddy\binaries\node\versions\22.22.2-3\node.exe'
+
+
+NODE = _find_node()
 
 FAILS = []
 WARNS = []

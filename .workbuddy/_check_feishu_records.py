@@ -73,6 +73,12 @@ ROWS = [
         '[手动采集] https://manual-saudi.com', country='沙特', emails=['info@manual-saudi.com']),
     # 客户库里来源是个飞书表里没有的怪值 → 应回落「谷歌搜索」并记警告，不能整条崩
     row('Weird Source Co', 'https://weird-source.com', 60, 'cat litter supplier'),
+    # 多邮箱（新格式：逗号）→「邮箱」取第一个，其余写进备注，且用逗号分隔（用户要求）
+    row('Multi Comma Co', 'https://multi-comma.com', 70, 'cat litter supplier',
+        emails=['first@multi-comma.com', 'second@multi-comma.com'], country='法国'),
+    # 多邮箱（**旧格式**：斜杠）→ 由下面手工改写 Excel 邮箱格制造，验证 split_emails 向后兼容
+    row('Multi Slash Co', 'https://multi-slash.com', 70, 'cat litter supplier',
+        emails=['one@multi-slash.com', 'two@multi-slash.com'], country='法国'),
 ]
 m._save_enrich_excel(ROWS, industry='塑料包装袋')
 check(os.path.exists(m.paths.ENRICH_FILE), '临时结果文件已生成')
@@ -86,6 +92,10 @@ for _r in range(2, _ws.max_row + 1):
     if _ws.cell(_r, 2).value == 'https://manual-noscore.com':
         _ws.cell(_r, 6).value = None
         _blanked += 1
+    elif _ws.cell(_r, 2).value == 'https://multi-slash.com':
+        # 制造**旧格式**邮箱格（2026-10-11 之前 Excel 里写的是 ' / '）——
+        # 用来验证飞书导出的 split_emails 能向后兼容存量数据（只认逗号会把这行邮箱全丢）。
+        _ws.cell(_r, 3).value = 'one@multi-slash.com / two@multi-slash.com'
 _wb.save(m.paths.ENRICH_FILE)
 _wb.close()
 check(_blanked == 1, '把「Manual No Score Co」那行的评分格清空了（制造空评分样本）', f'blanked={_blanked}')
@@ -111,7 +121,7 @@ print('\n========== ① 50 分门槛与豁免 ==========')
 check('https://manual-low.com' in by_url, '手动采集 + 30 分 → **导出**（豁免门槛）')
 check('https://auto-low.com' not in by_url, '自动链路 + 30 分 → **不导出**（门槛仍然生效）')
 check('https://auto-high.com' in by_url, '自动链路 + 75 分 → 导出')
-check(len(recs) == 5, f'共 5 条（6 行里只砍掉 auto-low）（实际 {len(recs)}）')
+check(len(recs) == 7, f'共 7 条（8 行里只砍掉 auto-low）（实际 {len(recs)}）')
 
 print('\n========== ② 来源渠道按网址回库查 ==========')
 check(by_url.get('https://manual-low.com', {}).get('来源渠道') == ['手动采集'],
@@ -149,6 +159,19 @@ check(by_url.get('https://manual-low.com', {}).get('跟进状态') == ['未联�
       '跟进状态默认「未联系」')
 check(by_url.get('https://manual-low.com', {}).get('使用的搜索公式') == '[手动采集] https://manual-low.com',
       '搜索公式原样带过去（飞书那边靠它追溯来源）')
+
+print('\n========== ⑤ 多邮箱：逗号分隔 + 兼容旧斜杠数据 ==========')
+mc = by_url.get('https://multi-comma.com', {})
+check(mc.get('邮箱') == 'first@multi-comma.com',
+      '多邮箱只取第一个进飞书「邮箱」字段（该字段只收单个邮箱）', str(mc.get('邮箱')))
+check('其他邮箱：second@multi-comma.com' in (mc.get('备注') or ''),
+      '其余邮箱进备注「其他邮箱」，且用逗号分隔（不是斜杠）', str(mc.get('备注')))
+check(' / ' not in (mc.get('备注') or ''), '逗号格式的行，备注里不该再出现斜杠', str(mc.get('备注')))
+ms = by_url.get('https://multi-slash.com', {})
+check(ms.get('邮箱') == 'one@multi-slash.com',
+      '**旧斜杠格式**的存量数据仍能拆出第一个邮箱（split_emails 向后兼容）', str(ms.get('邮箱')))
+check('其他邮箱：two@multi-slash.com' in (ms.get('备注') or ''),
+      '旧格式的其余邮箱也照旧进备注（没被当成一个长邮箱静默丢掉）', str(ms.get('备注')))
 
 print('\n' + '=' * 62)
 shutil.rmtree(TMP, ignore_errors=True)

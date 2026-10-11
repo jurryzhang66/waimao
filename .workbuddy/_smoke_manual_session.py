@@ -6,9 +6,9 @@
 两个会话路由跑起来；数据库与 output 都指向临时目录，绝不碰真实客户库。
 
 覆盖 12 组：
-  ① 无会话时扩展单点采集 → 自动开一轮（口径取请求里的行业/国家），且**不落盘**
+  ① 无会话时扩展单点采集 → 自动开一轮（口径取请求里的行业/国家），且**不写库、不落盘**
   ② /api/manual/batch 并入同一轮 → 批量子过程字段与本轮累计字段各管各的
-  ③ 结束时落一份 10 列结果文件（降序、成为「最新结果文件」、本轮清零）
+  ③ 结束时**先入库**、再落一份 10 列结果文件（降序、成为「最新结果文件」、本轮清零）
   ④ 文件名口径 = 开轮那一刻的行业/国家；同分钟再落一次自动加 _2，不覆盖
   ⑤ 空轮直接结束 → 不产文件、不动「最新结果文件」指针
   ⑥ 本轮还有内容时再点「开始本轮」→ 被拒，且不清空已有明细
@@ -16,7 +16,8 @@
   ⑧ 落盘失败（Excel 被占用）→ 保留本轮数据 + 错误提示；恢复后一键重试成功
   ⑨ /api/manual/state 的 session_* 字段契约
   ⑩ 自动任务运行时拒绝开本轮
-  ⑪ 删除单条明细 → 明细与客户库双删、删前自动备份（含节流）、计数回退、被删条目不进 Excel
+  ⑪ 删除单条明细：本轮还没入库 → 只动内存（不碰库/不产备份）；附老客户灰字行（绝不动库）
+     与「已入库但 Excel 没写成功」（唯一会动库、需双删）两条分支
   ⑫ 去重键自愈：website_key 恒等于 normalize_domain(website)（否则同站会被反复算「新客户」）
 
 用法：python .workbuddy\\_smoke_manual_session.py
@@ -182,6 +183,9 @@ check(st['session_rows'][0]['kind'] == 'added', '明细行带 kind=added')
 check(st['session_excel'] == '', '还没结束，session_excel 应为空')
 check(m.paths.ENRICH_FILE == os.path.join(OUT, 'main.xlsx'), '采集阶段没碰「最新结果文件」')
 check(files() == [], f'采集阶段不该产出任何 xlsx，实际 {files()}')
+# ⛔ 本轮改动的核心：采集阶段**也不写客户库** —— 入库整轮只发生一次，就在「结束」那一刻。
+check(not m.db_has_customer('https://alpha-pack.de'),
+      '① 采集阶段不写客户库（入库时机已移到「结束并生成 Excel」）')
 check('kind' not in (j.get('row') or {}), '返回给扩展的 row 不带内部 kind 字段')
 
 section('② /api/manual/batch 并入同一轮（本轮口径不被批量表单覆盖）')
@@ -203,7 +207,7 @@ check(st['added'] == 3, f'本轮累计新增 3 条（1 单点 + 2 批量），�
 check(len(st['session_rows']) == 3, '明细累计 3 条', str(len(st['session_rows'])))
 check(files() == [], '批量跑完也还没落盘（要等结束）')
 
-section('③ 结束本轮 → 落一份 10 列结果文件')
+section('③ 结束本轮 → 先入库，再落一份 10 列结果文件')
 with m.app.test_client() as c:
     rf = c.post('/api/manual/session/finish')
     jf = rf.get_json() or {}
@@ -229,6 +233,10 @@ check(st['session_active'] is False, '结束后本轮关闭')
 check(st['session_rows'] == [], '结束后明细清空')
 check(st['session_excel'] == name, 'session_excel 记下了文件名', st['session_excel'])
 check(not st['session_error'], '结束后没有残留错误')
+# ⛔ 入库时机：整轮只在**点「结束」这一刻**写客户库（采集时一行都不写）。
+check(m.db_has_customer('https://alpha-pack.de'), '③ 结束时才入库：单点那条已在客户库')
+check(m.db_has_customer('https://beta-liner.co.uk') and m.db_has_customer('https://gamma-bag.fr'),
+      '③ 批量那 2 条也在结束这一刻入库了')
 
 section('④ 文件名口径只认开轮那一刻；同分钟再落一次加 _2 不覆盖')
 with m.app.test_client() as c:
@@ -338,10 +346,15 @@ try:
 finally:
     m.STATE['running'] = False
 
-section('⑪ 删除单条明细 → 明细与客户库双删、删前自动备份（含节流）、计数回退、被删条目不进 Excel')
+section('⑪ 删除单条明细：本轮还没入库 → 只动内存；老客户/灰字行绝不连带删库')
 # 用户需求：「采集到的有些数据不是自己想要的，想手动删掉」。
-# 关键点：删除必须**同时删客户库**（采集那一刻就已经落库了），
-#         且按 rid 精确删 —— 同一 url 在同一轮里可能既 added 又 existed。
+# ⚠️ 2026-10-11 起手动采集改成「点『🏁 结束并生成 Excel』才一次性入库」，所以本轮明细里
+#    kind='added' 的行**此刻还不在客户库里** —— 删它只是把它从「待入库清单」里拿掉。
+#    三条删除路径的行为已统一为：
+#      · kind='added' 且**库里真的没有** → 只删内存明细（客户库不动、也不该平白备份）；
+#      · kind='added' 且**库里已经有**（唯一来源：本轮已入库成功、但 Excel 没写成功，见 ⑪c）
+#        → 明细 + 客户库双删（否则又是「假删除」）；
+#      · kind='existed' 灰字行（别人早采过的老客户）→ **永远不碰库**（见 ⑪b，用户明确要求）。
 with m.app.test_client() as c:
     rs0 = c.post('/api/manual/session/start', json={'industry': '食品', 'country': '意大利'})
     check((rs0.get_json() or {}).get('ok'), '⑪ 前置：开一轮成功', str(rs0.get_json()))
@@ -357,35 +370,19 @@ check(len(set(rids)) == 3 and all(isinstance(r, int) for r in rids),
       '⑪ 前置：rid 各不相同且是整数', str(rids))
 check(st['session_rid_seq'] == 3, '⑪ rid 发号器走到 3', str(st['session_rid_seq']))
 check(st['added'] == 3, '⑪ 前置：added 计数 = 3', str(st['added']))
-check(m.db_has_customer('https://alpha-del.it'), '⑪ 前置：被删站此刻确实已在客户库里')
-check(m.db_has_customer('https://beta-keep.it'), '⑪ 前置：保留站此刻也在客户库里')
+check(not m.db_has_customer('https://alpha-del.it'), '⑪ 前置：本轮还没结束 → 库里**不该**有它')
+check(not m.db_has_customer('https://beta-keep.it'), '⑪ 前置：保留站此刻也不在库里')
 
 del_rid, keep_rid = rids[0], rids[1]
-save_interval = m.db._DELETE_BACKUP_MIN_INTERVAL
-m.db._DELETE_BACKUP_MIN_INTERVAL = 0          # 让这一次备份必生成，好断言备份文件
-try:
-    with m.app.test_client() as c:
-        jd = c.post('/api/manual/session/delete', json={'rid': del_rid}).get_json() or {}
-finally:
-    m.db._DELETE_BACKUP_MIN_INTERVAL = save_interval
+bk_before = sorted(os.listdir(m.db._backups_dir())) if os.path.isdir(m.db._backups_dir()) else []
+with m.app.test_client() as c:
+    jd = c.post('/api/manual/session/delete', json={'rid': del_rid}).get_json() or {}
+bk_after = sorted(os.listdir(m.db._backups_dir())) if os.path.isdir(m.db._backups_dir()) else []
 check(jd.get('ok') is True, '⑪ 删除返回 ok=True', str(jd))
-check(jd.get('deleted') == 1, '⑪ 客户库里真删掉 1 条', str(jd.get('deleted')))
+check(jd.get('deleted') == 0, '⑪ 本轮未入库 → 客户库应删 0 条', str(jd.get('deleted')))
 check(jd.get('rows') == 2, '⑪ 删完明细剩 2 条', str(jd.get('rows')))
-check(bool(jd.get('backup')), '⑪ 返回了备份文件名（删前备份生效）', str(jd.get('backup')))
-backup_name = jd.get('backup') or ''
-backup_path = os.path.join(m.db._backups_dir(), backup_name)
-check(os.path.isfile(backup_path), '⑪ 备份文件真落在（临时）backups 目录', backup_path)
-check(_under_tmp(backup_path), '⑪ 备份没被写到真实 DB/backups/', backup_path)
-if os.path.isfile(backup_path):
-    con = sqlite3.connect(backup_path)
-    try:
-        n_backup = con.execute('SELECT COUNT(*) FROM customers').fetchone()[0]
-        n_deleted = con.execute('SELECT COUNT(*) FROM customers WHERE website_key=?',
-                                (m.normalize_domain('https://alpha-del.it'),)).fetchone()[0]
-    finally:
-        con.close()
-    check(n_backup >= 3, '⑪ 备份是可打开的 sqlite 且条目合理', str(n_backup))
-    check(n_deleted == 1, '⑪ 备份里保留着被删那条（删前快照）', str(n_deleted))
+check(jd.get('backup') == '', '⑪ 没动库就不该平白备份一份', str(jd.get('backup')))
+check(bk_after == bk_before, '⑪ backups 目录不该新增文件', str(bk_after))
 st = state()
 check(len(st['session_rows']) == 2, '⑪ 明细由 3 条变 2 条', str(len(st['session_rows'])))
 check(all(r['rid'] != del_rid for r in st['session_rows']), '⑪ 被删的那条已不在明细里')
@@ -393,8 +390,8 @@ check(any(r['rid'] == keep_rid for r in st['session_rows']), '⑪ 另一条没�
 check('alpha-del' not in ' '.join(r.get('url', '') for r in st['session_rows']),
       '⑪ 明细里已搜不到被删域名')
 check(st['added'] == 2, '⑪ added 计数回退到 2', str(st['added']))
-check(m.db_has_customer('https://alpha-del.it') is False, '⑪ 被删的站真从客户库消失')
-check(m.db_has_customer('https://beta-keep.it') is True, '⑪ 没连带删掉别人')
+check(not m.db_has_customer('https://alpha-del.it'), '⑪ 客户库本来就没有它，也不该被碰')
+check(not m.db_has_customer('https://beta-keep.it'), '⑪ 保留站保持未入库状态')
 with m.app.test_client() as c:
     st2 = c.get('/api/manual/state').get_json() or {}
 check(len(st2.get('session_rows') or []) == 2, '⑪ /api/manual/state 反映新长度')
@@ -409,16 +406,11 @@ with m.app.test_client() as c:
 check(jnn.get('ok') is False, '⑪ 不带 rid 的请求也被拒', str(jnn))
 check(len(state()['session_rows']) == 2, '⑪ 被拒的请求没动过明细')
 
-# 节流：默认 300 秒窗口内连删，不再重复备份
-before_backups = sorted(os.listdir(m.db._backups_dir()))
 with m.app.test_client() as c:
     jk = c.post('/api/manual/session/delete', json={'rid': keep_rid}).get_json() or {}
-after_backups = sorted(os.listdir(m.db._backups_dir()))
-check(jk.get('ok') is True and jk.get('deleted') == 1, '⑪ 再删一条也成功', str(jk))
-check(jk.get('backup') == '', '⑪ 300 秒节流：连删不再重复备份', str(jk.get('backup')))
-check(after_backups == before_backups, '⑪ 节流期间 backups 目录没新增文件', str(after_backups))
+check(jk.get('ok') is True and jk.get('deleted') == 0, '⑪ 再删一条（同样未入库）也不碰库', str(jk))
 
-# 结束落盘：被删的条目绝不能出现在 Excel 里
+# 结束落盘：被删的条目绝不能出现在 Excel 里，也不该被写进库
 with m.app.test_client() as c:
     jfin = c.post('/api/manual/session/finish').get_json() or {}
 check(jfin.get('ok') and jfin.get('saved'), '⑪ 剩余 1 条 → 结束落盘成功', str(jfin))
@@ -429,22 +421,81 @@ urls_in_excel = ' '.join(str(r[1] or '') for r in data)
 check('gamma-drop' in urls_in_excel, '⑪ Excel 里剩下的是没被删的那条', urls_in_excel)
 check('alpha-del' not in urls_in_excel and 'beta-keep' not in urls_in_excel,
       '⑪ Excel 里不含被删的两条', urls_in_excel)
+check(m.db_has_customer('https://gamma-drop.it'), '⑪ 结束这一刻剩下那条才入库')
+check(not m.db_has_customer('https://alpha-del.it')
+      and not m.db_has_customer('https://beta-keep.it'), '⑪ 被删的两条始终没进库')
 
-# 删空：本轮仍应保持进行中（用户还能继续采），结束时空轮不落盘
+section('⑪b 灰字行（已在库的老客户）删了绝不连带删库')
+# 灰字行是**别人早先采的**老客户，这一轮只是「碰上了、跳过去」。删它不是要删人家的客户 ——
+# 用户 2026-10-11 明确拍板「灰字行不再动库」。
+m.db_upsert_customer({'company_name': 'Legacy Grey Ltd', 'website': 'https://legacy-grey.it',
+                      'email': 'info@legacy-grey.it', 'source': '谷歌搜索'})
+check(m.db_has_customer('https://legacy-grey.it'), '⑪b 前置：老客户已在库里')
 with m.app.test_client() as c:
     c.post('/api/manual/session/start', json={'industry': '食品', 'country': '意大利'})
-    c.post('/api/collect', json={'url': 'https://delta-only.it', 'title': 'Delta Only Srl',
-                                 'html': html_with_mail('delta-only.it')},
+    c.post('/api/collect', json={'url': 'https://legacy-grey.it', 'title': 'Legacy Grey Ltd',
+                                 'html': html_with_mail('legacy-grey.it')},
            headers={'X-DP-Ext': '1'})
-    only_rid = state()['session_rows'][0]['rid']
-    jempty = c.post('/api/manual/session/delete', json={'rid': only_rid}).get_json() or {}
-check(jempty.get('ok') is True and jempty.get('rows') == 0, '⑪ 删到剩 0 条也正常返回', str(jempty))
+    c.post('/api/collect', json={'url': 'https://fresh-one.it', 'title': 'Fresh One Srl',
+                                 'html': html_with_mail('fresh-one.it')},
+           headers={'X-DP-Ext': '1'})
 st = state()
-check(st['session_rows'] == [], '⑪ 明细已清空')
-check(st['session_active'] is True, '⑪ 删空后本轮仍然进行中（没被误关）')
+grey = [r for r in st['session_rows'] if r.get('kind') == 'existed']
+check(len(grey) == 1 and grey[0]['url'] == 'https://legacy-grey.it',
+      '⑪b 老客户被标成灰字（kind=existed）',
+      str([(r.get('kind'), r.get('url')) for r in st['session_rows']]))
+check(st['added'] == 1 and st['existed'] == 1, '⑪b 计数：有效 1 / 已在库 1',
+      str({'added': st['added'], 'existed': st['existed']}))
+bk_before2 = sorted(os.listdir(m.db._backups_dir())) if os.path.isdir(m.db._backups_dir()) else []
 with m.app.test_client() as c:
-    jz = c.post('/api/manual/session/finish').get_json() or {}
-check(jz.get('ok') and jz.get('saved') is False, '⑪ 删空后结束 → 空轮不落盘', str(jz))
+    jg = c.post('/api/manual/session/delete', json={'rid': grey[0]['rid']}).get_json() or {}
+bk_after2 = sorted(os.listdir(m.db._backups_dir())) if os.path.isdir(m.db._backups_dir()) else []
+check(jg.get('ok') is True and jg.get('deleted') == 0, '⑪b 删灰字行 → 客户库删 0 条', str(jg))
+check(jg.get('backup') == '' and bk_after2 == bk_before2, '⑪b 删灰字行不产生备份', str(jg))
+check(m.db_has_customer('https://legacy-grey.it'),
+      '⑪b ⛔ 老客户必须还在库里（没被这一轮连坐删掉）')
+check(state()['existed'] == 0, '⑪b existed 计数回退到 0', str(state()['existed']))
+with m.app.test_client() as c:
+    jf2 = c.post('/api/manual/session/finish').get_json() or {}
+check(jf2.get('ok') and jf2.get('saved') and jf2.get('rows') == 1,
+      '⑪b 剩 1 条新客户正常落盘（灰字行不进 Excel）', str(jf2))
+
+section('⑪c 已入库但 Excel 没写成功 → 那种行删了要连库一起删（唯一会动库的分支）')
+# 「失败不清数据」的副作用：入库排在写表之前，所以 Excel 没写成功时行其实已经在库里了。
+# 这种行若还只删内存 → 又变回「假删除」（下次采到同站被判「已在客户库」永远采不回来）。
+with m.app.test_client() as c:
+    c.post('/api/manual/session/start', json={'industry': '食品', 'country': '意大利'})
+    c.post('/api/collect', json={'url': 'https://orphan-row.it', 'title': 'Orphan Row Srl',
+                                 'html': html_with_mail('orphan-row.it')},
+           headers={'X-DP-Ext': '1'})
+    _real = m._save_enrich_excel
+    m._save_enrich_excel = lambda *a, **k: False       # 模拟「结果 Excel 被 Excel 打开着」
+    jf = c.post('/api/manual/session/finish').get_json() or {}
+    m._save_enrich_excel = _real
+check(jf.get('ok') is False, '⑪c 前置：落盘失败（本轮数据保留）', str(jf))
+check(m.db_has_customer('https://orphan-row.it'), '⑪c 前置：入库在前 → 这条其实已经在库里了')
+st = state()
+check(len(st['session_rows']) == 1 and st['session_rows'][0]['kind'] == 'added',
+      '⑪c 前置：明细还留着这条（等用户重试）', str(len(st['session_rows'])))
+bk_before3 = sorted(os.listdir(m.db._backups_dir())) if os.path.isdir(m.db._backups_dir()) else []
+_save_interval = m.db._DELETE_BACKUP_MIN_INTERVAL
+m.db._DELETE_BACKUP_MIN_INTERVAL = 0          # 让这次备份必生成，好断言
+try:
+    with m.app.test_client() as c:
+        jo = c.post('/api/manual/session/delete',
+                    json={'rid': st['session_rows'][0]['rid']}).get_json() or {}
+finally:
+    m.db._DELETE_BACKUP_MIN_INTERVAL = _save_interval
+check(jo.get('ok') is True and jo.get('deleted') == 1, '⑪c 这条已在库里 → 删它必须连库一起删', str(jo))
+check(bool(jo.get('backup')), '⑪c 动库就要留删前备份', str(jo.get('backup')))
+bk_after3 = sorted(os.listdir(m.db._backups_dir())) if os.path.isdir(m.db._backups_dir()) else []
+check(any(f.startswith('客户库_删除前_') for f in bk_after3 if f not in bk_before3),
+      '⑪c 备份文件名带「客户库_删除前_」', str(bk_after3))
+check(not m.db_has_customer('https://orphan-row.it'), '⑪c 已从客户库真删掉（不是假删除）')
+check(state()['session_active'] is True, '⑪c 删空后本轮仍进行中（没被误关）')
+with m.app.test_client() as c:
+    jz2 = c.post('/api/manual/session/finish').get_json() or {}
+check(jz2.get('ok') and jz2.get('saved') is False, '⑪c 删空后结束 → 空轮不落盘', str(jz2))
 
 
 # ============ ⑫ 去重键一致性：website_key 必须恒等于 normalize_domain(website) ============

@@ -193,15 +193,22 @@
       return;
     }
 
-    ask('DP_COLLECT_PAYLOAD', {
-      payload: {
-        url: grabbed.url,
-        title: grabbed.title,
-        html: grabbed.html,
-        industry: (st.settings && st.settings.industry) || '',
-        country: (st.settings && st.settings.country) || '',
-        upgrade: st.settings ? st.settings.upgrade !== false : true,
-      },
+    // ⛔ 采集前**现取一次设置**，别用 st.settings 的缓存。
+    //   这个缓存是 boot() 那一刻拿的（probeAndMount 只在挂载前跑，挂上后不再刷新），
+    //   而用户改国家/行业是在 popup 里、改完就关掉弹窗 —— 缓存不会跟着变。
+    //   不现取的话，刚改的国家传不过来（实测踩过：本轮明明是新加坡，被记成了上一轮的加拿大）。
+    ask('DP_SETTINGS_GET').then(function (s) {
+      if (s) st.settings = s;
+      return ask('DP_COLLECT_PAYLOAD', {
+        payload: {
+          url: grabbed.url,
+          title: grabbed.title,
+          html: grabbed.html,
+          industry: (st.settings && st.settings.industry) || '',
+          country: (st.settings && st.settings.country) || '',
+          upgrade: st.settings ? st.settings.upgrade !== false : true,
+        },
+      });
     }).then(function (r) {
       st.busy = false;
       setBusy(false);
@@ -232,7 +239,7 @@
     var row = r.row || {};
     var lines = ['✓ 已入库 · 评分 ' + (row.score == null ? '-' : row.score)
                  + '（' + (row.rating || '-') + '）',
-                 '邮箱 ' + ((row.emails && row.emails.length) ? row.emails.join(' / ') : '未抓到'),
+                 '邮箱 ' + ((row.emails && row.emails.length) ? row.emails.join(', ') : '未抓到'),
                  '电话 ' + ((row.phones && row.phones.length) ? row.phones.join(' / ') : '未抓到')];
     if (row.industry) lines.push('行业 ' + row.industry);
     lines.push('第 ' + (r.tier || '?') + ' 级抓取' + (r.upgraded ? '（升级到浏览器）' : ''));

@@ -12,10 +12,10 @@ for r in ws.iter_rows(min_row=2, values_only=True):
     if not (r and r[1] and r[5] and r[5] >= 50):
         continue
     title, url, emails, phones, contact, score, rating, snip, formula = r[:9]
-    mails = [m for m in (emails or '').split(' / ') if EMAIL_OK.match(m.strip())]
+    mails = [m for m in re.split(r'\s*[,/]\s*', emails or '') if EMAIL_OK.match(m.strip())]
     note = '脚本评分%d分（%s），待人工核实' % (score, rating)
     if len(mails) > 1:
-        note += '；其他邮箱：' + ' / '.join(mails[1:])
+        note += '；其他邮箱：' + ', '.join(mails[1:])
     rec = {
         '公司名称': title,
         '官网': url,

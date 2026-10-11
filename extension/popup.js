@@ -45,7 +45,7 @@ function rowHtml(row, r) {
   return ''
     + '<div>网站：<b>' + esc(shortUrl(row.url)) + '</b></div>'
     + line('标题', row.title, '未取到')
-    + line('邮箱', (row.emails || []).join(' / '), '未抓到')
+    + line('邮箱', (row.emails || []).join(', '), '未抓到')
     + line('电话', (row.phones || []).join(' / '), '未抓到')
     + line('联系页', row.contact_url, '无')
     + line('行业', row.industry, '未判断')
@@ -92,7 +92,7 @@ let _note = '';           // finishSession 的一次性提示，优先级低于�
 
 function sessRowHtml(r, i) {
   const old = r.kind === 'existed';
-  const mails  = (!old && r.emails && r.emails.length) ? r.emails.join(' / ') : '';
+  const mails  = (!old && r.emails && r.emails.length) ? r.emails.join(', ') : '';
   const phones = (!old && r.phones && r.phones.length) ? r.phones.join(' / ') : '';
   return '<div class="li' + (old ? ' li-old' : '') + '">'
     + '<div class="li-top"><span class="li-idx">' + (i + 1) + '</span>'
@@ -140,12 +140,18 @@ function renderSession(st) {
   if (sig !== _lastSig) {                          // 只有变化才重建：否则每秒重置滚动位置
     _lastSig = sig;
     list.innerHTML = rows.map(sessRowHtml).join('');
-    count.textContent = rows.length + ' 条';
-    // 徽章数的是「明细行数」＝ 新增 + 已在库，而结果 Excel 只写「新增」。
-    // 徽章太窄放不下，所以挂悬停提示把这道算式讲清楚（正文在状态行里）。
-    count.title = (st.added == null && st.existed == null) ? ''
-      : ('已采 ' + rows.length + ' 条 = 新增 ' + (st.added || 0) + ' + 已在库 ' + (st.existed || 0)
-         + '；结果 Excel 只写「新增」的 ' + (st.added || 0) + ' 条');
+    // 徽章报**两组数**：有效（真正入库的新客户 ＝ 结果 Excel 行数）/ 共（明细行数，含「已在库」）。
+    // 老写法只报一个「N 条」＝ 总数，会把重复条目也算成成功数，看着像多采了。
+    // ⚠️ 本轮结束后端会清空 session_rows、但刻意留着 added/existed 给落盘文案（roundTally）用 ——
+    //    所以两个数都只在「本轮进行中」时才取，否则会报出「有效 5 / 共 0」这种自相矛盾的数。
+    const vA = st.session_active ? (st.added || 0) : 0;
+    const vE = st.session_active ? (st.existed || 0) : 0;
+    count.textContent = '有效 ' + vA + ' / 共 ' + rows.length;
+    // 徽章太窄放不下算式，所以挂悬停提示把口径讲清楚。本轮结束后明细已清零，
+    // 算式改由结果文件那一行（roundTally）讲，这里就不再显示。
+    count.title = (!st.session_active || (st.added == null && st.existed == null)) ? ''
+      : ('有效 ' + vA + ' 条 / 采集总数 ' + rows.length + ' 条 = 新增 ' + vA
+         + ' + 已在库 ' + vE + '；结果 Excel 只写「有效（新增）」的 ' + vA + ' 条');
     empty.style.display = rows.length ? 'none' : 'block';
     if (rows.length) list.scrollTop = list.scrollHeight;   // 停在最新一条
   }
@@ -154,12 +160,11 @@ function renderSession(st) {
     status.className = 'live-status err';
     status.textContent = '⚠️ 结果文件保存失败，可重试';
   } else if (st.session_active) {
-    const bits = ['已采 ' + rows.length + ' 条'];
-    // ⚠️ 必须把「新增 / 已在库」拆开报（与 /manual 页同口径）：明细行数 = 新增 + 已在库，
-    //    而 Excel 只写新增。只报一个数会让人以为表漏写了（实测踩过：已采 17 条、表里 13 行）。
-    if (st.added != null || st.existed != null) {
-      bits.push('新增 ' + (st.added || 0) + ' · 已在库 ' + (st.existed || 0));
-    }
+    // ⚠️ 两组数必须一起报（与 /manual 页同口径）：有效数 = 真正入库的新客户
+    //    （＝结果 Excel 行数），采集总数 = 明细行数（含「已在客户库」的重复）。
+    //    只报一个总数会被人当成成功数（实测踩过：已采 17 条、表里 13 行）。
+    const bits = ['有效 ' + (st.added || 0) + ' · 采集总数 ' + rows.length];
+    if (st.existed != null) bits.push('已在库 ' + (st.existed || 0));
     if (st.session_industry) bits.push('行业 ' + st.session_industry);
     if (st.session_country) bits.push('国家 ' + st.session_country);
     if (st.running) bits.push('批量 ' + (st.done || 0) + '/' + (st.total || 0));
@@ -274,11 +279,17 @@ async function collect() {
     country: $('country').value.trim(),
     upgrade: $('upgrade').checked,
   };
-  if ($('remember').checked) {
-    await send('DP_SETTINGS_SET', {
-      patch: { industry: opts.industry, country: opts.country, upgrade: opts.upgrade },
-    });
+  // 「记住」勾着 → 把上面三个值写回设置（下次打开默认用它）；
+  // 没勾 → 只把「没勾」这件事记下来，三个值一个都不写（否则用户临时换一次国家就被永久记住了）。
+  // ⚠️ remember 本身也要回写，且要**每次**都回写：只在勾着时发消息的话，取消勾选就传不回去。
+  const remember = $('remember').checked;
+  const patch = { remember };
+  if (remember) {
+    patch.industry = opts.industry;
+    patch.country = opts.country;
+    patch.upgrade = opts.upgrade;
   }
+  await send('DP_SETTINGS_SET', { patch });
 
   const r = await send('DP_COLLECT_TAB', { opts });
 
@@ -317,7 +328,14 @@ async function init() {
 
   const s = (st && st.settings) || {};
   $('upgrade').checked = s.upgrade !== false;
-  $('country').value = s.country || '';
+  // 「记住上面的行业/国家」默认勾上：没存过（undefined）就当 true，只有用户明确取消过（false）才不勾。
+  // ⚠️ 必须在这里按设置回填，不能只靠 popup.html 上的 checked 属性 —— 那样用户取消勾选就永远取消不掉。
+  const remembered = s.remember !== false;
+  $('remember').checked = remembered;
+  // 「记住」只负责「下次打开要不要预填」；「本轮用的值」由下面的 input/change 即时回写设置负责
+  //（悬浮按钮/右键菜单读的是**已保存的设置**，看不到输入框的当前值）。
+  // 不勾「记住」→ 下次打开留空，不拿上一轮的值当默认。
+  $('country').value = remembered ? (s.country || '') : '';
 
   const kw = await send('DP_KEYWORDS');
   const sel = $('industry');
@@ -326,7 +344,7 @@ async function init() {
     kw.names.forEach((n) => sel.insertAdjacentHTML('beforeend',
       '<option value="' + esc(n) + '">' + esc(n) + '</option>'));
   }
-  if (s.industry) sel.value = s.industry;
+  if (s.industry && remembered) sel.value = s.industry;
 
   // 只在「上次结果就是当前这个页面」时回显，避免拿别的页面的旧结果显示给人看
   if (st && st.last && st.last.result) {
@@ -336,6 +354,17 @@ async function init() {
 
   await refreshSession();          // 本轮明细：先拉一次，再每秒轮询（popup 关掉即停）
   startPolling();
+
+  // ⛔ 行业/国家「一改就立刻写回设置」，不能等到按采集按钮才写。
+  //   原因：网页右下角的「采集」悬浮按钮和右键菜单读的是**已保存的设置**，它们看不到
+  //   这个面板里输入框的当前值。只在 collect() 里回写的话，用户改完国家就去点悬浮按钮
+  //   → 仍然用上一次的国家（实测踩过：本轮明明是新加坡，被记成了上一轮的加拿大）。
+  //   这里写的是「本轮用的值」；「记住」（见 init 顶部）只决定下次打开是否预填，两者不冲突。
+  const saveOpts = () => send('DP_SETTINGS_SET', {
+    patch: { country: $('country').value.trim(), industry: $('industry').value },
+  });
+  $('country').addEventListener('input', saveOpts);    // 文本框：边敲边存
+  $('industry').addEventListener('change', saveOpts);  // 下拉：选中即存（select 不触发 input）
 
   $('btnCollect').addEventListener('click', collect);
   $('btnFinish').addEventListener('click', finishSession);

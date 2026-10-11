@@ -114,6 +114,7 @@ function emitWindow(type) {
 /* ================= chrome 桩 ================= */
 
 const SENT = [];                    // 所有发往 background 的消息（按时间序）
+const MSGS = [];                    // 同上，但留整个消息体（验 DP_SETTINGS_SET 的 patch 内容）
 const CREATED = [];                 // chrome.tabs.create 的 url
 let optionsOpened = 0;
 let alerts = [];
@@ -129,6 +130,7 @@ const chrome = {
     lastError: null,
     sendMessage(msg, cb) {
       SENT.push(msg.type);
+      MSGS.push(msg);
       const h = HANDLERS[msg.type];
       const out = h ? h(msg) : undefined;
       Promise.resolve(out).then((v) => setTimeout(() => cb(v === undefined ? null : v), 0));
@@ -171,7 +173,7 @@ function mkState(o) {
   }, o || {});
 }
 const R1 = row({ title: 'Leaside Pets', url: 'https://leasidepets.com/',
-  emails: ['leasidepets@gmail.com'], phones: ['(416) 546 3152'], score: 65, rating: '普通客户' });
+  emails: ['leasidepets@gmail.com', 'info@leasidepets.com'], phones: ['(416) 546 3152'], score: 65, rating: '普通客户' });
 const R2 = row({ title: 'Trash Bag Wholesale GmbH', url: 'https://flatbag-maker.de/',
   emails: ['sales@flatbag-maker.de'], score: 75, rating: '重点客户' });
 const R3 = { kind: 'existed', title: 'Trash Bags Wholesale Supplier', url: 'https://plasticbagpc.com/' };
@@ -225,6 +227,9 @@ setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: '
         '行业下拉从 /api/keywords 动态追加（不硬编码枚举）', JSON.stringify(el('industry')._ih));
   check(el('country').value === '德国', '国家输入框回填了记住的值', el('country').value);
   check(el('upgrade').checked === false, 'upgrade=false 时复选框不勾', String(el('upgrade').checked));
+  // 「记住上面的行业/国家」默认勾上：桩里的 settings 没带 remember（= 没存过）→ 必须是勾着的
+  check(el('remember').checked === true,
+        '「记住上面的行业/国家」没存过 → 默认勾上', String(el('remember').checked));
   check(SENT.filter((t) => t === 'DP_MANUAL_STATE').length >= 1,
         'init 里先拉了一次本轮明细', SENT.join(','));
   check(el('btnCollect').textContent === COLLECT_LABEL,
@@ -238,15 +243,16 @@ setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: '
 
   section('② 明细渲染：added / existed 两种 kind');
   const L = el('sessList');
-  check(el('sessCount').textContent === '3 条', '徽章显示 3 条', el('sessCount').textContent);
+  check(el('sessCount').textContent === '有效 2 / 共 3',
+        '徽章报两组数「有效 2 / 共 3」', el('sessCount').textContent);
   // ⚠️ 别用 /class="li/ 数条目：li-top / li-idx / li-site / li-score / li-sub / li-mail / li-phone
   //    全都以 li 开头，会数出 8 倍。只认行容器本身。
   const itemCount = (u) => (u.match(/class="li"|class="li li-old"/g) || []).length;
   check(itemCount(L.innerHTML) === 3, '渲染出 3 个条目', String(itemCount(L.innerHTML)));
   check(/leasidepets\.com/.test(L.innerHTML) && /flatbag-maker\.de/.test(L.innerHTML),
         '站点显示为主机名（去掉 www.）');
-  check(/<span class="mail">leasidepets@gmail\.com<\/span>/.test(L.innerHTML),
-        '有邮箱 → 绿色等宽 .mail', '未命中 mail 片段');
+  check(/<span class="mail">leasidepets@gmail\.com, info@leasidepets\.com<\/span>/.test(L.innerHTML),
+        '有邮箱 → 绿色等宽 .mail，多邮箱用逗号分隔（不是斜杠）', '未命中 mail 片段');
   check(L.innerHTML.includes('65 分') && L.innerHTML.includes('75 分'), '显示评分');
   check(L.innerHTML.includes('电话未抓到'), '没电话的条目显示灰字「电话未抓到」');
   check(L.innerHTML.includes('已在客户库'), 'existed 渲染成「已在客户库」');
@@ -254,17 +260,18 @@ setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: '
   check(!/plasticbagpc[\s\S]{0,120}?分/.test(L.innerHTML), 'existed 那条不显示评分（后端没给 score）');
   check(el('sessEmpty').style.display === 'none', '有条目时空态隐藏', String(el('sessEmpty').style.display));
   check(/🟢 进行中/.test(el('sessStatus').textContent)
-        && /已采 3 条/.test(el('sessStatus').textContent)
+        && /有效 2 · 采集总数 3/.test(el('sessStatus').textContent)
         && /行业 宠物用品/.test(el('sessStatus').textContent)
         && /国家 德国/.test(el('sessStatus').textContent),
-        '状态行=进行中+条数+口径', el('sessStatus').textContent);
-  // ⚠️ 「已采 N 条」必须同时报出「新增 X · 已在库 Y」：明细行数 = 新增 + 已在库，
-  //    而结果 Excel 只写「新增」。只报一个数会让人以为表漏写了（实测踩过：已采 17 条、表 13 行）。
-  check(/新增 2 · 已在库 1/.test(el('sessStatus').textContent),
-        '状态行把「新增 / 已在库」拆开报（差额就是 Excel 少的那部分）',
+        '状态行=进行中+两组数+口径', el('sessStatus').textContent);
+  // ⚠️ 必须报**两组数**：「有效数」（真正入库的新客户 ＝ 结果 Excel 行数）与
+  //    「采集总数」（明细行数 ＝ 新增 + 已在库）。只报一个总数会被当成成功数
+  //    （用户点名要改；实测踩过：已采 17 条、表里 13 行）。
+  check(/有效 2 · 采集总数 3 · 已在库 1/.test(el('sessStatus').textContent),
+        '状态行把「有效 / 采集总数 / 已在库」一起报出来',
         el('sessStatus').textContent);
-  check(/已采 3 条 = 新增 2 \+ 已在库 1/.test(String(el('sessCount').title || '')),
-        '徽章悬停给出「已采 = 新增 + 已在库」的算式', String(el('sessCount').title));
+  check(/有效 2 条 \/ 采集总数 3 条 = 新增 2 \+ 已在库 1/.test(String(el('sessCount').title || '')),
+        '徽章悬停给出「有效 / 采集总数 = 新增 + 已在库」的算式', String(el('sessCount').title));
   check(el('sessStatus').className === 'live-status', '状态行不是错误态', el('sessStatus').className);
   check(el('btnFinish').disabled === false, '本轮进行中 → 结束按钮可用');
   check(el('sessFile').textContent === '', '还没有结果文件/提示时该行为空', el('sessFile').textContent);
@@ -284,10 +291,49 @@ setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: '
   check(SENT[SENT.length - 1] === 'DP_MANUAL_STATE',
         'collect 结束后主动补拉一次明细（不等下一次轮询）', SENT.slice(-3).join(','));
   check(L._writes > writesBefore, '明细被重建', `writes ${writesBefore} → ${L._writes}`);
-  check(el('sessCount').textContent === '4 条', '徽章变 4 条', el('sessCount').textContent);
+  check(el('sessCount').textContent === '有效 3 / 共 4', '徽章变「有效 3 / 共 4」', el('sessCount').textContent);
   check(L.innerHTML.includes('nomail.example.com') && L.innerHTML.includes('邮箱未抓到'),
         '新条目进来，且无邮箱显示「邮箱未抓到」');
   check(L.scrollTop === L.scrollHeight && L.scrollTop > 0, '自动滚到最新一条', String(L.scrollTop));
+
+  // ③b 「记住」勾着 → 三个值回写设置；取消勾选 → 只回写 remember=false，三个值一个都不写
+  const patchOf = () => ((MSGS.filter((m) => m.type === 'DP_SETTINGS_SET').pop() || {}).patch) || {};
+  const p1 = patchOf();
+  check(p1.remember === true && p1.country === '德国' && p1.upgrade === false,
+        '默认勾着「记住」→ 采集时把行业/国家/升级一并写回设置', JSON.stringify(p1));
+  el('remember').checked = false;
+  el('btnCollect').emit('click');
+  await settle();
+  const p2 = patchOf();
+  check(p2.remember === false && !('country' in p2) && !('industry' in p2),
+        '取消勾选 → 只回写 remember=false，不写行业/国家（临时换一次不该被永久记住）', JSON.stringify(p2));
+  el('remember').checked = true;
+  await settle();
+
+  // ③c 国家/行业「一改就立刻写回设置」—— 悬浮按钮 / 右键菜单读的就是这份设置，看不到输入框。
+  //     这是用户实测的 bug：改完国家直接点悬浮按钮，本轮仍被记成上一轮的国家。
+  const setCount = () => MSGS.filter((m) => m.type === 'DP_SETTINGS_SET').length;
+  const c0 = setCount();
+  el('country').value = '新加坡';
+  el('country').emit('input');
+  await settle();
+  check(setCount() === c0 + 1 && patchOf().country === '新加坡',
+        '改国家 → 立刻写回设置（不用按采集按钮）', JSON.stringify(patchOf()));
+  el('industry').value = '塑料包装袋';
+  el('industry').emit('change');
+  await settle();
+  check(patchOf().industry === '塑料包装袋', '改行业 → 立刻写回设置', JSON.stringify(patchOf()));
+  // 不勾「记住」也照写「本轮用的值」（悬浮按钮还得靠它）；「记住」只管下次打开预不预填
+  el('remember').checked = false;
+  el('country').value = '法国';
+  el('country').emit('input');
+  await settle();
+  check(patchOf().country === '法国',
+        '取消「记住」也即时回写本轮值（悬浮按钮读它）', JSON.stringify(patchOf()));
+  el('remember').checked = true;
+  el('country').value = '德国';
+  el('industry').value = '宠物用品';
+  await settle();
 
   section('④ 内容没变就别重建（否则每秒轮询会闪、会重置滚动）');
   el('btnCollect').emit('click');
@@ -346,7 +392,7 @@ setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: '
   check(el('btnFinish').textContent === FINISH_LABEL, '按钮文案已还原',
         el('btnFinish').textContent);
   check(el('btnFinish').disabled === true, '本轮已关 → 按钮禁用');
-  check(el('sessCount').textContent === '0 条', '本轮清空后徽章归零', el('sessCount').textContent);
+  check(el('sessCount').textContent === '有效 0 / 共 0', '本轮清空后徽章归零', el('sessCount').textContent);
   check(el('sessEmpty').style.display === 'block', '空态重新显示', String(el('sessEmpty').style.display));
 
   // 7b 点击过程中：立刻禁用 + 换进度文案
@@ -502,7 +548,7 @@ setHandler('DP_SESSION_FINISH', () => ({ ok: true, saved: true, rows: 2, file: '
   check(SENT.includes('DP_SESSION_DELETE'), '确认后发了 DP_SESSION_DELETE', SENT.join(','));
   check(/已删除/.test(el('sessFile').textContent), '结果行给出删除回执', el('sessFile').textContent);
   check(/已备份/.test(el('sessFile').textContent), '回执里带上备份文件名', el('sessFile').textContent);
-  check(el('sessCount').textContent === '1 条', '徽章跟随后端状态变成 1 条', el('sessCount').textContent);
+  check(el('sessCount').textContent === '有效 1 / 共 1', '徽章跟随后端状态变成「有效 1 / 共 1」', el('sessCount').textContent);
   check(/flatbag-maker\.de/.test(el('sessList').innerHTML)
         && !/leasidepets\.com/.test(el('sessList').innerHTML),
         '被删那条从列表消失、剩下那条还在', el('sessList').innerHTML.slice(0, 120));

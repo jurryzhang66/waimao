@@ -1,4 +1,168 @@
 # ==========================================================================
+# 第十轮 — 2026-10-02：把「本次任务采集数量」提为第 1 张卡并改成强必填（模块 M17）
+# ==========================================================================
+# 命令：D:\Users\admin\AppData\Local\Programs\Python\Python313\python.exe .workbuddy/_run_all_reg.py
+# 最终结果：**23 项全部 EXIT=0**（用时 190.3s；每项输出在 .workbuddy/_reg__<名字>.log）
+#
+# 用户需求（原话）
+#   「『本次任务采集数量：』这个功能要放到 1. 目标国家（单选，下拉选择）的前一行，做为一个
+#     必选的任务，不管是 6. 自定义搜索词（原样搜，不套上面的条件），还是自动组合，
+#     都要先写采集任务数。」
+#
+# 拍板（AskUserQuestion 3 问）
+#   编号   = **顺延重排**（新卡 = 「1.」，原 1~6 全部 +1）
+#   必填   = **强必填但保留预填 10**（输入框仍 value="10"，但前端不许兜底、后端不许缺省）
+#   范围   = **三条链路统一（含谷歌地图）**（任何模式下都可见可编辑，不进 onSource() 的显隐）
+#   → 走正式 plan 流程（Plan agent → 方案文件 → ExitPlanMode → 用户批准）后才动手
+#
+# ★ 先说清一个「本来就已经对」的事实（决定改动面）
+#   采集数量**早就**透传给两条采集线程了（api_start → run_search:2549 / run_maps:2543，
+#   run_search:1387 与 run_maps:1642 都按它停），**自定义搜索词模式也没有被忽略**。
+#   所以本轮的实质不是「让它生效」，而是：① 挪到最前面（用户习惯「先写数量」）
+#   ② 把「假必填」变成真必填（原来缺字段会静默取 10）。
+#
+# 改动
+#   ui/page.html                ★新增★ 「1. 本次任务采集数量（必填，10-100）」独立卡
+#                               （插在 .nav 之后、目标国家之前）；
+#                               从「参数」卡里整行移走旧控件（187-189 行含那个开头的 <br>）；
+#                               编号整轮顺延：目标国家 1→2、产品关键词 2→3、搜索条件 3→4、
+#                               参数 4→5、组合预览 5→6、自定义搜索词 6→7；
+#                               同步**用户可见**提示语：start() 两条 alert「第 6 步」→「第 7 步」、
+#                               #comboSummary 占位「2.产品关键词」→「3.」+「3.搜索条件」→「4.」、
+#                               #rawCard 说明「第 3 步」→「第 4 步」/「第 1 步」→「第 2 步」；
+#                               start() 读值改 el.valueAsNumber（去掉兜底默认值），
+#                               校验提到最前 + 空/越界分开提示 + focus/select；
+#                               零 CSS 改动（复用 .card）→ 共用样式注入不变
+#   客户开发工具.py             api_start 的 target_count 从 data.get('target_count', 10)
+#                               改成**无缺省值**：缺键/空串 → 显式拒绝（文案「请先填写本次任务
+#                               采集数量」）；位置**刻意留在产品词校验之后**；只改 3 处注释卡号；
+#                               ⛔ run_search / run_maps 的签名默认值一字未动
+#   _check_page.py             **R5 两条 sha256 重算**（TMPL c108c49b… / BUILT 988f1b13…）
+#                               + R5 注释加第 ⑤ 条 + ★新增 R13★（编号整轮顺延 / #targetCount 唯一 /
+#                               三处提示语 / 负向守卫「不许有兜底默认值」/ AST 断言
+#                               data.get('target_count') 不带第二个参数且函数体有拒绝文案）
+#   _smoke_search.py           6 处 post_start payload 补 'target_count': 10
+#                               + ⓪ 新段：缺字段 / 空串都被拒、合法值放行
+#                               （⛔ 用例都带 products，否则先撞产品词那条校验、测不到）
+#   _check_live_ui.py          :205 startswith('6.') → '7.' + ★新增 G 段★真机：
+#                               .wrap 下第一张独立卡是采集数量、第二张才是「2. 目标国家」、
+#                               预填仍是 10、切地图后仍可见可编辑、清空后 start() 被拦且**零请求**
+#   文档                        AI_PROJECT_CONTEXT.md（M11 加「主页卡片顺序」/ M14 第 7 卡 /
+#                               M15 第 5 步 / §8.1 / §8.2 / §9.2 新增 #33–#36 / 附录）/
+#                               谷歌外贸客户开发搜索技巧手册.md（:151 / :167 卡号）/
+#                               memory/MEMORY.md（新增「主页卡片顺序 & 采集数量强必填」硬约束）/
+#                               memory/2026-10-02.md / 本文件
+#
+# ⚠️ 本轮的两个设计要点（都不报错，只会静默错）
+#   1) **必须整轮重排 + 同步三处用户可见提示语**：编号硬编码在 <h3> 文字里；alert / 组合预览
+#      占位 / #rawCard 说明里也各有一份。漏改 = 提示语指到错的步骤，页面照常工作。
+#   2) **两道兜底必须一起删**：前端 parseInt(... || '10') 与后端 data.get('target_count', 10)
+#      是两道独立的兜底，只删一边 = 假必填。R13 用 AST 钉住后端那侧没有第二个参数；
+#      G 段用真机钉住前端那侧（清空后零请求）。
+#
+# 验证
+#   _check_page.py        R1–R13 全绿
+#   _smoke_search.py      全段通过（含新 ⓪ 段）
+#   _check_live_ui.py     真机 A–G 全绿（G：卡片顺序 ['1. 本次任务采集数量…', '2. 目标国家…',
+#                         '📋 关键词库…', '7. 自定义搜索词…', '📥 实时明细']；
+#                         地图模式下 {vis: True, dis: False}；清空后 alerts=['请先填写本次任务
+#                         采集数量（第 1 步，10-100 的整数）'], fetches=0）
+#                         截图 _target_card.png（426474 B）
+#   _check_maps_ui.py     全通过
+#   _run_all_reg.py       **23 项全 EXIT=0，190.3s**
+#
+# 必须说的（交付要点）
+#   1) **重启工具**才看得到新卡（PAGE_HTML 是 import 期构建一次）。
+#   2) 输入框**仍预填 10**；**清空它**再点「开始搜索」会被拦住并提示，不再偷偷按 10 跑。
+#   3) **三种链路（标准网页 / 自定义搜索词 / 谷歌地图）都按这个数量停**。
+#   4) **编号整体顺延**：原「6. 自定义搜索词」现在是「7.」、原「4. 参数」现在是「5.」。
+#   5) 后端也收紧了：手工/脚本直接打 /api/start **不传 target_count 会被拒**（旧行为静默取 10）。
+#
+# 老账提醒：M16（实时明细逐行删除）+ M17（本轮）都**尚未 git commit**；
+#   用户自建的轻量标签 v1.5(`备份1`) / v1.5.1(`备份2`) 只含到 M15。是否提交 / 推远端待拍板。
+
+# ==========================================================================
+# 第九轮 — 2026-10-02：主页「本轮已入库明细（实时）」逐行删除（模块 M16）
+# ==========================================================================
+# 命令：D:\Users\admin\AppData\Local\Programs\Python\Python313\python.exe .workbuddy/_run_all_reg.py
+# 最终结果：**23 项全部 EXIT=0**（用时 192.1s；每项输出在 .workbuddy/_reg__<名字>.log）
+#
+# 用户需求（原话）
+#   「http://127.0.0.1:5000/ ，这个页面的 本轮已入库明细（实时），也要加入和
+#     http://127.0.0.1:5000/manual ③ 本轮采集明细，的功能一样，可 手动删除不需要的信息」
+#
+# 拍板（AskUserQuestion 2 问）
+#   删除范围 = **仅采集中可删**（删掉的不进本轮结果 Excel；结束后 ✕ 置灰 + 提示去 /db）
+#   确认交互 = **页面内居中模态框**（不用原生 confirm —— 用户嫌它贴窗口顶部）
+#   → 走正式 plan 流程（Plan agent → 方案文件 → ExitPlanMode → 用户批准）后才动手
+#
+# ★ 这一轮最关键的一个认知（决定了整个实现形态）
+#   结果 Excel **不是**从 STATE['rows'] 写的，而是在两个 worker 的 finally 里用**它自己的
+#   局部 all_rows**写的（run_search ~1437 / run_maps ~1671；下标与 STATE['rows'] 对齐）。
+#   → **只删 STATE['rows'] 是「假删除」**：那条仍会进结果 Excel 与飞书。
+#   → 解法 = **墓碑**：删除时把该行的 n 记进 STATE['rows_deleted']，两个 worker 落盘前
+#     `results = [r for i, r in enumerate(all_rows, 1) if i not in dead]`。
+#     没人删过时这个过滤是**恒等**的 → 对既有测试零影响。
+#   （为什么不用「把落盘源改成 STATE['rows']」：_smoke_search.py 直接调 run_search、
+#     STATE['rows'] 会跨轮累积 → 会打破既有长度断言。）
+#
+# 改动
+#   core/state.py           ★新增★ STATE['rows_deleted'] = []（墓碑；JSON 友好用 list）
+#   客户开发工具.py          ★新增★ POST /api/live/delete（api_live_delete，四段式骨架）；
+#                           run_search / run_maps 开头清墓碑（防跨轮串味）；
+#                           result_count 改 = len(STATE['rows'])（随删除实时刷新）；
+#                           两个 worker 的 finally 落盘前按墓碑过滤 + 全被删时记日志不产文件；
+#                           api_start / api_export_feishu 都补 rows_deleted=[]
+#   ui/page.html            加 ✕ 列（livedel-* 前缀，避开三个页面共用的别处名字）+
+#                           居中模态框 #liveDelModal + JS（syncLiveEditable / onLiveBodyClick /
+#                           askLiveDelete / closeLiveDelete / deleteLiveRow）；
+#                           renderRows 重画失效判据补 renderedTail；start() 里一起清零
+#   _check_page.py          R5 两条 sha256 重算 + ★新增 R12★（标记/JS 断言 + 负向断言 +
+#                           AST 断言：STATE[...] 键、备份/删库调用不在 ast.With 内）
+#   _smoke_search.py        新增「运行中删除 → 不进结果 Excel」段（fake_extract_live +
+#                           fake_enrich_live 在第 2 条时发 POST /api/live/delete）
+#                           + 文末「/api/live/delete 全分支」段（非法 n / 空 / bool / 0 / 负 /
+#                           不存在 / 合法删 / 300s 节流 / 库里本就没有）
+#   _check_live_ui.py       ★新增 F 段★真机：3 行 → 点 ✕ 开模态框（居中 ±2px）→ Esc 不发请求
+#                           → 再点 ✕ + Enter 真删（DB 少 1 条 + 有备份 + 墓碑 [1] + 表格剩 2 行）
+#                           → phase='export' 时置灰 + 点击无效
+#   文档                     AI_PROJECT_CONTEXT.md（新增 M16 / §4.2 / §4.3 / §7.5 / §8.1 /
+#                           §8.2 / §8.4 / §9.2 新增 #27–#32 / 附录）/ memory/MEMORY.md /
+#                           memory/2026-10-02.md / 本文件
+#
+# ⚠️ 本轮踩到的坑
+#   1) 注释里写了字面量 `<script>` → _check_page 的 `<script[^>]*>(.*?)</script>` 非贪婪
+#      正则从注释处开始抽 JS → node --check 报 SyntaxError。**注释里别写脚本标签字面量。**
+#   2) 同一个老坑（方向相反）：CSS/JS 注释里写带 `.`/`#` 的 `#delModal` / `.row-del` /
+#      `.live-del` → 撞 R12 的负向断言（子串匹配）→ 注释里只写**不带前缀**的名字。
+#   3) R12 的 AST 断言一开始写 `'rows_deleted' in _names` → 红。`STATE['rows_deleted']` 是
+#      `ast.Subscript` + `ast.Constant`，**不是 ast.Name** → 加 `_state_keys(tree)` 助手收集
+#      `STATE[...]` 的常量键再断言。
+#   4) _smoke_search 段 A 红：两个桩 bug ——（a）`len(calls['enriched'])` 跨脚本累积（reset
+#      不清 enriched）→ `==2` 分支永不触发；（b）fake_extract 每页只返 1 条 → 卡在 1 行。
+#      → 改用专用计数器 LIVE_DEL['enrich_n'] + fake_extract_live 一次返全 3 条。
+#
+# 验证
+#   _check_page.py        R1–R12 全绿
+#   _smoke_search.py      全段通过（含新两段）
+#   _smoke_maps.py        全通过
+#   _check_live_ui.py     真机 A–F 全绿（F：模态框中心 498 vs 498 / 563.6 vs 563.5；
+#                         Esc 不发请求；Enter 真删 DB + 备份；export 期锁定）
+#                         截图 _live_del_modal.png（434538 B）/ _live_del_readonly.png（430430 B）
+#   _run_all_reg.py       **23 项全 EXIT=0，192.1s**
+#
+# 必须说的（交付要点）
+#   1) **重启工具**才看得到 ✕（PAGE_HTML 是 import 期构建一次）。
+#   2) **只在采集中可删**；采集结束 / 导出飞书时 ✕ 自动置灰 → 提示去 `/db` 清理。
+#   3) 删掉的那一条**不回填** → 最终 Excel 行数可能 < 目标条数（预期行为）。
+#   4) 删库与「worker 落盘」之间有**竞态窗口**；刷新页面（轮询）期间也可能有短暂不一致。
+#   5) 只删库 + 记墓碑，**不动手动采集的内存明细** → 同一轮要一并拿掉得去 /manual 点 ✕。
+#   6) 删前会自动备份客户库，但**有 300 秒节流**（连删多条只备份第一份，属预期）。
+#
+# 老账提醒：M16 尚未 git commit；用户自建的轻量标签 v1.5(`备份1`) / v1.5.1(`备份2`)
+#   已含此前八轮（M14 + M15 + 顶栏导航）。是否提交 / 推远端待用户拍板。
+
+# ==========================================================================
 # 第八轮 — 2026-10-02：主页新增「国家限定」四选一（模块 M15，默认关）
 # ==========================================================================
 # 命令：D:\Users\admin\AppData\Local\Programs\Python\Python313\python.exe .workbuddy/_run_all_reg.py
@@ -564,3 +728,98 @@ EXIT=0  补历史欠账.py --dry      欠账清单（只列不写）
 # ✅ 遗留已结清（2026-10-02 用户拍板）：`ui/manual.html`（约第 408 行）那处原生 confirm
 #   **保留不改**（别主动去动，改它要同步 _check_manual_ui.py + R7）；同期被用户自己删掉的
 #   DB/backups/ 旧备份与 关键词库.json.bak* **不是 bug、不恢复、不排查**。
+#
+# ⚠️ 上面这段「`/manual` 原生 confirm 保留不改」**已被第十一轮推翻**：2026-10-03 把两页的
+#   「本轮明细」并成一个共享组件后，`/manual` 那处原生 confirm 连同 `deleteSessionRow` 一起删掉了，
+#   现在两页都是同一个居中模态框。别再按这条老结论去「保留」它。
+
+# （第七~第十轮未逐轮记录 —— 详情见 memory/2026-10-02.md 的「第七轮」~「第十轮」段；
+#   模块层面见 AI_PROJECT_CONTEXT.md 的 M14 / M15 / M16 / M17。）
+
+# ============ 第十一轮（2026-10-03）：两页的「本轮明细」合并成一个共享组件（模块 M18） ============
+# 用户需求（原话）：
+#   「http://127.0.0.1:8000/ 这一页的本轮已入库明细（实时），和 http://127.0.0.1:8000/manual 这一页的
+#    ③ 本轮采集明细，这两个实时明细和删除功能应该是属于重复造轮子，应该用一套组件就可以了。
+#    虽然两个采集的方法都不一样，目前看起来，手动采集的③ 本轮采集明细，都好用一点。」
+# 范围由用户四问四答锁定：① /manual 好用在哪 = 行业/国家两列 + 确认框 + 「已在客户库」痕迹行 +
+#   徽章计数口径提示（四项全选）；② 确认框统一成**居中模态框**；③ **只做两个网页**（不动扩展 popup
+#   里的第三份）；④ 主页要不要也显示「已在客户库」痕迹行 → **推迟到下一轮**（主页 showExisted=false）。
+#
+# 动手前的关键判断：这不是「新功能」，是**去重**。重复的代价已经真实发生过 —— 上一轮在主页修的
+#   两处（末行判据 renderedTail、删除确认改居中模态框）**一直没传到 /manual**；而 /manual 的
+#   「行业 / 国家」两列主页也没有。所以目标是「一份实现 + 每页一份配置」。
+#
+# 改动
+#   ui/live-table.js        ★ 新增（254 行）：工厂 makeLiveTable(cfg) —— 统一 9 列表头/行渲染、
+#                           增量重画（renderedRows + renderedTail 双游标）、事件委托 ✕、
+#                           居中模态框（初始化时建好 #liveDelModal，Esc/点遮罩=取消、Enter=确定）、
+#                           只读态。两页差异全走 cfg：keyField / endpoint / showExisted / badgeTitle /
+#                           canDelete / editHint / readHint / removeTitle / afterRemove。
+#                           ⛔ 闭包，全局只暴露 makeLiveTable 一个名字（跨 <script> 重名 = 整页空白）。
+#   core/ui.py              + LIVE_TABLE_JS_PLACEHOLDER + _read_live_table_js() + _inject_live_table_js()；
+#                           _build_page() / _build_manual_page() 末尾各注入一次（与 PAGE_CSS_PLACEHOLDER 同构）
+#   ui/page.html            表头补「行业 / 国家」两列（9 列，与 /manual 逐字一致）；删掉手写的
+#                           #liveDelModal 标记、46 行 renderRows、整套模态框 JS（askLiveDelete 等）；
+#                           改成 <script>LIVE_TABLE_JS_PLACEHOLDER</script> + 一行 const liveTable = makeLiveTable(...)
+#                           + 四个薄封装（renderRows / syncLiveEditable / deleteLiveRow / onLiveBodyClick）；
+#                           start() 里的 4 行内联重置 → liveTable.reset()
+#   ui/manual.html          删掉本页 .row-del / .live-del 样式与手写模态框标记；表头换成同一份 9 列；
+#                           删 renderSession 46 行 → sessionTable.render()；删 deleteSessionRow（含**原生
+#                           confirm**、alert、fetch）→ sessionTable.remove()；sessionStart() 重置改 reset()
+#   客户开发工具.py          两个删除接口的「先 backup_db_before_delete() 再 db_delete_customer(url)」
+#                           抽成共用 _delete_customer_and_backup()（锁纪律不变：仍在 with STATE_LOCK 之外）
+#   _check_page.py          R12：+「组件文本在 PAGE_HTML 与 MANUAL_HTML 里都出现」+「两页 <thead> 逐字相等」；
+#                           负向断言继续守 livedel- 以外的那批选择器名；AST 目标从 backup_db_before_delete /
+#                           db_delete_customer 改成 _delete_customer_and_backup，且**两个接口都跑一遍**
+#                           「慢 IO 必须在锁外」的结构断言（/manual 那条首次被结构化钉住）；R5 双 sha 重算
+#   _check_live_ui.py       F 段 +真实 DOM 断言：表头 9 列、第 7/8 列字面量是「行业」「国家」、行数据真的
+#                           渲染到这两列（只加表头不加单元格 = 空列，肉眼看不出）；+模态框打开态的视口截图
+#   _check_manual_ui.py     E 段重写：不再打桩 window.confirm，改成「点 ✕ → 等 #liveDelModal 出现 →
+#                           点 #liveDelModalOk」；+模态框打开态截图
+#   _smoke_search.py        修一处**假红**（见下）
+#
+# 验证
+#   _check_page.py        R1–R13 全绿（R5 两条 sha256 已重算）
+#   _check_live_ui.py     A–G 全绿：主页表 9 列（表头 ['#','公司名称 / 官网','邮箱','电话','评分','评级',
+#                         '行业','国家','']、第一行 ['1',…,'食品','法国','✕']）、✕ 弹居中模态框
+#                         （fixed+flex、卡片中心落视口正中 ±2px）、Esc=取消（零请求、明细/库/备份三者不动）、
+#                         Enter=确认（明细 3→2、徽章同步、库里真删 1 条不连坐、删前备份落盘）、
+#                         采集结束后整表只读（✕ 置灰、点了不弹框不动数据）
+#   _check_manual_ui.py   A–F 全绿：/manual 的 ✕ 走的是**同一个**居中模态框（不再是原生确认框）、
+#                         删完剩 3 行 + 徽章同步 + 客户库同步删 + 「已在客户库」痕迹行仍在
+#   _smoke_search.py      全绿（含 /api/live/delete 的 phase 门禁、bool 行号、墓碑、300 秒节流）
+#   _run_all_reg.py       **23 项全 EXIT=0，82.0s**
+#   真机截图存档：_live_del_modal_open.png（主页居中模态框）、_manual_del_modal.png（/manual 同一套）、
+#                _live_ui.png / _manual_ui.png（两张 9 列表）
+#   交付自检：重启工具后 `GET /` 与 `GET /manual`（59347 / 41834 字节）—— 占位符残留 False、
+#            makeLiveTable / livedel-btn / liveDelModal / 「行业」「国家」两列表头**两页都在**
+#
+# ⚠️ 本轮踩到的坑
+#   1) **备份名只精确到秒 → 同一秒删两次会覆盖同名文件 → 「文件名集合差集」断言假红**：
+#      `_smoke_search.py` 段④ 红在「删除前应自动备份客户库，实际新增 []」。但 `jd['backup']` 为真、
+#      `os.path.isfile` 通过、日志也打了「🗄️ 删除前已备份客户库：…客户库_删除前_20261003_062439.sqlite3」
+#      —— 日志里那一行**出现了两次、文件名完全相同**：前一段「运行中删除」也删过一次，两次落在同一秒。
+#      → 断言改成判「接口返回的那个文件**这次有没有被写过**」（新增，或 mtime 变新）。
+#      ⚠️ **纯测试侧**脆弱点：生产有 300 秒节流，不可能撞名。已记进 §9.2 #39。
+#   2) 组件注入的**顺序**：先改 core/ui.py 再改模板 → import 期直接 `RuntimeError: ui/manual.html 里
+#      没有 LIVE_TABLE_JS_PLACEHOLDER 占位符`。这条报错是**故意的**（缺占位符必须炸，不能静默不注入）。
+#   3) 泛化之后 R12 那批**逐字子串断言会失效**（`fetch('/api/live/delete')` 整串不存在了）→
+#      该改的是**断言**而不是代码：拆成「页面 cfg 里写了这个接口」+「组件确实 fetch(endpoint)」两条。
+#      改完逐条对着新代码把 R12 的 verbatim 清单重对了一遍（§9.2 #40）。
+#
+# ⚠️ 交付时必须说的
+#   1) **必须重启工具**：PAGE_HTML / MANUAL_HTML / QUERY_HTML 都是 import 期构建一次。
+#   2) 两页的 ✕ 现在都是**居中模态框**（Esc/点遮罩=取消、Enter=确定）；**/manual 原来的原生确认框没了**。
+#   3) 主页那张表**多了「行业 / 国家」两列**，两页表头从此逐字一致。
+#   4) /manual **静默**获得了上一轮主页修的两处（末行判据 renderedTail、居中模态框）—— 这两处以前在
+#      /manual 上根本没生效。
+#   5) **删除语义一个字没改**：明细 + 客户库双删 + 删前自动备份；主页额外记墓碑（保证不进本轮 Excel），
+#      /manual 不需要（它落盘直接读 session_rows）；备份按 300 秒节流。
+#   6) 参数化后仍**允许** `ui/manual.html` 的第二段 <style> 存在 —— 只有「两页确实不一样」的东西才留在页面里。
+#
+# 遗留（拍板推迟到下一轮）
+#   · 主页**暂不**显示「已在客户库」痕迹行（cfg.showExisted=false）。补它不是「前端改个开关」：需要
+#     ① run_search / run_maps 的跳过分支记 {kind:'existed', …} ② **另开 key 空间**（不能混进 STATE['rows']，
+#     否则 n == len(all_rows) 的对齐与墓碑全乱）③ /api/live/delete 的 {n} 契约放宽 ④ 重新定义 result_count 口径。
+#   · 扩展 popup 里的第三份明细表（用户明确本轮不动）—— 将来若再改这张表，记得它还有第三个消费者。
+#   · **M16 / M17 / M18 三个模块都还没 git commit**；是否一并提交 / 推远端待用户拍板。

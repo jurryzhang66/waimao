@@ -31,7 +31,9 @@
   </div>
   <label class="chk"><input type="checkbox" id="upgrade">
     抓不到邮箱时升级到浏览器（更全，但单条要几秒）</label>
-  <label class="chk"><input type="checkbox" id="remember">
+  <!-- checked 只是首帧的初值（popup.js 的 init() 会按已存设置覆盖）：
+       不加这个属性的话，init() 异步拉 DP_STATE 期间会先闪一下「没勾」。 -->
+  <label class="chk"><input type="checkbox" id="remember" checked>
     记住上面的行业/国家，下次默认用它</label>
 </div>
 
@@ -43,7 +45,7 @@
 <div class="card live" id="liveCard">
   <div class="live-head">
     <h3>本轮采集明细</h3>
-    <span class="live-badge" id="sessCount">0 条</span>
+    <span class="live-badge" id="sessCount">有效 0 / 共 0</span>
     <span class="live-status" id="sessStatus">本轮未开始</span>
   </div>
   <div class="live-scroll">

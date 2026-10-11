@@ -26,6 +26,7 @@ const DEFAULTS = {
   industry: '',        // 默认行业；空 = 让后端自动判断
   country: '',         // 默认国家/地区
   upgrade: true,       // 秒级抓不到邮箱时，是否升级到 Chromium 完整抓
+  remember: true,      // popup 上「记住上面的行业/国家」是否默认勾上（勾着才把下面三个值写回）
   fabEnabled: true,    // 是否在网页右下角显示「采集」悬浮按钮
   port: 0,             // 0 = 自动探测；非 0 = 优先用这个端口（用户手动指定）
 };

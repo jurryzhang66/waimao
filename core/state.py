@@ -27,6 +27,12 @@ STATE = {
     'logs': [],
     'result_count': 0,
     'rows': [],            # 本轮已入库明细（供前端实时表格显示：公司/域名/邮箱/电话/评分）
+    # 本轮被前端「📥 本轮已入库明细（实时）」逐行删掉的 n（墓碑）。
+    # 结果 Excel 是在 worker 的 finally 里用**它自己的局部 all_rows**写出的，与 STATE['rows']
+    # 不是同一个列表 —— 只删 STATE['rows'] 的话那条仍会进 Excel（＝假删除）。
+    # 所以删除时在这里记一笔，落盘前按 n 过滤掉。没人删过时这个过滤是**恒等**的（零影响）。
+    # 用 list 不用 set：保持 JSON 友好。清零点见 api_start 与两个 worker 的开头。
+    'rows_deleted': [],
     'done': False,
     'output': '',
     'stop': False,

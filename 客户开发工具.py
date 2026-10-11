@@ -525,9 +525,42 @@ def extract_results(page, seen_titles, china_filters=None):
 EMAIL_RE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')
 EMAIL_OK = re.compile(r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}$')
 PHONE_RE = re.compile(r'(?:\+\d{1,3}[\s.\-]?)?\(?\d{3}\)?[\s.\-]\d{3}[\s.\-]\d{4}')
-NOISE_EMAIL = ['wixpress.com', 'shopify.com', 'squarespace.com', 'wix.com',
-               'example.com', 'example.org', 'schema.org', 'google.com',
-               'wordpress.org', 'myshopify.com']
+
+# ---- 邮箱误报过滤（只丢噪声，不做反混淆 / 不补 JSON-LD）----
+# 背景：EMAIL_RE 的 TLD 只要求「2 个以上字母」，于是 srcset 里的 `xxx_1512x@2x.png`
+# 会被整体当成合法邮箱（域名段 `2x`、TLD `png`）——用户实测在结果表里看到的就是这个。
+# ① 被 EMAIL_RE 当成 TLD 的文件扩展名。
+#    ⚠️ 刻意**不含** .zip/.sh/.md/.mov/.py/.pl/.in 等**真 TLD** —— 宁可不挡也不误杀企业邮箱。
+NOISE_EMAIL_TLDS = frozenset({
+    'png', 'jpg', 'jpeg', 'jpe', 'gif', 'webp', 'svg', 'ico', 'bmp', 'tiff', 'tif', 'avif',
+    'js', 'mjs', 'cjs', 'css', 'scss', 'sass', 'less', 'map', 'json', 'xml', 'webmanifest',
+    'woff', 'woff2', 'ttf', 'otf', 'eot',
+    'mp3', 'mp4', 'webm', 'avi', 'wav', 'ogg', 'mkv',
+    'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt',
+    'gz', 'tar', 'rar', '7z',
+    'html', 'htm', 'php', 'asp', 'aspx', 'vue', 'ts', 'tsx',
+})
+# ② 倍图尺寸后缀 `@2x` / `@3x` / `@x2`（如 `en@x2.png`），只看域名首段。
+#    ⚠️ 绝不能加裸数字分支 `^\d+$` —— 会误杀 163.com / 126.com / 139.com 这类纯数字 label 的合法邮域（实测确认）。
+NOISE_EMAIL_DIM_RE = re.compile(r'^(?:\d+x|x\d+)$', re.I)
+# ③ 埋点 / 建站平台 / 占位域：**后缀匹配**（等于 或 `.后缀`）。
+#    ⚠️ 绝不用子串：老写法 `any(n in dom for n in NOISE_EMAIL)` 会把 mywix.com / shopwix.com 一起误杀。
+#    ⚠️ 严禁放入 free mail（gmail/outlook/yahoo/qq/163/126…）与正常企业域。
+NOISE_EMAIL_HOSTS = (
+    'sentry.io', 'cloudflare.com', 'cloudflareinsights.com',
+    'gstatic.com', 'googleapis.com', 'googleusercontent.com', 'google.com',
+    'googletagmanager.com', 'google-analytics.com', 'doubleclick.net',
+    'jsdelivr.net', 'unpkg.com', 'bootstrapcdn.com',
+    'hotjar.com', 'mixpanel.com', 'segment.io',
+    'zendesk.com', 'hubspot.com', 'hubspotusercontent.com',
+    'newrelic.com', 'nr-data.net', 'bugsnag.com', 'rollbar.com', 'datadoghq.com',
+    'intercom.io', 'drift.com', 'tawk.to',
+    'wixpress.com', 'wix.com', 'shopify.com', 'myshopify.com', 'squarespace.com',
+    'wordpress.org', 'wp.com', 'gravatar.com',
+    'example.com', 'example.org', 'schema.org',
+)
+# ④ 埋点 public key：32 位十六进制的 local part（自建 Sentry 之类兜底；真实库里命中 0、误杀 0）。
+NOISE_EMAIL_HEX_RE = re.compile(r'^[0-9a-f]{32}$', re.I)
 CONTACT_PATHS = ['/contact', '/contact-us', '/pages/contact-us', '/contactus']
 CTYPE_WORDS = ['wholesale', 'distributor', 'importer', 'trading', 'dealer', 'supplier', 'bulk']
 PRODUCT_WORDS = ['litter', 'liner', 'cat', 'pet']
@@ -584,14 +617,32 @@ def _find_contact_url(html, base_url):
     return ''
 
 
+def _is_noise_email(addr):
+    """候选串是不是「资源文件名 / 埋点 DSN / 第三方宿主」式误报。addr 必须已小写。
+
+    这是邮箱唯一抽取出口 clean_emails 的过滤判据 —— 改这里就等于改全部 4 条链路
+    （手动①②③级、自动搜索 run_search、地图 run_maps 都走 clean_emails）。
+    """
+    local, _, dom = addr.partition('@')
+    if dom.rsplit('.', 1)[-1] in NOISE_EMAIL_TLDS:                          # ① 文件扩展名当 TLD
+        return True
+    if NOISE_EMAIL_DIM_RE.match(dom.split('.', 1)[0]):                      # ② @2x / @x2 倍图
+        return True
+    if any(dom == h or dom.endswith('.' + h) for h in NOISE_EMAIL_HOSTS):    # ③ 埋点/第三方宿主
+        return True
+    if NOISE_EMAIL_HEX_RE.match(local):                                     # ④ 埋点 public key
+        return True
+    return False
+
+
 def clean_emails(html):
     out = []
     for m in EMAIL_RE.findall(html):
-        dom = m.split('@')[1].lower()
-        if any(n in dom for n in NOISE_EMAIL):
+        m = m.lower()
+        if _is_noise_email(m):
             continue
-        if m.lower() not in out:
-            out.append(m.lower())
+        if m not in out:
+            out.append(m)
     return out[:3]
 
 
@@ -749,29 +800,42 @@ def _guess_industry(title, url):
         return ''
 
 
-def _commit_candidate(title, url, info, *, snippet, formula, country,
-                      industry='', source='谷歌搜索', product_words=None):
-    """手动采集的公共尾段：评分 → 写库 → 返回规范化行（供 10 列 Excel 用）。
+def _manual_row(title, url, info, *, snippet, formula, country, industry='', product_words=None):
+    """手动采集的公共尾段：评分 → 返回规范化行（供 10 列 Excel 与「结束入库」用）。
+
+    ⛔ **这里不写库**。手动采集已改成「点『🏁 结束并生成 Excel』时才一次性入库」：
+       本轮采到的东西只活在 `MANUAL_STATE['session_rows']` 里，入库交给 `_flush_manual_session()`。
+       代价（用户 2026-10-11 拍板接受）：没点「结束」就关掉工具，这一轮明细就没了。
+       收益：把国家/行业填错的那一轮可以直接丢掉，不会提前污染客户库。
 
     `product_words` 一路透传给 `score_item`（不传=沿用原有的写死词表，行为不变）。
 
     ⚠️ 刻意**没**让 run_search / run_maps 改用它：那两条链路已经跑通、且有回归脚本守着，
-       项目既有约定是「不动跑通的链路」。run_maps 更特殊 —— 它在 china_filter_reasons()
-       之前就把「地图电话并入官网电话」了，合并时机一旦挪动，中国过滤的入参就变了，
-       smoke 可能仍绿而真机行为已改。待手动链路真机跑顺后再择机迁移。
+       项目既有约定是「不动跑通的链路」—— 它们**仍然是「边采边落库」**，与手动链路不同。
     """
     s = score_item(title, url, info, product_words=product_words)
-    db_upsert_customer({
-        'company_name': title, 'website': url,
-        'email': ' / '.join(info['emails']),
-        'phone': ' / '.join(info['phones']),
-        'contact_url': info['contact_url'], 'score': s, 'rating': rating(s),
-        'snippet': snippet, 'search_formula': formula,
-        'country': country, 'industry': industry, 'source': source,
-    })
     return {'title': title, 'url': url, 'emails': info['emails'], 'phones': info['phones'],
             'contact_url': info['contact_url'], 'score': s, 'rating': rating(s),
             'snippet': snippet, 'formula': formula, 'country': country, 'industry': industry}
+
+
+def _session_has_url(url):
+    """本轮明细里是不是已经采过同一个站（按 website_key 比，与 db_has_customer 同口径）。
+
+    为什么单独要这一步：手动采集改成了「结束才入库」，本轮采的东西**都还不在客户库里** →
+    光靠 `db_has_customer()` 挡不住「同一轮里把同一个站采两遍」，那会在结果 Excel 里多出一行
+    （用户实测踩过：b2kpet.com 一行出现 3 次）。
+
+    ⚠️ 自己拿 STATE_LOCK（只读内存）；调用方**不能**已经持锁（那把锁非可重入）。
+    """
+    key = normalize_domain(url)
+    if not key:
+        return False
+    with STATE_LOCK:
+        for r in MANUAL_STATE.get('session_rows') or []:
+            if r.get('kind') == 'added' and normalize_domain(r.get('url') or '') == key:
+                return True
+    return False
 
 
 # ================= 手动采集：常驻浏览器 =================
@@ -859,7 +923,7 @@ def _next_rid():
 
 def collect_from_html(url, title, html, industry='', country='',
                       source='手动采集', allow_upgrade=True, product_words=None):
-    """手动采集一个网址：三级抓取 → 评分 → 入库 → 计入本轮明细。
+    """手动采集一个网址：三级抓取 → 评分 → 计入本轮明细。
 
     三级抓取（前一级拿不到邮箱才进下一级）：
       ① 秒级   ：扩展送来的当前页 HTML，直接正则抽邮箱/电话（不开浏览器，<0.1s）
@@ -868,9 +932,11 @@ def collect_from_html(url, title, html, industry='', country='',
     `product_words` 是本轮的产品词（用于评分里的 +10）；不传则沿用原有的写死词表。
     返回统一结果 dict，直接回给扩展 popup / 前端。
 
-    ⚠️ 这里**不落盘**：采到的行只进 `MANUAL_STATE['session_rows']`，等用户点
-       「🏁 结束并生成 Excel」时由 `_flush_manual_session()` 一次性写成结果 Excel
+    ⚠️ 这里**不落盘也不写库**：采到的行只进 `MANUAL_STATE['session_rows']`，等用户点
+       「🏁 结束并生成 Excel」时由 `_flush_manual_session()` 一次性写库 + 写成结果 Excel
        （对齐自动搜索的「整轮结束才落盘」，也避免把手动采集的条目混进上一轮自动搜索的 Excel）。
+    ⚠️ `source` 参数保留只为兼容老调用方，**已经不参与任何逻辑**（本轮不再在这里入库）；
+       真正的 `source='手动采集'` 是在 `_flush_manual_session()` 入库那一刻写的。
     """
     init_customer_db()
     url = (url or '').strip()
@@ -881,18 +947,20 @@ def collect_from_html(url, title, html, industry='', country='',
     if not key:
         return {'ok': False, 'added': False, 'msg': f'网址无效：{url[:60]}'}
 
-    # 网址有效就往本轮攒 —— 放在 db_has_customer 之前，保证「已在库跳过」的条目也计入本轮，
+    # 网址有效就往本轮攒 —— 放在去重判断之前，保证「跳过」的条目也计入本轮，
     # 也让本轮口径（行业/国家）从第一条就定下来（第③级升级可能要跑好几秒，不能等它）。
     _ensure_manual_session(industry, country)
 
-    # 老客户直接跳过 —— 在「升级抓取」之前就省掉最贵的那一步（与 run_maps 的老客户策略一致）
-    if db_has_customer(url):
+    # 老客户直接跳过 —— 在「升级抓取」之前就省掉最贵的那一步（与 run_maps 的老客户策略一致）。
+    # ⛔ 还要查**本轮内**有没有采过同一个站：本轮采的东西还没入库（要等「结束并生成 Excel」），
+    #    所以 db_has_customer() 看不见它们 —— 同轮重复得靠内存明细挡（见 _session_has_url）。
+    if db_has_customer(url) or _session_has_url(url):
         with STATE_LOCK:
             MANUAL_STATE['existed'] += 1
             # 也记一条轻量明细：用户要靠它回答「我刚点的那条去哪了」
             MANUAL_STATE.setdefault('session_rows', []).append(
                 {'kind': 'existed', 'title': title or key, 'url': url, 'rid': _next_rid()})
-        log(f'   · 已在客户库，跳过：{key}')
+        log(f'   · 已在客户库（或本轮已采过），跳过：{key}')
         return {'ok': True, 'added': False, 'existed': True, 'upgraded': False,
                 'row': {'url': url, 'title': title or key}, 'msg': '已在客户库，跳过'}
 
@@ -962,10 +1030,9 @@ def collect_from_html(url, title, html, industry='', country='',
 
     industry = (industry or '').strip() or _guess_industry(title, url)
     snippet = _meta_description(html) or title or url
-    row = _commit_candidate(title or key, url, info, snippet=snippet,
-                            formula=f'[手动采集] {url}', country=country,
-                            industry=industry, source=source,
-                            product_words=product_words)
+    row = _manual_row(title or key, url, info, snippet=snippet,
+                      formula=f'[手动采集] {url}', country=country,
+                      industry=industry, product_words=product_words)
 
     with STATE_LOCK:
         MANUAL_STATE['added'] += 1
@@ -1216,6 +1283,11 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
     try:
         init_customer_db()
         STATE['phase'] = 'search'
+        with STATE_LOCK:
+            # 本轮墓碑清零。api_start 已经清过一次，这里再清一次是为「直调 run_search 的调用方」
+            # （补历史欠账类脚本、冒烟测试）兜底 —— 否则上一轮删过的 n 会把**本轮**同号的结果
+            # 在 finally 里静默过滤掉（跨轮串味，表现为结果 Excel 莫名少一条）。
+            STATE['rows_deleted'] = []
         if custom_mode:
             log(f'启动浏览器... 自定义查询 {len(raw_queries)} 条 × 国家 {len(countries)} 个（原样搜索，不拼任何词）')
         else:
@@ -1348,7 +1420,7 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                                 # 用补全结果覆盖刚才的线索记录（空值不会冲掉库里已有的有效值）
                                 db_upsert_customer({
                                     'company_name': item['title'], 'website': item['url'],
-                                    'email': ' / '.join(info['emails']),
+                                    'email': EMAIL_SEP.join(info['emails']),
                                     'phone': ' / '.join(info['phones']),
                                     'contact_url': info['contact_url'], 'score': s, 'rating': rating(s),
                                     'snippet': item['snippet'], 'search_formula': formula,
@@ -1359,8 +1431,10 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                             stat['added'] += 1
                             if info['emails']:
                                 stat['mail'] += 1
-                            STATE['result_count'] = len(all_rows)
-                            # 实时明细：前端表格每秒轮询 STATE['rows']，边搜边显示入库内容
+                            # 实时明细：前端表格每秒轮询 STATE['rows']，边搜边显示入库内容。
+                            # ⚠️ result_count 取 STATE['rows'] 的长度，**不是** len(all_rows)：用户在页面上
+                            #    删掉一条后 all_rows 里那条还在（要等 finally 才按墓碑过滤），两处会差 1，
+                            #    「本轮新增 N 个网站」跟表格对不上。计数跟着表格走。
                             with STATE_LOCK:
                                 STATE['rows'].append({
                                     'n': len(all_rows),
@@ -1374,6 +1448,7 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                                     'industry': industry,
                                     'country': cname,
                                 })
+                                STATE['result_count'] = len(STATE['rows'])
                             log(f'   + [{len(all_rows)}/{target_count}] {item["title"][:38]} '
                                 f'邮箱{len(info["emails"])} 电话{len(info["phones"])} 评分{s} {rating(s)}')
                             if len(all_rows) >= target_count:
@@ -1434,11 +1509,21 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                 pass
         # 落盘放在 finally：中途「停止」在 try 内部是 return，只有这里能保证已抓到的结果不白跑。
         # 浏览器关掉后再写文件，确保客户网站标签页已释放、不会和 Excel 抢资源。
-        if all_rows:
+        # ⚠️ 先按 STATE['rows_deleted']（用户在上面的实时明细里点 ✕ 删掉的行）过滤。只删内存明细
+        #    是「假删除」—— 落盘用的是本函数的局部 all_rows，与 STATE['rows'] 不是同一个列表，
+        #    不过滤的话那条照样进结果 Excel、飞书也照样推。没人删过时这一步是**恒等过滤**。
+        with STATE_LOCK:
+            dead = set(STATE['rows_deleted'] or ())
+        results = [r for i, r in enumerate(all_rows, 1) if i not in dead]
+        if results:
             try:
-                _save_enrich_excel(all_rows, industry=industry)
+                _save_enrich_excel(results, industry=industry)
             except Exception as e:
                 log(f'❌ 结果 Excel 写出失败：{type(e).__name__}: {e}')
+        elif all_rows:
+            # 全被删光：**绝不能**调 _save_enrich_excel —— 它会产出一份只含表头的表，还会把
+            # paths.ENRICH_FILE 改指过去（污染飞书导出的数据源）。对齐 /manual 的「空轮不落盘」。
+            log(f'本轮采到的 {len(all_rows)} 条已在上面的实时明细里被全部删除，未产出结果文件')
         elif search_ok:
             log('本轮没有新增网站，未产出结果文件（客户库未变化）')
         STATE['done'] = True
@@ -1478,6 +1563,9 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
     try:
         init_customer_db()
         STATE['phase'] = 'search'
+        with STATE_LOCK:
+            # 本轮墓碑清零（与 run_search 同一纪律，见那边的注释）：防直调本函数时上一轮的墓碑串味。
+            STATE['rows_deleted'] = []
         log(f'谷歌地图采集：关键词 {len(products)} 个 × 国家 {len(countries)} 个'
             + (f' · 城市「{city}」' if city else '（未指定城市，只用国家中心视野）'))
         log('⚠️ 地图结果会受出口 IP 所在地影响，比网页搜索更明显；指定城市可显著提高精度')
@@ -1590,7 +1678,7 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
                     s = score_item(name, target_url, info)
                     db_upsert_customer({
                         'company_name': name, 'website': target_url,
-                        'email': ' / '.join(info['emails']),
+                        'email': EMAIL_SEP.join(info['emails']),
                         'phone': ' / '.join(info['phones']),
                         'contact_url': info['contact_url'], 'score': s, 'rating': rating(s),
                         'snippet': snippet, 'search_formula': formula,
@@ -1605,8 +1693,9 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
                     stat['added'] += 1
                     if info['emails']:
                         stat['mail'] += 1
-                    STATE['result_count'] = len(all_rows)
-                    # 实时明细：前端表格每秒轮询 STATE['rows']，边采边显示入库内容
+                    # 实时明细：前端表格每秒轮询 STATE['rows']，边采边显示入库内容。
+                    # result_count 取 STATE['rows'] 长度而非 len(all_rows)（用户删过之后两者会差 1），
+                    # 理由同 run_search 里的注释。
                     with STATE_LOCK:
                         STATE['rows'].append({
                             'n': len(all_rows), 'title': name, 'url': target_url,
@@ -1614,6 +1703,7 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
                             'contact_url': info['contact_url'], 'score': s,
                             'rating': rating(s), 'industry': industry, 'country': cname,
                         })
+                        STATE['result_count'] = len(STATE['rows'])
                     log(f'   + [{len(all_rows)}/{target_count}] {name[:38]} '
                         f'邮箱{len(info["emails"])} 电话{len(info["phones"])} 评分{s} {rating(s)}')
                     if len(all_rows) >= target_count:
@@ -1668,11 +1758,19 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
             except Exception:
                 pass
         # 落盘放 finally：中途「停止」在 try 内部是 return，只有这里能保证已采到的结果不白跑。
-        if all_rows:
+        # ⚠️ 先按 STATE['rows_deleted']（用户在上面的实时明细里点 ✕ 删掉的行）过滤，理由与
+        #    run_search 那边逐字相同：不过滤 = 假删除，那条照样进 Excel、飞书照样推。
+        with STATE_LOCK:
+            dead = set(STATE['rows_deleted'] or ())
+        results = [r for i, r in enumerate(all_rows, 1) if i not in dead]
+        if results:
             try:
-                _save_enrich_excel(all_rows, industry=industry)
+                _save_enrich_excel(results, industry=industry)
             except Exception as e:
                 log(f'❌ 结果 Excel 写出失败：{type(e).__name__}: {e}')
+        elif all_rows:
+            # 全被删光 → 不落盘（否则产出只含表头的表、还污染 paths.ENRICH_FILE）
+            log(f'本轮采到的 {len(all_rows)} 条已在上面的实时明细里被全部删除，未产出结果文件')
         elif run_ok:
             log('本轮没有新增商家，未产出结果文件（客户库未变化）')
         STATE['done'] = True
@@ -1736,10 +1834,26 @@ EXCEL_HEADER_10 = ['公司/页面标题', '网站网址', '邮箱', '电话', '�
 EXCEL_WIDTHS_10 = (50, 50, 40, 20, 40, 8, 10, 60, 50, 10)
 EXCEL_LOCK = threading.Lock()      # 手动采集可能并发点，追加写必须串行
 
+# 多个邮箱拼进一个单元格（Excel「邮箱」列 / 客户库 email 字段 / 飞书备注）时用的分隔符。
+# 用户要求：**邮箱用逗号**（可直接粘到邮件客户端），不是斜杠。⚠️ 电话仍沿用 ' / '（用户明确保留）。
+# ⚠️ 写（下方 4 处 join）与**读**（`split_emails`）必须同步；飞书导出是从 Excel 读回再拆的，
+#    只改一半会让整列邮箱静默丢光（split 不出来 → EMAIL_OK 全部不匹配）。
+EMAIL_SEP = ', '
+
+
+def split_emails(raw):
+    """把「邮箱串」（结果 Excel 的邮箱列 / 客户库的 email 字段）拆回邮箱列表。
+
+    **兼容两种分隔符**：新写入的用 `, `（`EMAIL_SEP`），2026-10-11 之前的存量数据是 ` / `。
+    只按新分隔符拆的话，旧数据会被当成「一个邮箱」→ `EMAIL_OK` 校验必失败 → **邮箱静默丢光**。
+    （邮箱串里不可能出现裸 `/`，所以用 `[,/]` 一起拆是安全的。）
+    """
+    return [p for p in (x.strip() for x in re.split(r'\s*[,/]\s*', raw or '')) if p]
+
 
 def _row10(row):
     """把内部行（11 键）映射成结果 Excel 的 10 列 —— 顺序必须与 _save_enrich_excel 一致。"""
-    return [row['title'], row['url'], ' / '.join(row['emails']), ' / '.join(row['phones']),
+    return [row['title'], row['url'], EMAIL_SEP.join(row['emails']), ' / '.join(row['phones']),
             row['contact_url'], row['score'], row['rating'], row['snippet'],
             row['formula'], row.get('country', '')]
 
@@ -1828,7 +1942,7 @@ def _save_enrich_excel(results, industry='', country=''):
     ows.append(['公司/页面标题', '网站网址', '邮箱', '电话', '联系页',
                 '评分', '评级', '摘要', '搜索公式', '国家'])
     for r in sorted(results, key=lambda x: -x['score']):
-        ows.append([r['title'], r['url'], ' / '.join(r['emails']), ' / '.join(r['phones']),
+        ows.append([r['title'], r['url'], EMAIL_SEP.join(r['emails']), ' / '.join(r['phones']),
                     r['contact_url'], r['score'], r['rating'], r['snippet'], r['formula'],
                     r.get('country', '')])
     for col, w in zip('ABCDEFGHIJ', (50, 50, 40, 20, 40, 8, 10, 60, 50, 10)):
@@ -1847,16 +1961,21 @@ def _save_enrich_excel(results, industry='', country=''):
 
 
 def _flush_manual_session():
-    """结束「本轮手动采集」：把本轮明细落成一份结果 Excel，并把它设为「最新结果文件」。
+    """结束「本轮手动采集」：把本轮明细**先写入客户库**、再落成一份结果 Excel，并设为「最新结果文件」。
 
     与自动搜索的 `finally` 落盘对齐 —— 一轮一份文件，而不是采一条追加一次。
 
-    三处刻意设计：
+    四处刻意设计：
       · **空轮不落盘**：本轮只有「已在库」的跳过期（或压根没采到），就不产出一份 0 行的表，
-        也不会动 `paths.ENRICH_FILE` / `STATE['output']`。
-      · **只写新客户**：`kind='existed'` 的行只是给人看「这条之前就有」，不进 Excel。
-      · **失败不清数据**：保存失败时保留 `session_rows` 且 `session_active` 仍为 True，
-        页面红字提示、用户可以直接再点一次「结束」（数据最坏也还在 SQLite 客户库里）。
+        也不会写库、不动 `paths.ENRICH_FILE` / `STATE['output']`。
+      · **只写新客户**：`kind='existed'` 的行（老客户，以及本轮内采重的同一站）只是给人看
+        「这条跳过是因为早就有了」，既不进客户库也不进 Excel。
+      · **先入库、再写表**：2026-10-11 起手动采集改成「点这一下才一次性入库」（见 `_manual_row`）。
+        顺序刻意是「先库后表」——入库失败时**不产出** Excel，避免出现「表里有、库里没有」
+        （那样下次再采到同一个站还是会当成新客户重复进表）。
+      · **失败不清数据**：入库或保存失败时保留 `session_rows` 且 `session_active` 仍为 True，
+        页面红字提示、用户可以直接再点一次「结束」。入库走 `db_upsert_customer`（按
+        website_key 幂等）→ 重试不会产生重复行。
     """
     with STATE_LOCK:
         snap = list(MANUAL_STATE.get('session_rows') or [])          # 锁内快照，出锁再做 IO
@@ -1876,7 +1995,33 @@ def _flush_manual_session():
         log('本轮没有采到新客户，未生成结果文件')
         return {'ok': True, 'saved': False, 'msg': '本轮没有采到新客户，未生成结果文件'}
 
-    log(f'====== 结束本轮手动采集：新客户 {len(rows)} 条，正在生成 Excel ======')
+    # ---- ① 先入库：这是手动链路**唯一**一次写客户库（就在「结束」这一刻）----
+    log(f'====== 结束本轮手动采集：新客户 {len(rows)} 条，正在写入客户库 ======')
+    db_failed = 0
+    for r in rows:
+        try:
+            db_upsert_customer({
+                'company_name': r['title'], 'website': r['url'],
+                'email': EMAIL_SEP.join(r['emails']), 'phone': ' / '.join(r['phones']),
+                'contact_url': r['contact_url'], 'score': r['score'], 'rating': r['rating'],
+                'snippet': r['snippet'], 'search_formula': r['formula'],
+                'country': r.get('country', ''), 'industry': r.get('industry', ''),
+                'source': '手动采集',
+            })
+        except Exception as e:                 # 单条失败不拖垮整轮：先记下来，最后一起决定
+            db_failed += 1
+            log(f'   ⚠️ 入库失败 {r.get("url", "")[:55]}：{type(e).__name__}: {e}')
+    if db_failed:
+        with STATE_LOCK:
+            MANUAL_STATE['session_error'] = (f'有 {db_failed} 条写入客户库失败，'
+                                             '本轮数据已保留，可直接重试')
+            msg = MANUAL_STATE['session_error']
+        log(f'⚠️ 本轮入库失败 {db_failed} 条，未生成结果 Excel（数据已保留，可直接重试）')
+        return {'ok': False, 'saved': False, 'msg': msg}
+    log(f'   · 已写入客户库 {len(rows)} 条')
+
+    # ---- ② 再写表：只有全部入库成功才落盘（保证「表里的每一行库里都有」）----
+    log(f'====== 正在生成结果 Excel（{len(rows)} 条）======')
     with EXCEL_LOCK:                       # 与自动搜索的落盘互斥；Excel 写盘一律在 STATE_LOCK 外
         ok = _save_enrich_excel(rows, industry=industry, country=country)
         if not ok:                         # 多半是被 Excel 打开着 —— 退避一秒再试一次
@@ -1924,7 +2069,7 @@ def enrich_core(industry=''):
             enriched = {**item, **info, 'score': s, 'rating': rating(s)}
             db_upsert_customer({
                 'company_name': item['title'], 'website': item['url'],
-                'email': ' / '.join(info['emails']), 'phone': ' / '.join(info['phones']),
+                'email': EMAIL_SEP.join(info['emails']), 'phone': ' / '.join(info['phones']),
                 'contact_url': info['contact_url'], 'score': s, 'rating': rating(s),
                 'snippet': item['snippet'], 'search_formula': item['formula'],
                 'country': item.get('country', ''),
@@ -1956,9 +2101,9 @@ def enrich_core(industry=''):
 
 # ================= 导出到飞书 =================
 # 「来源渠道」是飞书的**单选**字段，取值必须是表里已有的选项，否则整条记录会被拒。
-# 客户库 customers.source 目前只有这三个取值（谷歌搜索 / 谷歌地图由两条自动链路写，
-# 手动采集由 collect_from_html 写）。⚠️ 在飞书「客户信息」表里给「来源渠道」加选项时，
-# 记得同步改这里。
+# 客户库 customers.source 目前只有这三个取值（谷歌搜索 / 谷歌地图由两条自动链路在采集那一刻写，
+# 手动采集由 `_flush_manual_session()` 在点「🏁 结束并生成 Excel」那一刻写）。
+# ⚠️ 在飞书「客户信息」表里给「来源渠道」加选项时，记得同步改这里。
 FEISHU_SOURCES = ('谷歌搜索', '谷歌地图', '手动采集')
 
 
@@ -2004,12 +2149,12 @@ def build_feishu_records():
         #    认定「这个网站就是我的目标客户」才动手点的，低分不该被静默丢掉 —— 豁免它。
         if not manual and (not isinstance(score, (int, float)) or score < 50):
             continue
-        mails = [m.strip() for m in emails.split(' / ') if EMAIL_OK.match(m.strip())]
+        mails = [m for m in split_emails(emails) if EMAIL_OK.match(m)]
         note = '脚本评分%d分（%s），待人工核实' % (int(score) if isinstance(score, (int, float)) else 0, rating)
         if manual:
             note += '；手动采集'
         if len(mails) > 1:
-            note += '；其他邮箱：' + ' / '.join(mails[1:])
+            note += '；其他邮箱：' + EMAIL_SEP.join(mails[1:])
         src = src_map.get(normalize_domain(url), '谷歌搜索')
         if src not in FEISHU_SOURCES:
             if src not in warned_src:
@@ -2313,13 +2458,39 @@ def api_manual_session_finish():
     return jsonify(_flush_manual_session())
 
 
+def _delete_customer_and_backup(url):
+    """删一行明细时共用的「落库那一半」：先备份客户库，再按网址把库里那条删掉。
+
+    两个接口（`/api/manual/session/delete` 与 `/api/live/delete`）的这段**完全同构**，抽到这里
+    免得改一处漏一处。⚠️ 但**调用时机不同**：自动链路（`/api/live/delete`）是采集那一刻就落库的，
+    所以每条都要走它；手动链路（`/api/manual/session/delete`）本轮的行还没入库，**默认不走它**，
+    只有「已入库但结果 Excel 没写成功」的保留行才走（判据见那个接口的 docstring）。
+    两处的共同底线是：**只要真动了库，就必须先备份**。
+
+    ⛔ 调用方**必须**在 `with STATE_LOCK` **之外**调它：`backup_db_before_delete()` 内部会调
+       `log()`，而 `log()` 自己抢同一把**非可重入**的锁 → 持锁调它必死锁（页面卡死、要重启工具）。
+       所以本函数体内**一把锁都不拿** —— 由 `_check_page.py` R12 的结构化断言守着。
+
+    返回 `(backup_path, deleted)`：`backup_path` 在「被 300 秒节流 / 备份失败」时是 `''`
+    （备份失败不阻断删除）；`deleted` 是客户库里真正删掉的条数。
+    """
+    backup = backup_db_before_delete()      # 先备份（失败或被 300 秒节流时返回 ''）
+    deleted = db_delete_customer(url)       # 再真删库（按 website_key；空 key 返回 0，不会误删全表）
+    return backup, deleted
+
+
 @app.route('/api/manual/session/delete', methods=['POST'])
 def api_manual_session_delete():
-    """把本轮明细里的某一条删掉，**并同时从客户库删掉它**（删除前自动备份客户库）。
+    """把本轮明细里的某一条删掉（**默认只删内存明细，不碰客户库**）。
 
-    为什么要删库：采集那一刻记录就已经写进 SQLite 了（`_commit_candidate` → `db_upsert_customer`）。
-    只删明细是假删除 —— 库里那条还在，下次再采到同一个站会被 db_has_customer 判「已在客户库」
-    直接跳过、永远采不回来，飞书导出也仍会带它。
+    为什么现在不动库了：2026-10-11 起手动采集改成「点『🏁 结束并生成 Excel』才一次性入库」，
+    所以本轮明细里 `kind='added'` 的行**此刻还不在客户库里** —— 删它只需把它从待入库清单里拿掉；
+    `kind='existed'` 的灰字行本来就属于「别人早就采过」的老客户，**更不该**被这一轮连带删库。
+
+    ⚠️ 唯一的例外（所以下面还留着删库那半边）：本轮已经点过一次「结束」，入库成功了但结果 Excel
+       被 Excel 占用没写成功 → 按「失败不清数据」的设计，这批行仍留在明细里等你重试。
+       这时它们**确实已经在库里**了，删这一行就得连库一起删，否则又变回「假删除」。
+       判据因此写成「`kind='added'` **且** 库里真的有它」，而不是无条件删。
 
     ⚠️ 锁纪律（STATE_LOCK 非可重入，且 log() 自己也要抢同一把锁）：
        ① 锁内定位  ② 锁外做备份与 DB 删除（慢 IO）  ③ 锁内改内存  ④ 锁外 log。
@@ -2337,22 +2508,88 @@ def api_manual_session_delete():
         url = hit.get('url') or ''
         kind = hit.get('kind')
 
-    backup = backup_db_before_delete()      # 锁外：先备份（失败不阻断，返回 ''）
-    deleted = db_delete_customer(url)       # 锁外：真删库
+    # 锁外：只有「本轮采的 + 确实已经躺在库里」这一种情况才需要动库（见 docstring 的例外说明）。
+    # 老客户灰字行（kind='existed'）永远走 else 分支 —— 用户明确要求「灰字行不再动库」。
+    if kind == 'added' and db_has_customer(url):
+        backup, deleted = _delete_customer_and_backup(url)
+    else:
+        backup, deleted = '', 0
 
     with STATE_LOCK:
         rows = MANUAL_STATE.get('session_rows') or []
         idx = next((i for i, r in enumerate(rows) if r.get('rid') == rid), -1)
         if idx >= 0:
             rows.pop(idx)
-        # 计数跟着回退，否则状态行的「已采 N 条」会与实际行数对不上。
+        # 计数跟着回退，否则状态行的「有效 N / 共 M」会与实际行数对不上。
         # upgraded/failed 不动：它们是「本轮发生过几次」的事件计数，不指涉某一行。
         ckey = 'existed' if kind == 'existed' else 'added'
         MANUAL_STATE[ckey] = max(0, (MANUAL_STATE.get(ckey) or 0) - 1)
         n = len(rows)
 
-    log(f'🗑️ 已从本轮明细删除：{url[:60]}（客户库删除 {deleted} 条）')
+    if deleted:
+        log(f'🗑️ 已从本轮明细删除：{url[:60]}（客户库删除 {deleted} 条）')
+    else:
+        log(f'🗑️ 已从本轮明细删除：{url[:60]}（未入库，客户库不动）')
     return jsonify({'ok': True, 'deleted': deleted, 'rows': n,
+                    'backup': os.path.basename(backup) if backup else ''})
+
+
+@app.route('/api/live/delete', methods=['POST'])
+def api_live_delete():
+    """删掉主页「📥 本轮已入库明细（实时）」里的某一条（同一份内存明细 + 客户库，删前自动备份）。
+
+    与 `/api/manual/session/delete` 是同一套语义，只是数据源换成自动链路的 `STATE['rows']`：
+      · 采集那一刻就已经写进 SQLite 了（`db_upsert_customer`）。**只删内存明细是假删除** ——
+        库里那条还在 → 下次采到同一个站被判「已在客户库」直接跳过、永远采不回来 → 飞书仍带它。
+      · 落盘用的是 run_search / run_maps 自己的局部 `all_rows`，与 `STATE['rows']` **不是同一个
+        列表**，所以还要在 `STATE['rows_deleted']` 里留个墓碑，让 finally 按 n 过滤后落盘。
+        否则「删了却还在结果 Excel 里」，用户看到的还是没删干净。
+
+    ⚠️ 只允许**采集进行中**删（`running and phase == 'search'`）：
+      导出飞书时 `running` 也是 True 而 `phase == 'export'`，此时 `STATE['rows']` 还挂着上一轮的行，
+      结果 Excel 早就写好了 —— 这时让它删，就是典型的「库删了、表还在」的假删除。所以一并拦掉。
+
+    ⚠️ 锁纪律（STATE_LOCK 非可重入，且 log() 自己也要抢同一把锁）：
+       ① 锁内校验+定位  ② 锁外备份与 DB 删除（慢 IO）  ③ 锁内改内存  ④ 锁外 log。
+       `backup_db_before_delete()` 内部会调 `log()`，**持锁调它必死锁**。
+
+    ⚠️ 定位用 `n` 而不是 url：`n` 是本轮内唯一且单调的行号；url 虽然被 `seen` 去过重，但用行号
+       才和前端 ✕ 上挂的 `data-n` 一一对应。
+    """
+    d = request.get_json(silent=True) or {}
+    raw = d.get('n')
+    if isinstance(raw, bool):
+        raw = None                       # ⚠️ bool 在 Python 里是 int：n=True 会变成 1 误删第一行
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        n = None
+    with STATE_LOCK:                                             # ① 锁内：校验 + 定位
+        if not (STATE['running'] and STATE['phase'] == 'search'):
+            return jsonify({'ok': False,
+                            'msg': '本轮采集已结束（或正在导出），如需整批清理请到客户库查询页'})
+        if n is None or n <= 0:
+            return jsonify({'ok': False, 'msg': '无效的行号'})
+        hit = next((r for r in STATE['rows'] if r.get('n') == n), None)
+        if hit is None:
+            return jsonify({'ok': False, 'msg': '这条已不在本轮明细里（可能已被删除）'})
+        url = hit.get('url') or ''
+
+    backup, deleted = _delete_customer_and_backup(url)          # ② 锁外：先备份 + 真删库
+
+    with STATE_LOCK:                                             # ③ 锁内：改内存
+        idx = next((i for i, r in enumerate(STATE['rows']) if r.get('n') == n), -1)
+        if idx < 0:
+            return jsonify({'ok': False, 'msg': '这条已不在本轮明细里（可能已被删除）'})
+        STATE['rows'].pop(idx)
+        if n not in STATE['rows_deleted']:                      # 防重复点塞重复墓碑
+            STATE['rows_deleted'].append(n)
+        # 计数跟着表格走，否则「本轮新增 N 个网站」会与实际行数对不上
+        STATE['result_count'] = len(STATE['rows'])
+        cnt = len(STATE['rows'])
+
+    log(f'🗑️ 已从实时明细删除：{url[:60]}（客户库删除 {deleted} 条）')   # ④ 锁外 log
+    return jsonify({'ok': True, 'deleted': deleted, 'rows': cnt,
                     'backup': os.path.basename(backup) if backup else ''})
 
 
@@ -2388,7 +2625,7 @@ def api_manual_close_browser():
     return jsonify({'ok': True, 'closed': close_manual_browser()})
 
 
-# 自定义搜索词（主页第 6 卡）单轮条数上限：一条 × 每条抓 pages 页 × 每页约 10 条，
+# 自定义搜索词（主页第 7 卡）单轮条数上限：一条 × 每条抓 pages 页 × 每页约 10 条，
 # 20 条已足够撑满一次 100 条的目标；再多大概率触发谷歌限流（限流要等 90 秒才恢复）。
 RAW_QUERY_MAX = 20
 
@@ -2398,7 +2635,7 @@ def api_start():
     if STATE['running']:
         return jsonify({'ok': False, 'msg': '任务正在运行'})
     data = request.get_json()
-    # 自定义搜索词（主页第 6 卡）：一行一条，**原样**当一条查询用。
+    # 自定义搜索词（主页第 7 卡）：一行一条，**原样**当一条查询用。
     # 空行/纯空白丢弃、去重保序；硬上限防「误粘一大段文本」把整轮拖成几小时（谷歌还会限流）。
     raw_in = data.get('custom_queries')
     raw_queries = []
@@ -2419,14 +2656,20 @@ def api_start():
     if not countries:
         countries = [COUNTRIES[0]]
     pages = int(data.get('pages', 2) or 2)
+    # 采集数量（主页第 1 卡）：**强必填**。刻意不写缺省值 —— 缺键/空串一律拒绝，
+    # 绝不静默按 10 跑（前端输入框虽然预填 10，但被清空时也必须在这里被挡住）。
+    # ⚠️ 位置刻意留在「产品词/自定义词」校验之后：提前会让那条校验的错误信息串位。
+    tc_raw = data.get('target_count')
+    if tc_raw is None or tc_raw == '':
+        return jsonify({'ok': False, 'msg': '请先填写本次任务采集数量（10-100 的整数）'})
     try:
-        target_count = int(data.get('target_count', 10))
+        target_count = int(tc_raw)
     except (TypeError, ValueError):
-        return jsonify({'ok': False, 'msg': '目标客户数量必须是 10-100 的整数'})
+        return jsonify({'ok': False, 'msg': '本次任务采集数量必须是 10-100 的整数'})
     if not 10 <= target_count <= 100:
-        return jsonify({'ok': False, 'msg': '目标客户数量只能设置为 10-100'})
+        return jsonify({'ok': False, 'msg': '本次任务采集数量只能设置为 10-100'})
     with STATE_LOCK:
-        STATE.update(running=True, done=False, logs=[], result_count=0, rows=[],
+        STATE.update(running=True, done=False, logs=[], result_count=0, rows=[], rows_deleted=[],
                      output='', stop=False, phase='search')
     exclude = data.get('exclude', EXCLUDE_DEFAULT)
     china_filters = [k for k in data.get('china_filters', CHINA_FILTER_DEFAULTS)
@@ -2438,7 +2681,7 @@ def api_start():
     # 数据源：google=谷歌网页搜索（默认，老链路），maps=谷歌地图名录（新链路）
     source = (data.get('source') or 'google').strip()
     city = (data.get('city') or '').strip()             # 仅地图用：城市/地区名，会拼进查询词
-    # 国家限定（主页第 4 步，可选，默认关）：none / cr / site / both。非法值静默回落 none。
+    # 国家限定（主页第 5 步，可选，默认关）：none / cr / site / both。非法值静默回落 none。
     # 只对网页搜索生效 —— 地图走 run_maps（根本不接收该参数），自定义模式在 run_search 内强制置 none。
     country_limit = (data.get('country_limit') or COUNTRY_LIMIT_DEFAULT).strip()
     if country_limit not in COUNTRY_LIMIT_MODES:
@@ -2468,7 +2711,7 @@ def api_export_feishu():
     if STATE['running']:
         return jsonify({'ok': False, 'msg': '任务正在运行'})
     with STATE_LOCK:
-        STATE.update(running=True, done=False, logs=[], result_count=0,
+        STATE.update(running=True, done=False, logs=[], result_count=0, rows_deleted=[],
                      output='', stop=False, phase='export')
     threading.Thread(target=run_export_feishu, daemon=True).start()
     return jsonify({'ok': True})

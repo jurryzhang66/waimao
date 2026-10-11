@@ -291,6 +291,22 @@ const OK_RESULT = {
   check(wrap.querySelector('.dp-btn').disabled === false,
         '请求返回后按钮恢复可点（不是永久 disabled）');
 
+  /* ---------------- ④b 采集前现取设置：popup 刚改的国家必须带过来 ---------------- */
+  // 内容脚本在页面加载时缓存过一次设置，之后不再刷新（probeAndMount 只在挂载前跑）。
+  // 用户改国家是在 popup 里、改完就关弹窗 —— 不现取的话，缓存里的旧国家就会被写进本轮。
+  section('④b 采集前现取最新设置（不能用页面加载时的缓存）');
+  const liveSet = Object.assign({}, DEFAULT_SETTINGS);
+  const mut = loadContentScript({ settings: liveSet });       // 同一个对象引用：桩按引用返回
+  await tick(40);
+  liveSet.country = '新加坡';                                  // 模拟「用户刚在 popup 里改了国家」
+  liveSet.industry = '新能源';
+  wrapOf(mut).querySelector('.dp-btn').emit('click');
+  await tick(40);
+  const pm = mut.cap.payloads[0] || {};
+  check(pm.country === '新加坡' && pm.industry === '新能源',
+        '改完国家再点悬浮按钮 → payload 用的是**最新**设置（旧缓存不能生效）',
+        pm.industry + '/' + pm.country);
+
   /* ---------------- ⑤ 超长页面截断 ---------------- */
   section('⑤ 超长页面：截断到 400000');
   const bigPage = '<html><body>' + '<p>填充内容</p>'.repeat(80000) + '</body></html>';
