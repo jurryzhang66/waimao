@@ -21,6 +21,9 @@ button { border:none; border-radius:8px; padding:12px 24px; font-size:15px; curs
 .btn-start { background:#1a73e8; color:#fff; }
 .btn-stop { background:#d93025; color:#fff; }
 .btn-export { background:#7c3aed; color:#fff; }
+/* 「📥 导出 Excel」= 本轮唯一的入库 + 落盘入口。只在主页用到，在 manual/query 两页是无害死规则
+   （与 .raw-card 同理，不必另开 <style>）。 */
+.btn-save { background:#188038; color:#fff; }
 .btn-open { background:#e8f0fe; color:#1a73e8; border:1px solid #1a73e8; padding:4px 10px; font-size:13px; font-weight:500; border-radius:6px; }
 .kw-grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 .kw-item { display:flex; align-items:center; gap:8px; padding:8px 10px; background:#f7f9fc; border:1px solid #e8edf2; border-radius:6px; font-size:13px; }
@@ -117,7 +120,7 @@ th.livedel-col, td.livedel-cell { width:38px; text-align:center; }
 <body>
 <div class="wrap">
   <h1>🔍 谷歌客户开发工具</h1>
-  <div class="sub">本地运行 · 搜到一个网站就立刻抓联系方式 · SQLite 客户库去重 · 导出 Excel / 飞书</div>
+  <div class="sub">本地运行 · 逐条抓取联系方式 · 先核对明细、点「导出 Excel」才入库写表 · 可选同步飞书</div>
 
   <div class="nav">
     <a class="nav-a" href="/manual">📝 手动采集页</a>
@@ -241,18 +244,19 @@ cat litter grossiste -site:.cn
 
   <div class="btn-row">
     <button class="btn-start" id="btnStart" onclick="start()">▶ 开始搜索</button>
+    <button class="btn-save" id="btnExportExcel" onclick="exportExcel()" disabled>📥 导出 Excel</button>
     <button class="btn-export" id="btnExport" onclick="exportFeishu()">导出到飞书</button>
     <button class="btn-stop" id="btnStop" onclick="stop()" disabled>■ 停止</button>
-      <span class="counter" id="counter">本轮新增 0 个网站</span>
+      <span class="counter" id="counter">本轮已采 0 个网站</span>
       <span class="counter" id="dbCounter" style="background:#eef8ee;color:#188038;">客户库加载中...</span>
   </div>
   <div class="status" id="status"></div>
 
   <div class="card live-wrap" id="liveWrap">
     <div class="live-head">
-      <h3>📥 本轮已入库明细（实时）</h3>
+      <h3>📥 本轮采集明细（实时 · 待核对）</h3>
       <span class="live-badge" id="liveCount">0 条</span>
-      <span class="note" style="margin:0;">每搜到一个网站就立刻抓取联系方式并写入 SQLite，写入即在这里出现</span>
+      <span class="note" style="margin:0;">这里只是<b>候选</b>，还没写进客户库。核对完删掉不要的，再点「📥 导出 Excel」才入库 + 生成表格</span>
       <span class="note" id="liveDelHint" style="margin:0;"></span>
     </div>
     <div class="live-scroll">
@@ -272,7 +276,7 @@ cat litter grossiste -site:.cn
         </thead>
         <tbody id="liveBody"></tbody>
       </table>
-      <div class="live-empty" id="liveEmpty">等待任务开始…点击「开始搜索」后，每入库一条客户就会实时出现在这里。</div>
+      <div class="live-empty" id="liveEmpty">等待任务开始…点「▶ 开始搜索」后，每采到一个候选客户就实时出现在这里（此时还<b>没有</b>写进客户库）。</div>
     </div>
   </div>
 
@@ -291,10 +295,13 @@ cat litter grossiste -site:.cn
 
 <script>
 let since = 0, polling = null;
-// 现在能不能删：只有「采集进行中」才放行（导出飞书阶段 STATE['rows'] 还挂着上一轮的行，
-// 结果 Excel 早写好了，那时删就是「库删了、表还在」的假删除）。
+// 现在能不能删 = 「采集进行中」**或**「采集已结束、待核对还没导出」（后者是这次改造的核心用法：
+// 跑完先核对、删掉不要的，再点导出）。导出飞书阶段不算 —— 那时结果 Excel 早写好了，删了也是假的。
 // 共享组件不自己猜这个状态，每次 syncLiveEditable() 都回头读这个变量。
 let liveEditable = false;
+// 上一帧读到的「待导出」状态（poll() 每帧更新）。setButtons() 靠它决定「📥 导出 Excel」能不能点 ——
+// 按钮可用性完全由后端状态决定，前端只照着画。
+let lastPending = false;
 let RUN_SOURCE = 'google';   // 本轮数据源：google / maps（由 start() 写入，poll() 用来切换文案）
 
 // 「📥 本轮已入库明细（实时）」= ui/live-table.js 里的共享组件，与 /manual「③ 本轮采集明细」
@@ -303,11 +310,17 @@ const liveTable = makeLiveTable({
   tbodyId: 'liveBody', emptyId: 'liveEmpty', badgeId: 'liveCount',
   wrapId: 'liveWrap', hintId: 'liveDelHint',
   attr: 'data-n', keyField: 'n', endpoint: '/api/live/delete',
-  showExisted: false,                                // 本页只列本轮新入库的，不列「已在客户库」的老客户
-  canDelete: function(){ return !!liveEditable; },   // 由 poll() 按 running && phase==='search' 算出来
-  editHint: '· 可点 ✕ 删掉不要的那条（客户库同步删除，且不进本轮结果 Excel）',
-  readHint: '· 本轮已结束，如需整批清理请到「客户库查询」页删除',
-  afterRemove: function(){ return poll(); }           // 删完立刻重拉一次，表格/徽章不用等下一个整秒
+  showExisted: false,                                // 本页只列本轮新采到的，不列「已在客户库」的老客户
+  // 能删的窗口 = 采集进行中 **或** 采集已结束但还没导出（poll() 算好喂给 liveEditable）。
+  // 后者正是用户点名的用法：跑完先核对，把不要的行删掉，再点「📥 导出 Excel」。
+  canDelete: function(){ return !!liveEditable; },
+  editHint: '· 可点 ✕ 删掉不要的那条（这些行还没入库，删掉就一定不会进客户库和结果 Excel）',
+  readHint: '· 本轮已导出（或正在导飞书），如需整批清理请到「客户库查询」页删除',
+  afterRemove: function(){ return poll(); },          // 删完立刻重拉一次，表格/徽章不用等下一个整秒
+  // 本页删除只动内存明细 —— 后端返回的 deleted 恒为 0（这些行还没入库），组件默认那句
+  // 「客户库里没有这条记录」会误导，所以按本页语义改写。确认框与 ✕ 的 title 用组件默认那套
+  // （也已经按本页语义改过，见 ui/live-table.js 的 buildModal / removeTitle 默认值）。
+  removeMsg: function(){ return '🗑️ 已从本轮明细删除 1 条（客户库未动 —— 这些行还没入库）'; }
 });
 
 // 下面三个是组件在本页的入口（poll() 与回归脚本都直接调它们），实现都在组件里。
@@ -343,13 +356,16 @@ async function poll(){
     for (const l of d.logs) logBox(l);
     since = d.total_logs;
   }
+  // ⚠️ 这是「本轮已采到的候选数」，**不是已入库数** —— 自动链路改成「点『📥 导出 Excel』才入库」
+  //    之后，采集阶段客户库里一条都没有，叫「新增」会误导。
   document.getElementById('counter').textContent =
-    '本轮新增 ' + d.result_count + (RUN_SOURCE === 'maps' ? ' 个商家' : ' 个网站');
+    '本轮已采 ' + d.result_count + (RUN_SOURCE === 'maps' ? ' 个商家' : ' 个网站');
   renderRows(d.rows);
-  // 逐行删除只在「采集进行中」放行。⚠️ 不能只看 running：导出飞书阶段 running 也是 True，
-  // 但 phase === 'export' 而 STATE['rows'] 还挂着上一轮的行 —— 那时结果 Excel 早就写好了，
-  // 删了库也改不了表（假删除），所以后端与本处都按 running && phase==='search' 判定。
-  liveEditable = !!(d.running && d.phase === 'search');
+  // 能删的窗口 = 「采集进行中（phase==='search'）」**或**「采集已结束、待核对待导出（pending_export）」。
+  // ⚠️ 不能只看 running：导出飞书阶段 running 也是 True，但 phase === 'export' 而 STATE['rows']
+  //    还挂着上一轮的行、结果 Excel 早就写好了 —— 那时删了也改不了表（假删除），继续挡住。
+  liveEditable = !!((d.running && d.phase === 'search') || d.pending_export);
+  lastPending = !!d.pending_export;
   syncLiveEditable(Array.isArray(d.rows) ? d.rows.length : 0);
   if (d.db_total != null){
     document.getElementById('dbCounter').textContent = 'SQLite 已存 ' + d.db_total + ' 条（已评分 ' +
@@ -359,11 +375,19 @@ async function poll(){
     clearInterval(polling); polling = null;
     setButtons(false);
     const s = document.getElementById('status');
-    // 本轮结果可能为空（一条都没采到、或采到的全被 ✕ 删光了）—— 那就别留一句「结果文件：」晾在那
-    s.innerHTML = (d.output
-        ? '✅ 完成，结果文件：' + d.output +
-          ' <button class="btn-open" onclick="openFolder()">📂 打开结果文件夹</button>'
-        : '✅ 完成（本轮未产出结果文件）');
+    if (d.pending_export){
+      // ⏸️ 采集结束、**还没入库也没落盘** —— 停下来等用户核对（这正是这次改造的核心交互）。
+      s.innerHTML = d.export_error
+        ? '⚠️ ' + d.export_error + ' —— 处理后可再点「📥 导出 Excel」。'
+        : '⏸️ <b>采集完成，等待核对：</b>下面这些还<b>没有</b>写进客户库，也还没有结果文件。'
+          + '确认无误后点「📥 导出 Excel」，那一刻才入库 + 生成表格。';
+    } else {
+      // 本轮结果可能为空（一条都没采到、或采到的全被 ✕ 删光了）—— 那就别留一句「结果文件：」晾在那
+      s.innerHTML = (d.output
+          ? '✅ 完成，结果文件：' + d.output +
+            ' <button class="btn-open" onclick="openFolder()">📂 打开结果文件夹</button>'
+          : '✅ 完成（本轮未产出结果文件）');
+    }
   } else if (d.running){
     setButtons(true);
     const s = document.getElementById('status');
@@ -393,9 +417,16 @@ async function loadDbStats(){
 }
 loadDbStats();
 
+// ⚠️ 四个按钮的互斥关系完全由后端状态决定，前端只照着画：
+//   · running            → 开始 / 导出 Excel 全禁用，停止启用
+//   · pending_export     → 「📥 导出 Excel」启用（本轮唯一的出口）；「导出到飞书」置灰
+//                          —— 后端 /api/export_feishu 也会硬挡（飞书读的是「最新结果文件」，
+//                          本轮没导出 Excel 的话，它拿到的会是上一轮的表）
+//   · 其余（空闲 / 已导出）→ 「开始搜索」「导出到飞书」可用
 function setButtons(running){
   document.getElementById('btnStart').disabled = running;
-  document.getElementById('btnExport').disabled = running;
+  document.getElementById('btnExportExcel').disabled = running || !lastPending;
+  document.getElementById('btnExport').disabled = running || lastPending;
   document.getElementById('btnStop').disabled = !running;
 }
 
@@ -449,8 +480,23 @@ async function start(){
   //    → 表格永久空白。
   liveTable.reset();
   document.getElementById('status').textContent = '运行中...';
+  lastPending = false;          // 新一轮开始：上一轮没导出的直接被丢弃（后端 api_start 也会清）
   setButtons(true);
   polling = setInterval(poll, 1000);
+}
+
+// 「📥 导出 Excel」= 本轮**唯一**一次「写客户库 + 生成结果表格」。
+// ⛔ 采集阶段（run_search / run_maps）既不写库也不落盘，只有点这一下才落 —— 所以先把不要的行
+//    删干净再点，脏数据就永远进不了客户库。
+// 后端顺序是「先库后表」：入库失败就不产 Excel，数据保留在明细里、直接再点一次即可（upsert 幂等）。
+async function exportExcel(){
+  const r = await fetch('/api/export_excel', { method:'POST' });
+  const d = await r.json();
+  if (!d.ok){ alert(d.msg || '导出失败'); return; }
+  since = 0;
+  logBox(d.saved ? '====== 已导出 Excel ======' : '（本轮没有新增客户，未产出结果文件）');
+  if (!polling) polling = setInterval(poll, 1000);
+  poll();          // 立刻重拉一次，把状态行/按钮切到「✅ 完成」
 }
 
 async function exportFeishu(){

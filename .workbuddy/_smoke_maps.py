@@ -142,6 +142,17 @@ def spy_save(results, industry=''):
 
 m._save_enrich_excel = spy_save
 
+
+def export_now():
+    """模拟用户点「📥 导出 Excel」：真打一次 `/api/export_excel`。
+
+    ⛔ 新语义（2026-10-13）：run_maps 采集阶段**不写库、不落盘**，只往 `STATE['rows']` 攒行 +
+    置 `pending_export=True`。只有这一步才「先逐条入库、再写结果 Excel」。
+    """
+    with m.app.test_client() as c:
+        return c.post('/api/export_excel').get_json()
+
+
 m.STATE['rows'] = []
 m.STATE['stop'] = False
 
@@ -166,8 +177,41 @@ assert calls['detail'] == [HREF_A, HREF_B, HREF_C, HREF_D, HREF_E], \
     f'详情导航顺序/次数不对：{calls["detail"]}'
 print('详情依次导航：', len(calls['detail']), '次  →', [x.rsplit("/", 1)[-1][:3] for x in calls['detail']])
 
+# ---- ① 采集阶段**不落盘、不入库**（2026-10-13 新语义）----
+assert calls['saved'] is None, '采集阶段不该落盘（新语义：要等点「📥 导出 Excel」）'
+assert m.STATE['pending_export'] is True, '跑完应进入「待导出」状态'
+
+# ---- ② 实时明细就是「待导出的那一份」：3 条完整行，且带地图来源标记 ----
+live = m.STATE['rows']
+assert len(live) == 3, f'实时明细应有 3 条，实际 {len(live)}'
+assert [r['n'] for r in live] == [1, 2, 3], '实时明细序号应为 1/2/3'
+assert live[0]['emails'] == ['contact@lyonpack.fr'], '实时明细首条邮箱不对'
+for r in live:
+    for k in ('n', 'title', 'url', 'emails', 'phones', 'contact_url', 'score',
+              'rating', 'snippet', 'formula', 'industry', 'country', 'source'):
+        assert k in r, f'待导出明细缺字段：{k}'
+assert all(r['source'] == '谷歌地图' for r in live), '地图链路的每一行都要带 source=谷歌地图'
+print('实时明细 {0} 条，序号 {1}'.format(len(live), [r['n'] for r in live]))
+
+with m.app.test_client() as c:
+    resp = c.get('/api/status?since=0').get_json()
+assert len(resp['rows']) == 3, '/api/status 未返回 rows 或条数不符'
+assert resp.get('pending_export') is True, '/api/status 未返回 pending_export（前端按钮靠它启用）'
+
+# ---- ③ 此刻库里**还没有**这 3 条地图记录 ----
+conn = sqlite3.connect(m.db_path())
+n_before = conn.execute("SELECT COUNT(*) FROM customers WHERE source='谷歌地图'").fetchone()[0]
+conn.close()
+assert n_before == 0, f'采集阶段不该写库（实际已有 {n_before} 条地图记录）'
+
+# ---- ④ 点「📥 导出 Excel」→ 才写客户库 + 落盘 ----
+je = export_now()
+assert je.get('ok') is True and je.get('saved') is True, f'导出应成功：{je}'
+assert m.STATE['rows'] == [] and m.STATE['pending_export'] is False, \
+    f'导出后应清空明细并复位状态：rows={m.STATE["rows"]} pending={m.STATE["pending_export"]}'
+
 # ---- 落盘 3 条（A 新增、B 新增（无官网）、E 新增）；C 老客户跳过、D 读不通、F 未轮询到 ----
-assert calls['saved'] is not None, '结果未落盘'
+assert calls['saved'] is not None, '导出后应该落盘了'
 assert len(calls['saved']) == 3, f'应停在目标 3 条，实际 {len(calls["saved"])}'
 names = [r['title'] for r in calls['saved']]
 assert names == ['LYON PACK FOOD', 'International Store', 'Pasta Import SAS'], f'入库商家不对：{names}'
@@ -198,18 +242,7 @@ for r in calls['saved']:
 print(f'落盘 {len(calls["saved"])} 条 | 补全 {len(calls["enrich"])} 次 | 切回地图 {calls["back"]} 次 | '
       f'关浏览器 {calls["quit"]} 次')
 
-# ---- 实时明细 ----
-live = m.STATE['rows']
-assert len(live) == 3, f'实时明细应有 3 条，实际 {len(live)}'
-assert [r['n'] for r in live] == [1, 2, 3], '实时明细序号应为 1/2/3'
-assert live[0]['emails'] == ['contact@lyonpack.fr'], '实时明细首条邮箱不对'
-print('实时明细 {0} 条，序号 {1}'.format(len(live), [r['n'] for r in live]))
-
-with m.app.test_client() as c:
-    resp = c.get('/api/status?since=0').get_json()
-assert len(resp['rows']) == 3, '/api/status 未返回 rows 或条数不符'
-
-# ---- 客户库：来源标记「谷歌地图」、无官网商家去重键用 place id ----
+# ---- 客户库（导出之后才有）：来源标记「谷歌地图」、无官网商家去重键用 place id ----
 conn = sqlite3.connect(m.db_path())
 conn.row_factory = sqlite3.Row
 rows = conn.execute("SELECT company_name,website,website_key,phone,email,source,industry "

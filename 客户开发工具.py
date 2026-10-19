@@ -838,6 +838,26 @@ def _session_has_url(url):
     return False
 
 
+def _live_has_url(url):
+    """主页**实时明细**（`STATE['rows']`）里是不是已经采过同一个站（同 `_session_has_url` 的口径）。
+
+    自动链路也改成了「点『📥 导出 Excel』才入库」（2026-10-13），所以本轮采到的站
+    `db_has_customer()` 一个也看不见 —— 同一个站在多页 / 多国家里重复命中时会被当成
+    「新客户」重复进表（手动链路的真实事故：一个站一份表里出现 3 次）。
+    去重口径必须与跳过判据一致：只比 `normalize_domain(url)`。
+
+    ⚠️ 自己拿 STATE_LOCK（只读内存）；调用方**不能**已经持锁（那把锁非可重入）。
+    """
+    key = normalize_domain(url)
+    if not key:
+        return False
+    with STATE_LOCK:
+        for r in STATE.get('rows') or []:
+            if normalize_domain(r.get('url') or '') == key:
+                return True
+    return False
+
+
 # ================= 手动采集：常驻浏览器 =================
 # 自动链路（run_search / run_maps / enrich_core）都是「任务开头建、finally 里 quit」，
 # 手动采集是「点一下采一条」，每次重建一个 Chrome 要 3–5 秒，所以这里做成**惰性常驻**。
@@ -1278,16 +1298,15 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
     else:
         china_filters = set(CHINA_FILTER_DEFAULTS if china_filters is None else china_filters)
     search_tab_id = None      # 搜索主标签 id：补全会开临时标签，抓完要切回来
-    all_rows = []             # 本轮结果（已就地补全），在 finally 里落盘
     search_ok = True
     try:
         init_customer_db()
         STATE['phase'] = 'search'
         with STATE_LOCK:
-            # 本轮墓碑清零。api_start 已经清过一次，这里再清一次是为「直调 run_search 的调用方」
-            # （补历史欠账类脚本、冒烟测试）兜底 —— 否则上一轮删过的 n 会把**本轮**同号的结果
-            # 在 finally 里静默过滤掉（跨轮串味，表现为结果 Excel 莫名少一条）。
-            STATE['rows_deleted'] = []
+            # 行号发号器清零。api_start 已经清过一次，这里再清一次是为「直调 run_search 的调用方」
+            # （冒烟测试）兜底 —— n 必须本轮内唯一且单调（前端 ✕ 靠它定位），
+            # 用 len(STATE['rows']) 当 n 会在「删掉中间一条再采」时撞号。
+            STATE['n_seq'] = 0
         if custom_mode:
             log(f'启动浏览器... 自定义查询 {len(raw_queries)} 条 × 国家 {len(countries)} 个（原样搜索，不拼任何词）')
         else:
@@ -1404,40 +1423,26 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                                 stat['china'].update(contact_reasons)
                                 log(f'   过滤：{item["title"][:40]}（{"；".join(contact_reasons)}）')
                                 continue
-                            # ② 登记线索：已在客户库中的公司不再作为新线索重复展示。
-                            existed = not db_upsert_customer({
-                                'company_name': item['title'], 'website': item['url'],
-                                'snippet': item['snippet'], 'search_formula': formula,
-                                'country': cname, 'industry': industry,
-                            })
-                            if existed:
+                            # ② 去重：库里已有的老客户 **＋ 本轮内存里已经采过的同一个站**。
+                            # ⛔ 本轮采到的东西**还没入库**（要等用户点「📥 导出 Excel」才写库），
+                            #    db_has_customer() 看不见它们 —— 同轮重复只能靠内存挡（_live_has_url）。
+                            if db_has_customer(item['url']) or _live_has_url(item['url']):
                                 stat['existing'] += 1
-                                log(f'   ↩ 已存在，跳过重复客户：{item["title"][:45]}')
+                                log(f'   ↩ 已存在（客户库或本轮已采过），跳过：{item["title"][:45]}')
                                 continue
-                            # ③ 用补全结果更新刚才的线索记录。
                             s = score_item(item['title'], item['url'], info)
-                            if auto_enrich:
-                                # 用补全结果覆盖刚才的线索记录（空值不会冲掉库里已有的有效值）
-                                db_upsert_customer({
-                                    'company_name': item['title'], 'website': item['url'],
-                                    'email': EMAIL_SEP.join(info['emails']),
-                                    'phone': ' / '.join(info['phones']),
-                                    'contact_url': info['contact_url'], 'score': s, 'rating': rating(s),
-                                    'snippet': item['snippet'], 'search_formula': formula,
-                                    'country': cname, 'industry': industry,
-                                })
-                            all_rows.append({**item, **info, 'score': s, 'rating': rating(s),
-                                             'industry': industry})
                             stat['added'] += 1
                             if info['emails']:
                                 stat['mail'] += 1
-                            # 实时明细：前端表格每秒轮询 STATE['rows']，边搜边显示入库内容。
-                            # ⚠️ result_count 取 STATE['rows'] 的长度，**不是** len(all_rows)：用户在页面上
-                            #    删掉一条后 all_rows 里那条还在（要等 finally 才按墓碑过滤），两处会差 1，
-                            #    「本轮新增 N 个网站」跟表格对不上。计数跟着表格走。
+                            # 实时明细：前端表格每秒轮询 STATE['rows']，边搜边显示**待核对**的内容。
+                            # ⛔ 元素是**完整 11 键行**（含 snippet / formula）—— 它本身就是「待导出的那一份」，
+                            #    /api/export_excel 直接拿它逐条入库 + 落盘，不需要再维护第二个列表。
+                            # ⚠️ n 取 STATE['n_seq']（单调发号器），**不是** len(STATE['rows'])：
+                            #    用户删掉中间一条后 len 会缩短，再采一条就会与已发出去的号撞车、✕ 指错行。
                             with STATE_LOCK:
+                                STATE['n_seq'] += 1
                                 STATE['rows'].append({
-                                    'n': len(all_rows),
+                                    'n': STATE['n_seq'],
                                     'title': item['title'],
                                     'url': item['url'],
                                     'emails': info['emails'],
@@ -1445,13 +1450,16 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                                     'contact_url': info['contact_url'],
                                     'score': s,
                                     'rating': rating(s),
+                                    'snippet': item['snippet'],
+                                    'formula': formula,
                                     'industry': industry,
                                     'country': cname,
                                 })
                                 STATE['result_count'] = len(STATE['rows'])
-                            log(f'   + [{len(all_rows)}/{target_count}] {item["title"][:38]} '
+                                added_n = STATE['result_count']
+                            log(f'   + [{added_n}/{target_count}] {item["title"][:38]} '
                                 f'邮箱{len(info["emails"])} 电话{len(info["phones"])} 评分{s} {rating(s)}')
-                            if len(all_rows) >= target_count:
+                            if added_n >= target_count:
                                 reached_target = True
                                 log(f'🎯 已达到本次目标 {target_count} 个新增网站，停止继续搜索')
                                 break
@@ -1482,8 +1490,8 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
             if reached_target:
                 break
 
-        log(f'✅ 搜索完成！本轮新增 {len(all_rows)} 个网站'
-            + ('，联系方式已就地抓取并写入客户库' if auto_enrich else '（本次未抓取联系方式）'))
+        log(f'✅ 搜索完成！本轮新增 {total_stat["added"]} 个网站'
+            + ('，联系方式已就地抓取' if auto_enrich else '（本次未抓取联系方式）'))
         china_total = '；'.join(f'{k} {v}' for k, v in total_stat['china'].items()) or '无'
         log(f'📈 本轮总账：页面候选 {total_stat["cand"]} 条 | 黑名单过滤 {total_stat["blocked"]} | '
             f'本页重复 {total_stat["dup"]} | 客户库已有 {total_stat["existing"]} | '
@@ -1497,7 +1505,8 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
         if not auto_enrich:
             log('（本次未勾选同步抓取联系方式：只收集了网站线索，邮箱电话留空，'
                 '可稍后双击「补历史欠账.py」批量补）')
-        log('正在写出结果 Excel…')
+        log('⏸️ 本轮到此为止：**尚未入库、也未生成结果 Excel**。'
+            '请在页面上核对明细、删掉不要的行，再点「📥 导出 Excel」—— 那一刻才写客户库 + 落盘。')
     except Exception as e:
         search_ok = False
         log(f'❌ 出错：{type(e).__name__}: {e}')
@@ -1507,23 +1516,22 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                 page.quit()
             except Exception:
                 pass
-        # 落盘放在 finally：中途「停止」在 try 内部是 return，只有这里能保证已抓到的结果不白跑。
-        # 浏览器关掉后再写文件，确保客户网站标签页已释放、不会和 Excel 抢资源。
-        # ⚠️ 先按 STATE['rows_deleted']（用户在上面的实时明细里点 ✕ 删掉的行）过滤。只删内存明细
-        #    是「假删除」—— 落盘用的是本函数的局部 all_rows，与 STATE['rows'] 不是同一个列表，
-        #    不过滤的话那条照样进结果 Excel、飞书也照样推。没人删过时这一步是**恒等过滤**。
+        # ⛔ 这里**不再落盘**（2026-10-13 用户改）：跑完只进入「待核对 / 待导出」状态，
+        #    等用户点「📥 导出 Excel」时由 /api/export_excel 一次性写库 + 落盘。
+        #    动机：填错国家/行业、或采到不要的站，可以先在明细里删掉再导出，不污染客户库。
+        #    代价（用户拍板接受）：没点导出就关工具 = 本轮白跑（数据只在内存里）。
+        # ⚠️ 仍必须放在 finally：中途「停止」在 try 内部是 return，只有这里能保证状态被置上 ——
+        #    否则点完停止就卡在 running=True，用户既不能导出也开不了新一轮。
+        #    （用户已拍板：停止 = 保留为「待导出」，已采到的行不丢。）
+        # ⚠️ log() 自己也要抢同一把 STATE_LOCK（非可重入）→ 计数在锁内取、log 一律搬到锁外。
         with STATE_LOCK:
-            dead = set(STATE['rows_deleted'] or ())
-        results = [r for i, r in enumerate(all_rows, 1) if i not in dead]
-        if results:
-            try:
-                _save_enrich_excel(results, industry=industry)
-            except Exception as e:
-                log(f'❌ 结果 Excel 写出失败：{type(e).__name__}: {e}')
-        elif all_rows:
-            # 全被删光：**绝不能**调 _save_enrich_excel —— 它会产出一份只含表头的表，还会把
-            # paths.ENRICH_FILE 改指过去（污染飞书导出的数据源）。对齐 /manual 的「空轮不落盘」。
-            log(f'本轮采到的 {len(all_rows)} 条已在上面的实时明细里被全部删除，未产出结果文件')
+            pend = len(STATE['rows'])
+            if pend:
+                STATE['pending_export'] = True
+                STATE['export_error'] = ''
+        if pend:
+            log(f'⏸️ 本轮采到 {pend} 条，已进入**待核对**状态（客户库里还没有这些数据、'
+                f'也还没生成 Excel）。核对完点「📥 导出 Excel」才会入库 + 落盘。')
         elif search_ok:
             log('本轮没有新增网站，未产出结果文件（客户库未变化）')
         STATE['done'] = True
@@ -1557,15 +1565,15 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
     """
     page = None
     maps_tab_id = None
-    all_rows = []
+    added = 0                 # 本轮已采条数（= STATE['rows'] 长度；只增，用于算 want / 停表判据）
     run_ok = True
     china_filters = set(CHINA_FILTER_DEFAULTS if china_filters is None else china_filters)
     try:
         init_customer_db()
         STATE['phase'] = 'search'
         with STATE_LOCK:
-            # 本轮墓碑清零（与 run_search 同一纪律，见那边的注释）：防直调本函数时上一轮的墓碑串味。
-            STATE['rows_deleted'] = []
+            # 行号发号器清零（与 run_search 同一纪律，见那边的注释）：防直调本函数时上一轮的号串味。
+            STATE['n_seq'] = 0
         log(f'谷歌地图采集：关键词 {len(products)} 个 × 国家 {len(countries)} 个'
             + (f' · 城市「{city}」' if city else '（未指定城市，只用国家中心视野）'))
         log('⚠️ 地图结果会受出口 IP 所在地影响，比网页搜索更明显；指定城市可显著提高精度')
@@ -1592,7 +1600,7 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
             for kw in products:
                 if reached_target or STATE['stop']:
                     break
-                want = target_count - len(all_rows)
+                want = target_count - added
                 query = f'{kw} {role}'.strip()
                 url = maps_search_url(query, code, gl, hl, city)
                 log(f'========== {cname} · 地图搜「{query}」'
@@ -1653,10 +1661,12 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
                         stat['china'].update(pre_reasons)
                         log(f'   过滤：{name[:40]}（{"；".join(pre_reasons)}）')
                         continue
-                    # ③ 已经在库里的老客户，跳过最贵的那两步（点详情已经花掉，这里省访问官网）
-                    if db_has_customer(target_url):
+                    # ③ 已经在库里的老客户 **＋ 本轮内存里已经采过的同一个站**，跳过最贵的那两步。
+                    #    ⛔ 本轮采的还没入库（要等用户点「📥 导出 Excel」）→ db_has_customer 看不见它们，
+                    #       同轮重复得靠内存挡（_live_has_url），否则一份表里同一个站会出现好几次。
+                    if db_has_customer(target_url) or _live_has_url(target_url):
                         stat['existing'] += 1
-                        log(f'   ↩ 已存在，跳过重复客户：{name[:45]}')
+                        log(f'   ↩ 已存在（客户库或本轮已采过），跳过：{name[:45]}')
                         continue
                     # ④ 就地补全：地图已经给了电话，官网只补邮箱
                     info = {'emails': [], 'phones': [], 'contact_url': '', 'china_signal_text': ''}
@@ -1674,39 +1684,29 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
                         stat['china'].update(post_reasons)
                         log(f'   过滤：{name[:40]}（{"；".join(post_reasons)}）')
                         continue
-                    # ⑤ 一次性入库（地图字段 + 官网补到的邮箱），地图来源单独标记
+                    # ⑤ 只登记到内存明细（⛔ **不写库** —— 等用户点「📥 导出 Excel」才一次性入库）。
+                    #    地图来源（source='谷歌地图'）连同 10 列字段先存在行里，导出时原样写库。
                     s = score_item(name, target_url, info)
-                    db_upsert_customer({
-                        'company_name': name, 'website': target_url,
-                        'email': EMAIL_SEP.join(info['emails']),
-                        'phone': ' / '.join(info['phones']),
-                        'contact_url': info['contact_url'], 'score': s, 'rating': rating(s),
-                        'snippet': snippet, 'search_formula': formula,
-                        'country': cname, 'industry': industry, 'source': '谷歌地图',
-                    })
-                    all_rows.append({
-                        'title': name, 'url': target_url, 'emails': info['emails'],
-                        'phones': info['phones'], 'contact_url': info['contact_url'],
-                        'score': s, 'rating': rating(s), 'snippet': snippet,
-                        'formula': formula, 'country': cname, 'industry': industry,
-                    })
                     stat['added'] += 1
                     if info['emails']:
                         stat['mail'] += 1
-                    # 实时明细：前端表格每秒轮询 STATE['rows']，边采边显示入库内容。
-                    # result_count 取 STATE['rows'] 长度而非 len(all_rows)（用户删过之后两者会差 1），
-                    # 理由同 run_search 里的注释。
+                    # 实时明细：前端表格每秒轮询 STATE['rows']，边采边显示**待核对**的内容。
+                    # ⛔ 元素是完整 11 键行（含 snippet / formula）—— 它就是「待导出的那一份」。
+                    # ⚠️ n 取 STATE['n_seq']（单调发号器），不是 len(STATE['rows'])：用户删过之后会撞号。
                     with STATE_LOCK:
+                        STATE['n_seq'] += 1
                         STATE['rows'].append({
-                            'n': len(all_rows), 'title': name, 'url': target_url,
+                            'n': STATE['n_seq'], 'title': name, 'url': target_url,
                             'emails': info['emails'], 'phones': info['phones'],
                             'contact_url': info['contact_url'], 'score': s,
-                            'rating': rating(s), 'industry': industry, 'country': cname,
+                            'rating': rating(s), 'snippet': snippet, 'formula': formula,
+                            'industry': industry, 'country': cname, 'source': '谷歌地图',
                         })
                         STATE['result_count'] = len(STATE['rows'])
-                    log(f'   + [{len(all_rows)}/{target_count}] {name[:38]} '
+                        added = STATE['result_count']
+                    log(f'   + [{added}/{target_count}] {name[:38]} '
                         f'邮箱{len(info["emails"])} 电话{len(info["phones"])} 评分{s} {rating(s)}')
-                    if len(all_rows) >= target_count:
+                    if added >= target_count:
                         reached_target = True
                         log(f'🎯 已达到本次目标 {target_count} 个新增商家，停止继续采集')
                         break
@@ -1734,8 +1734,8 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
             if reached_target:
                 break
 
-        log(f'✅ 地图采集完成！本轮新增 {len(all_rows)} 个商家'
-            + ('，联系方式已就地抓取并写入客户库' if auto_enrich else '（本次未抓取联系方式）'))
+        log(f'✅ 地图采集完成！本轮新增 {total_stat["added"]} 个商家'
+            + ('，联系方式已就地抓取' if auto_enrich else '（本次未抓取联系方式）'))
         china_total = '；'.join(f'{k} {v}' for k, v in total_stat['china'].items()) or '无'
         log(f'📈 本轮总账：列表卡片 {total_stat["cards"]} 条 | 详情读通 {total_stat["detail"]} 条 | '
             f'已滚到底 {total_stat["end"]} 次 | 重复 {total_stat["dup"]} | '
@@ -1747,7 +1747,8 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
         if not reached_target:
             log(f'⚠️ 未凑够目标 {target_count} 条：地图单次搜索的上限约 120 条，'
                 f'多数关键词滚到底也就几十条。建议换城市、换关键词，或把目标数调小')
-        log('正在写出结果 Excel…')
+        log('⏸️ 本轮到此为止：**尚未入库、也未生成结果 Excel**。'
+            '请在页面上核对明细、删掉不要的行，再点「📥 导出 Excel」—— 那一刻才写客户库 + 落盘。')
     except Exception as e:
         run_ok = False
         log(f'❌ 出错：{type(e).__name__}: {e}')
@@ -1757,20 +1758,16 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
                 page.quit()
             except Exception:
                 pass
-        # 落盘放 finally：中途「停止」在 try 内部是 return，只有这里能保证已采到的结果不白跑。
-        # ⚠️ 先按 STATE['rows_deleted']（用户在上面的实时明细里点 ✕ 删掉的行）过滤，理由与
-        #    run_search 那边逐字相同：不过滤 = 假删除，那条照样进 Excel、飞书照样推。
+        # ⛔ 与 run_search 同款改动（2026-10-13）：这里**不再落盘**，只置「待核对 / 待导出」。
+        #    理由、代价、以及「为什么仍必须放 finally」见 run_search 的 finally 注释。
         with STATE_LOCK:
-            dead = set(STATE['rows_deleted'] or ())
-        results = [r for i, r in enumerate(all_rows, 1) if i not in dead]
-        if results:
-            try:
-                _save_enrich_excel(results, industry=industry)
-            except Exception as e:
-                log(f'❌ 结果 Excel 写出失败：{type(e).__name__}: {e}')
-        elif all_rows:
-            # 全被删光 → 不落盘（否则产出只含表头的表、还污染 paths.ENRICH_FILE）
-            log(f'本轮采到的 {len(all_rows)} 条已在上面的实时明细里被全部删除，未产出结果文件')
+            pend = len(STATE['rows'])
+            if pend:
+                STATE['pending_export'] = True
+                STATE['export_error'] = ''
+        if pend:
+            log(f'⏸️ 本轮采到 {pend} 条，已进入**待核对**状态（客户库里还没有这些数据、'
+                f'也还没生成 Excel）。核对完点「📥 导出 Excel」才会入库 + 落盘。')
         elif run_ok:
             log('本轮没有新增商家，未产出结果文件（客户库未变化）')
         STATE['done'] = True
@@ -2536,25 +2533,23 @@ def api_manual_session_delete():
 
 @app.route('/api/live/delete', methods=['POST'])
 def api_live_delete():
-    """删掉主页「📥 本轮已入库明细（实时）」里的某一条（同一份内存明细 + 客户库，删前自动备份）。
+    """删掉主页「📥 本轮采集明细（实时）」里的某一条 —— **只删内存明细，不碰客户库**。
 
-    与 `/api/manual/session/delete` 是同一套语义，只是数据源换成自动链路的 `STATE['rows']`：
-      · 采集那一刻就已经写进 SQLite 了（`db_upsert_customer`）。**只删内存明细是假删除** ——
-        库里那条还在 → 下次采到同一个站被判「已在客户库」直接跳过、永远采不回来 → 飞书仍带它。
-      · 落盘用的是 run_search / run_maps 自己的局部 `all_rows`，与 `STATE['rows']` **不是同一个
-        列表**，所以还要在 `STATE['rows_deleted']` 里留个墓碑，让 finally 按 n 过滤后落盘。
-        否则「删了却还在结果 Excel 里」，用户看到的还是没删干净。
+    ⛔ 语义在 2026-10-13 变了（用户拍板）：自动链路也改成「点『📥 导出 Excel』才入库」，
+       所以此刻客户库里**根本没有这些行**，没什么可删的 —— 也就不再需要「删前备份」。
+       （旧实现在采集那刻就落库，删除必须「明细 + 客户库」双删 + 删前备份，否则是假删除；
+        现在那套只在 `/api/manual/session/delete` 里还留着一条例外分支。）
 
-    ⚠️ 只允许**采集进行中**删（`running and phase == 'search'`）：
-      导出飞书时 `running` 也是 True 而 `phase == 'export'`，此时 `STATE['rows']` 还挂着上一轮的行，
-      结果 Excel 早就写好了 —— 这时让它删，就是典型的「库删了、表还在」的假删除。所以一并拦掉。
+    ⚠️ 允许的窗口 = 「采集进行中（`running and phase=='search'`）」**或**「采集已结束、待导出
+       （`pending_export`）」。后者是用户点名要的：跑完先核对，把不对的行删掉再导出。
+       仍然挡住「正在导出飞书」（`phase == 'export'`）—— 那时 `STATE['rows']` 还挂着上一轮的行，
+       结果 Excel 早就写好了，删了就是「库里删了、表里还在」的假删除。
 
-    ⚠️ 锁纪律（STATE_LOCK 非可重入，且 log() 自己也要抢同一把锁）：
-       ① 锁内校验+定位  ② 锁外备份与 DB 删除（慢 IO）  ③ 锁内改内存  ④ 锁外 log。
-       `backup_db_before_delete()` 内部会调 `log()`，**持锁调它必死锁**。
+    ⚠️ 定位用 `n` 而不是 url：`n` 来自单调发号器 `STATE['n_seq']`，本轮内唯一；
+       url 会被去重，但用行号才和前端 ✕ 上挂的 `data-n` 一一对应。
 
-    ⚠️ 定位用 `n` 而不是 url：`n` 是本轮内唯一且单调的行号；url 虽然被 `seen` 去过重，但用行号
-       才和前端 ✕ 上挂的 `data-n` 一一对应。
+    ⚠️ 返回体保留 `ok / deleted / rows / backup` 四个键（共享组件 `ui/live-table.js` 的契约不变），
+       只是 `deleted` 恒为 0、`backup` 恒为 '' —— 提示文案由各页自己传（见 `ui/page.html`）。
     """
     d = request.get_json(silent=True) or {}
     raw = d.get('n')
@@ -2564,33 +2559,24 @@ def api_live_delete():
         n = int(raw)
     except (TypeError, ValueError):
         n = None
-    with STATE_LOCK:                                             # ① 锁内：校验 + 定位
-        if not (STATE['running'] and STATE['phase'] == 'search'):
+    with STATE_LOCK:
+        if not ((STATE['running'] and STATE['phase'] == 'search') or STATE['pending_export']):
             return jsonify({'ok': False,
-                            'msg': '本轮采集已结束（或正在导出），如需整批清理请到客户库查询页'})
+                            'msg': '本轮采集已结束且已导出（或正在导出飞书），'
+                                   '如需整批清理请到客户库查询页'})
         if n is None or n <= 0:
             return jsonify({'ok': False, 'msg': '无效的行号'})
-        hit = next((r for r in STATE['rows'] if r.get('n') == n), None)
-        if hit is None:
-            return jsonify({'ok': False, 'msg': '这条已不在本轮明细里（可能已被删除）'})
-        url = hit.get('url') or ''
-
-    backup, deleted = _delete_customer_and_backup(url)          # ② 锁外：先备份 + 真删库
-
-    with STATE_LOCK:                                             # ③ 锁内：改内存
         idx = next((i for i, r in enumerate(STATE['rows']) if r.get('n') == n), -1)
         if idx < 0:
             return jsonify({'ok': False, 'msg': '这条已不在本轮明细里（可能已被删除）'})
+        url = STATE['rows'][idx].get('url') or ''
         STATE['rows'].pop(idx)
-        if n not in STATE['rows_deleted']:                      # 防重复点塞重复墓碑
-            STATE['rows_deleted'].append(n)
-        # 计数跟着表格走，否则「本轮新增 N 个网站」会与实际行数对不上
+        # 计数跟着表格走，否则「本轮采到 N 条」会与实际行数对不上
         STATE['result_count'] = len(STATE['rows'])
-        cnt = len(STATE['rows'])
+        cnt = STATE['result_count']
 
-    log(f'🗑️ 已从实时明细删除：{url[:60]}（客户库删除 {deleted} 条）')   # ④ 锁外 log
-    return jsonify({'ok': True, 'deleted': deleted, 'rows': cnt,
-                    'backup': os.path.basename(backup) if backup else ''})
+    log(f'🗑️ 已从本轮明细删除：{url[:60]}（客户库未动 —— 这些行还没入库）')
+    return jsonify({'ok': True, 'deleted': 0, 'rows': cnt, 'backup': ''})
 
 
 @app.route('/api/manual/stop', methods=['POST'])
@@ -2669,8 +2655,11 @@ def api_start():
     if not 10 <= target_count <= 100:
         return jsonify({'ok': False, 'msg': '本次任务采集数量只能设置为 10-100'})
     with STATE_LOCK:
-        STATE.update(running=True, done=False, logs=[], result_count=0, rows=[], rows_deleted=[],
-                     output='', stop=False, phase='search')
+        # 开新一轮：清空上一轮的一切（含「待导出」状态 —— 上一轮没导出就直接丢弃，用户拍板接受）。
+        # n_seq 一并清零：行号只在本轮内有意义。
+        STATE.update(running=True, done=False, logs=[], result_count=0, rows=[], n_seq=0,
+                     output='', stop=False, phase='search',
+                     pending_export=False, export_error='')
     exclude = data.get('exclude', EXCLUDE_DEFAULT)
     china_filters = [k for k in data.get('china_filters', CHINA_FILTER_DEFAULTS)
                      if k in CHINA_FILTER_DEFAULTS]
@@ -2706,12 +2695,93 @@ def api_start():
     return jsonify({'ok': True})
 
 
+@app.route('/api/export_excel', methods=['POST'])
+def api_export_excel():
+    """把本轮「待核对」的明细一次性**写进客户库 + 生成结果 Excel**（2026-10-13 新增）。
+
+    这是自动链路**唯一**一次写客户库的地方 —— 采集阶段（run_search / run_maps）只往
+    `STATE['rows']` 里攒行、不写库也不落盘；用户核对、删掉不要的行之后点「📥 导出 Excel」触发这里。
+
+    顺序**必须**是「先库后表」：
+      · 不变量：结果 Excel 里出现过的行，客户库里一定有。否则下次采到同一个站又会被当成新客户
+        重复进表 —— 这正是这次改造要治的病。
+      · 于是入库失败就**不产出** Excel；`db_upsert_customer` 幂等 → 直接重试不重复。
+    与手动链路的 `_flush_manual_session()` 是同一套骨架（先逐条 upsert、全绿才落盘、失败保留可重试），
+    只是数据源是 `STATE['rows']` 而不是 `MANUAL_STATE['session_rows']`。
+
+    ⚠️ 不做「剔除已存在」：本轮两家站共用同一个邮箱时，`db_upsert_customer` 的 email 兜底会把
+       第二条合并到第一条上 —— Excel 里仍保留两行（用户要看的是「这两家都在候选里」），
+       库里是一条。这是既有设计，不是本次引入的。
+    ⚠️ 锁纪律：`_save_enrich_excel` 只在 `EXCEL_LOCK` 内、`STATE_LOCK` 外；log 一律在锁外。
+    """
+    with STATE_LOCK:
+        if STATE['running']:
+            return jsonify({'ok': False, 'msg': '任务正在运行，等它跑完再导出'})
+        if not STATE['pending_export']:
+            return jsonify({'ok': False, 'msg': '没有待导出的数据（请先点「▶ 开始搜索」）'})
+        rows = list(STATE['rows'])          # 锁内快照；出锁再做慢 IO
+    if not rows:
+        return jsonify({'ok': False, 'msg': '本轮明细是空的 —— 空轮不产出结果文件'})
+
+    # ---- ① 先逐条入库（这是自动链路唯一一次写库）----
+    log(f'====== 导出 Excel：{len(rows)} 条正在写入客户库 ======')
+    db_failed = 0
+    for r in rows:
+        try:
+            db_upsert_customer({
+                'company_name': r.get('title', ''), 'website': r.get('url', ''),
+                'email': EMAIL_SEP.join(r.get('emails') or []),
+                'phone': ' / '.join(r.get('phones') or []),
+                'contact_url': r.get('contact_url', ''), 'score': r.get('score'),
+                'rating': r.get('rating', ''), 'snippet': r.get('snippet', ''),
+                'search_formula': r.get('formula', ''), 'country': r.get('country', ''),
+                'industry': r.get('industry', ''),
+                'source': r.get('source') or '谷歌搜索',   # 地图链路带 '谷歌地图'
+            })
+        except Exception as e:                 # 单条失败不拖垮整轮：先记下来，最后一起决定
+            db_failed += 1
+            log(f'   ⚠️ 入库失败 {str(r.get("url", ""))[:55]}：{type(e).__name__}: {e}')
+    if db_failed:
+        with STATE_LOCK:
+            STATE['export_error'] = (f'有 {db_failed} 条写入客户库失败，'
+                                     '本轮数据已保留，可直接重试')
+            msg = STATE['export_error']
+        log(f'⚠️ 本轮入库失败 {db_failed} 条，未生成结果 Excel（数据已保留，可直接重试）')
+        return jsonify({'ok': False, 'saved': False, 'msg': msg})
+    log(f'   · 已写入客户库 {len(rows)} 条')
+
+    # ---- ② 再写表：只有全部入库成功才落盘（保证「表里的每一行库里都有」）----
+    with EXCEL_LOCK:                       # 与手动链路的落盘互斥；Excel 写盘一律在 STATE_LOCK 外
+        ok = _save_enrich_excel(rows)      # 行业/国家留空 → 由 _pick_industry/_pick_country 从行里推断
+        if not ok:                         # 多半是被 Excel 打开着 —— 退避一秒再试一次
+            time.sleep(0.8)
+            ok = _save_enrich_excel(rows)
+
+    with STATE_LOCK:
+        if ok:
+            STATE.update(pending_export=False, rows=[], result_count=0, export_error='')
+            out = STATE.get('output', '')
+        else:
+            STATE['export_error'] = ('结果 Excel 保存失败（可能被 Excel 占用），'
+                                     '数据已入库并保留，可直接重试')
+            out = ''
+    if ok:
+        log(f'====== 本轮结果已保存：{out} ======')
+        return jsonify({'ok': True, 'saved': True, 'file': out, 'rows': len(rows)})
+    return jsonify({'ok': False, 'saved': False, 'msg': STATE['export_error']})
+
+
 @app.route('/api/export_feishu', methods=['POST'])
 def api_export_feishu():
     if STATE['running']:
         return jsonify({'ok': False, 'msg': '任务正在运行'})
+    # ⚠️ 飞书导出读的是「最新结果文件」—— 本轮若还没导出 Excel，它拿到的是**上一轮**的表，
+    #    会把旧数据推进飞书。所以这里硬挡一道（用户拍板：强制先导出 Excel）。
+    if STATE['pending_export']:
+        return jsonify({'ok': False,
+                        'msg': '本轮结果还没导出 Excel —— 请先点「📥 导出 Excel」再导飞书'})
     with STATE_LOCK:
-        STATE.update(running=True, done=False, logs=[], result_count=0, rows_deleted=[],
+        STATE.update(running=True, done=False, logs=[], result_count=0,
                      output='', stop=False, phase='export')
     threading.Thread(target=run_export_feishu, daemon=True).start()
     return jsonify({'ok': True})
@@ -2939,7 +3009,11 @@ def api_status():
             'done': STATE['done'],
             'result_count': STATE['result_count'],
             'output': STATE['output'],
-            'rows': list(STATE['rows']),      # 本轮已入库明细，前端每秒刷新用它渲染实时表格
+            # 「待核对 / 待导出」：True = 本轮采集已结束但还没点「📥 导出 Excel」
+            #（此刻客户库里还没有这些行，前端据此显示提示、放开删除、启用导出按钮）
+            'pending_export': STATE['pending_export'],
+            'export_error': STATE['export_error'],
+            'rows': list(STATE['rows']),      # 本轮采集明细（未入库），前端每秒刷新用它渲染表格
             'logs': new_logs,
             'total_logs': len(logs),
         }

@@ -1,4 +1,4 @@
-/* 「本轮明细」共享组件 —— 主页「📥 本轮已入库明细（实时）」与 /manual「③ 本轮采集明细」
+/* 「本轮明细」共享组件 —— 主页「📥 本轮采集明细（实时 · 待核对）」与 /manual「③ 本轮采集明细」
    共用这一份「渲染 + 逐行删除」实现。
 
    为什么要抽出来：这两块原来是两份近逐字重复的代码，改一边传不到另一边 —— 主页上一轮修的
@@ -37,7 +37,16 @@ function makeLiveTable(cfg){
   var afterRemove = cfg.afterRemove || function(){ return Promise.resolve(); };
   var editHint = cfg.editHint || '';
   var readHint = cfg.readHint || '';
-  var removeTitle = cfg.removeTitle || '从本轮明细和客户库删掉这一条';
+  var removeTitle = cfg.removeTitle || '从本轮明细里删掉这一条';
+  // 删除成功后的日志文案。默认这一段是**给 /manual 写的**：手动链路里 `kind='added'` 的行
+  // 若已在库，删除会连客户库一起删（并可能落一份删前备份）—— 所以按 d.deleted / d.backup 报。
+  // ⛔ 主页自动链路不同：采集阶段一条都没入库，d.deleted 恒为 0 —— 报「客户库里没有这条记录」
+  //    会让人以为「库里有但不匹配」，所以主页自己传一段（见 ui/page.html 的 cfg.removeMsg）。
+  var removeMsg = cfg.removeMsg || function(d){
+    return '🗑️ 已删除一条' +
+      (d.deleted ? '（客户库同步删掉 1 条）' : '（客户库里没有这条记录）') +
+      (d.backup ? '，已备份：' + d.backup : '（本轮已有备份，未重复备份）');
+  };
   var modalCfg = cfg.modal || {};
 
   // 游标：已渲染行数 + 已渲染末行的主键。两个必须一起用 ——
@@ -68,9 +77,12 @@ function makeLiveTable(cfg){
   // ---------- 居中确认框：初始化时就建好（两页都不用手写标记）----------
   function buildModal(){
     if (modal) return;
+    // ⛔ 这套默认文案是**给主页自动链路写的**（/manual 在 ui/manual.html 里传了自己的 modal.body）：
+    //    2026-10-13 起自动链路也是「点『📥 导出 Excel』才入库」，所以此刻这些行**还没进客户库** ——
+    //    删掉只是从「待导出清单」里拿掉，客户库不动、也没有备份这回事。
     var bullets = modalCfg.body || [
-      '删除后不可撤销（后端会先自动备份一份客户库到 DB/backups/）',
-      '会同时从「客户库」删掉它，<b>不会</b>进入本轮结果 Excel',
+      '删除后不可撤销（这会从下方「本轮明细」里永久移除）',
+      '本轮明细里的行<b>还没写进客户库</b>，删掉它不影响客户库、也不会进本轮结果 Excel',
       '同一个网站的其它记录（若有）不受影响'
     ];
     var holder = document.createElement('div');
@@ -227,8 +239,7 @@ function makeLiveTable(cfg){
         body: JSON.stringify(body)
       }).then(function(r){ return r.json(); }).then(function(d){
         if (!d.ok){ say('⚠️ 删除失败：' + (d.msg || '未知原因')); return; }
-        say('🗑️ 已删除一条' + (d.deleted ? '（客户库同步删掉 1 条）' : '（客户库里没有这条记录）') +
-            (d.backup ? '，已备份：' + d.backup : '（本轮已有备份，未重复备份）'));
+        say(removeMsg(d));
         return afterRemove();                     // 立刻重拉一次，表格/徽章不用等下一个整秒
       });
     });

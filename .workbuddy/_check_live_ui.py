@@ -6,14 +6,15 @@
   D. 「7. 自定义搜索词」——卡片落位、预览切「原样」分支、清空回标准模式、地图模式下置灰
   E. 「国家限定」四选一——默认 none、cr 只挂 URL、site: 只进搜索词、美国跳过 site:、
      地图模式整块收起、自定义词模式下不生效
-  F. 「本轮已入库明细」逐行删除——✕ 弹居中模态框（不是原生 confirm）、Esc=取消且不发请求、
-     确认后行数/徽章/客户库三者同降且留下删前备份、采集结束后整表只读
+  F. 「本轮采集明细（实时 · 待核对）」逐行删除——✕ 弹居中模态框（不是原生 confirm）、
+     Esc=取消且不发请求、确认后只从明细里拿掉（**不动客户库**）、
+     采集结束但**尚未导出**时仍可删、导出飞书阶段整表只读
   G. 「1. 本次任务采集数量」——提为 .wrap 下第 1 张独立卡（目标国家顺延成 2.）、仍预填 10、
      切到地图后依然可见可编辑、清空后点「开始搜索」必须被拦住且一个请求都不发
 起临时 Flask 实例 + Chrome，不联网。
-⚠️ A–E 段只读真实客户库（/api/db_stats）；**F 段会真跑删除链路**（备份 + 删库），
-   所以 F 段开头必须先把 core.db.db_path 与 paths.ENRICH_FILE 打桩到临时目录，
-   并由 _under_tmp() 护栏兜住 —— 漏了它就会删到真实客户库。G 段只读页面，不碰库。"""
+⚠️ A–E 段只读真实客户库（/api/db_stats）；**F 段会真的往库里写同域名的记录**（用来证明
+   「删明细不会误伤客户库」），所以 F 段开头必须先把 core.db.db_path 与 paths.ENRICH_FILE
+   打桩到临时目录，并由 _under_tmp() 护栏兜住 —— 漏了它就会写到真实客户库。G 段只读页面，不碰库。"""
 import importlib.util
 import json
 import os
@@ -382,10 +383,12 @@ try:
     page.run_js("const t = document.getElementById('rawQueries'); t.value = ''; "
                 "t.dispatchEvent(new Event('input'));")
 
-    # ---------- F. 实时明细逐行删除（✕ + 居中模态框 + 采集结束后只读）----------
-    # ⚠️ 这一段会**真的跑删除链路**（后端先备份、再删客户库），所以必须先把 DB 打桩到临时目录。
-    #    本脚本前面 A–E 段从没打过桩（它们只读 /api/db_stats）—— 不补这一步，点一下 ✕
-    #    就会删到真实客户库 DB/客户库.sqlite3。
+    # ---------- F. 实时明细逐行删除（✕ + 居中模态框 + 待核对仍可删 / 导出阶段只读）----------
+    # ⛔ 语义 2026-10-13 变了：自动链路改成「点『📥 导出 Excel』才入库」，删除**只动内存明细、
+    #    不碰客户库**（此刻库里根本没有这些行）—— 所以本段不再有「删前备份」。
+    # ⚠️ 但 DB 仍必须打桩到临时目录：本段会往（临时）库里塞几条**同域名的记录**，
+    #    用来证明「删明细不会误伤库里的记录」；不打桩就会写到真实客户库 DB/客户库.sqlite3。
+    #    本脚本前面 A–E 段从没打过桩（它们只读 /api/db_stats）。
     TMPDB = tempfile.mkdtemp(prefix='live_ui_db_')
     m.db_path = lambda: os.path.join(TMPDB, 't.sqlite3')
     m.db.db_path = m.db_path            # ⚠️ 真正建连接的是 core.db，只打 m.db_path 打不到它
@@ -410,7 +413,7 @@ try:
                               'search_formula': 'f', 'country': '法国', 'industry': '食品'})
     assert m.db_has_customer('https://live-del-a.fr/'), '前置：待删的那条应先落（临时）库'
 
-    m.STATE.update(running=True, phase='search', rows_deleted=[], result_count=3, rows=[
+    m.STATE.update(running=True, phase='search', result_count=3, n_seq=3, pending_export=False, rows=[
         {'n': 1, 'title': 'Miamland Grossiste', 'url': 'https://live-del-a.fr/',
          'emails': ['contact@live-del-a.fr', 'sales@live-del-a.fr'],
          'phones': ['+33 4 72 00 11 22'],
@@ -473,15 +476,6 @@ try:
     assert '/' not in tds0[2], f'邮箱列不该再出现斜杠：{tds0[2]!r}'
     print('  ✓ 实时表 9 列（含新增的「行业 / 国家」），列序与行数据都对得上')
 
-    BK_DIR = os.path.join(TMPDB, 'backups')
-
-
-    def _backups_now():
-        return sorted(os.listdir(BK_DIR)) if os.path.isdir(BK_DIR) else []
-
-
-    backups_before = _backups_now()
-
     # ① 点 ✕ → 弹页面自己的居中模态框（⚠️ 不是原生 confirm：原生那个贴在浏览器窗口顶部、
     #    位置与样式都改不了，用户明确不要）
     page.run_js("document.querySelectorAll('#liveBody .livedel-btn')[0].click();")
@@ -523,12 +517,10 @@ try:
     assert page.run_js("return document.getElementById('liveDelModal')"
                        ".classList.contains('show');") is False, 'Esc 没关掉模态框'
     assert len(m.STATE['rows']) == 3, f'取消后不该动明细：{len(m.STATE["rows"])}'
-    assert m.STATE['rows_deleted'] == [], f'取消后不该留墓碑：{m.STATE["rows_deleted"]}'
-    assert m.db_has_customer('https://live-del-a.fr/') is True, '取消后不该删客户库'
-    assert _backups_now() == backups_before, f'取消不该产生备份：{_backups_now()}'
-    print('  ✓ Esc = 取消：模态框关闭，明细 / 客户库 / 备份三者都没动（确实没发请求）')
+    assert m.db_has_customer('https://live-del-a.fr/') is True, '取消后不该动客户库'
+    print('  ✓ Esc = 取消：模态框关闭，明细 / 客户库 都没动（确实没发请求）')
 
-    # ③ 再点 ✕ → 按 Enter 确认（同时覆盖键盘确认路径）→ 明细与客户库同降 + 留下删前备份
+    # ③ 再点 ✕ → 按 Enter 确认（同时覆盖键盘确认路径）→ 只从明细里拿掉，**客户库原封不动**
     page.run_js("document.querySelectorAll('#liveBody .livedel-btn')[0].click();")
     time.sleep(0.25)
     page.run_js("document.dispatchEvent(new KeyboardEvent('keydown', "
@@ -542,35 +534,60 @@ try:
     assert '2' in badge2, f'徽章应跟着变成 2：{badge2}'
     assert dns2 == ['2', '3'], f'剩下的应是第 2、3 条（按 n 精确删、不连坐）：{dns2}'
     assert 'Miamland' not in first_txt, f'删掉的那条还留在表里：{first_txt[:60]}'
-    assert m.db_has_customer('https://live-del-a.fr/') is False, \
-        '被删的那条应真的从（临时）客户库消失（只删列表 = 假删除）'
-    assert m.db_has_customer('https://live-del-b.fr/') is True, '没被删的那条不该连坐'
-    assert m.STATE['rows_deleted'] == [1], f'墓碑没记下：{m.STATE["rows_deleted"]}'
-    new_bk = [f for f in _backups_now() if f not in backups_before]
-    assert any(f.startswith('客户库_删除前_') for f in new_bk), \
-        f'删除前应自动备份客户库，实际新增 {new_bk}'
-    print('  ✓ Enter 确认删除：明细 3→2、徽章同步、客户库真删 1 条且没连坐、删前备份已落盘')
+    assert [r['n'] for r in m.STATE['rows']] == [2, 3], \
+        f'后端明细也该只剩 n=2,3：{m.STATE["rows"]}'
+    # ⛔ 新语义：这些行**还没入库**，所以删明细绝不许碰客户库 —— 两条同域名的库内记录都必须还在
+    #    （老行为是「双删」，现在动了就是误删别人的数据）。
+    assert m.db_has_customer('https://live-del-a.fr/') is True, \
+        '⛔ 删明细不该删客户库（新语义下库里那条不是本轮采的）'
+    assert m.db_has_customer('https://live-del-b.fr/') is True, '没被删的那条当然也不该动'
+    print('  ✓ Enter 确认删除：明细 3→2、徽章同步、客户库两条都原封不动（新语义只删内存）')
     page.get_screenshot(path=PNG_LIVE_DEL, full_page=True)
     print('  截图：', PNG_LIVE_DEL, os.path.getsize(PNG_LIVE_DEL), 'bytes')
 
-    # ④ 采集结束（或正在导出飞书）→ 整表只读：✕ 置灰、点了既不弹框也不动数据
-    m.STATE.update(running=True, phase='export')   # ⚠️ 导出阶段 running 也是 True，同样必须挡住
+    # ④ 导出飞书阶段 → 整表只读：✕ 置灰、点了既不弹框也不动数据
+    #    ⚠️ 这个阶段 running 也是 True，但 phase='export'、结果 Excel 早写好了 —— 删了就是假删除，
+    #       所以判据不能只看 running（前端 liveEditable / 后端 api_live_delete 同判据）。
+    m.STATE.update(running=True, phase='export', pending_export=False)
     page.run_js("poll();")
     time.sleep(0.5)
     ro1 = page.run_js(
         "return document.getElementById('liveWrap').classList.contains('livedel-ro');")
     hint1 = page.run_js("return document.getElementById('liveDelHint').textContent;")
-    print('导出阶段：只读类', ro1, '| 提示', hint1)
-    assert ro1 is True, '采集结束后应把整表标成只读'
-    assert '已结束' in hint1, f'应提示去客户库查询页清理：{hint1}'
+    print('导出飞书阶段：只读类', ro1, '| 提示', hint1)
+    assert ro1 is True, '导出飞书阶段应把整表标成只读'
+    assert '客户库查询' in hint1, f'应提示去客户库查询页清理：{hint1}'
     page.run_js("document.querySelectorAll('#liveBody .livedel-btn')[0].click();")
     time.sleep(0.3)
     assert page.run_js("return document.getElementById('liveDelModal')"
                        ".classList.contains('show');") is False, '只读状态下点 ✕ 不该弹模态框'
     assert len(m.STATE['rows']) == 2, f'只读状态下点 ✕ 不该动数据：{len(m.STATE["rows"])}'
-    print('  ✓ 采集结束后整表只读：✕ 置灰，点了既不弹框也不动数据')
+    print('  ✓ 导出飞书阶段整表只读：✕ 置灰，点了既不弹框也不动数据')
     page.get_screenshot(path=PNG_LIVE_RO, full_page=True)
     print('  截图：', PNG_LIVE_RO, os.path.getsize(PNG_LIVE_RO), 'bytes')
+
+    # ⑤ 采集已结束、**尚未导出**（pending_export）→ 重新可删
+    #    这是本次改造的核心交互（用户点名）：跑完先核对，把不对的行删掉，再点「📥 导出 Excel」。
+    #    ⚠️ 静默失效型：判据若只用 running，跑完就整表只读 → 用户只能对着错误数据干瞪眼。
+    m.STATE.update(running=False, phase='', pending_export=True)
+    page.run_js("poll();")
+    time.sleep(0.5)
+    ro2 = page.run_js(
+        "return document.getElementById('liveWrap').classList.contains('livedel-ro');")
+    hint2 = page.run_js("return document.getElementById('liveDelHint').textContent;")
+    print('待核对（未导出）阶段：只读类', ro2, '| 提示', hint2)
+    assert ro2 is False, '「待入库/待导出」阶段应放开删除 —— 跑完先核对正是这次改造的用法'
+    assert '可点' in hint2, f'待核对阶段应提示可以删：{hint2}'
+    page.run_js("document.querySelectorAll('#liveBody .livedel-btn')[0].click();")
+    time.sleep(0.3)
+    assert page.run_js("return document.getElementById('liveDelModal')"
+                       ".classList.contains('show');") is True, '待核对阶段点 ✕ 应能弹确认框'
+    page.run_js("document.dispatchEvent(new KeyboardEvent('keydown', "
+                "{key: 'Enter', bubbles: true}));")
+    live_poll_and_wait(1, '待核对阶段删除后')
+    assert len(m.STATE['rows']) == 1, f'待核对阶段应能删到 1 条：{len(m.STATE["rows"])}'
+    assert m.db_has_customer('https://live-del-b.fr/') is True, '待核对阶段删明细也不许碰客户库'
+    print('  ✓ 「待核对（未导出）」阶段仍可删：✕ 可点、确认框可弹、客户库不受影响')
 
     # ---------- G. 「1. 本次任务采集数量」卡（提为第 1 张 / 三条链路统一 / 强必填）----------
     # 用户 2026-10-02 拍板：把采集数量从「参数」卡里提出来，做成排在「目标国家」之前的第 1 张卡，
@@ -579,7 +596,7 @@ try:
     #   ② 切地图时被连带隐藏/置灰 → 「三种链路都要先填」破功
     #   ③ 清空后仍能提交 → 等于没必填（后端拿到 NaN/缺字段会按兜底值跑）
     # ✅ 本段只读页面（不打桩、不碰库），跑在最后不影响 F 段已完成的删除校验。
-    m.STATE.update(running=False, phase='', rows=[], rows_deleted=[], result_count=0)
+    m.STATE.update(running=False, phase='', rows=[], n_seq=0, result_count=0, pending_export=False)
     page.get(f'http://127.0.0.1:{PORT}/')
     time.sleep(1.0)
 

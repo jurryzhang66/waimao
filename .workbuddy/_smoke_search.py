@@ -97,41 +97,78 @@ def spy_save(results, industry=''):
 
 m._save_enrich_excel = spy_save
 
+
+def export_now():
+    """模拟用户点「📥 导出 Excel」：真打一次 HTTP 接口（`/api/export_excel`）。
+
+    ⛔ 新语义（2026-10-13）：采集阶段（run_search / run_maps）**不写库、不落盘** —— 只往
+       `STATE['rows']` 攒行并置 `pending_export=True`。只有这一步才会「先逐条入库、再写结果 Excel」。
+       所以本脚本里凡是要看 `calls['saved']` 的地方，都得先调它一次。
+    导出成功后 `STATE['rows']` 会被清空、`pending_export` 复位。
+    """
+    with m.app.test_client() as c:
+        return c.post('/api/export_excel').get_json()
+
+
 print('================ 开始冒烟测试 ================')
 m.run_search(['cat litter'], ['wholesale'], [('us', '美国', 'us', 'en')], 1, '-alibaba',
              'or', 3, '宠物用品', True)
 
 print('\n================ 断言 ================')
-assert calls['saved'] is not None, '结果未落盘'
-assert len(calls['saved']) == 3, f'应停在目标 3 条，实际 {len(calls["saved"])}'
+# ---- ① 采集阶段**不落盘、不入库**（2026-10-13 新语义）----
+# 跑完只往 STATE['rows'] 攒行 + 置「待导出」；等用户核对完点「📥 导出 Excel」才写库 + 落盘。
+assert calls['saved'] is None, '采集阶段不该落盘（新语义：要等点「📥 导出 Excel」）'
+assert m.STATE['pending_export'] is True, '跑完应进入「待导出」状态（否则用户既导不了也开不了新一轮）'
 assert calls['activate'] == 3, f'切回搜索标签应 3 次，实际 {calls["activate"]}'
 assert len(calls['enriched']) == 3, f'补全应执行 3 次，实际 {len(calls["enriched"])}'
 assert calls['quit'] == 1, f'浏览器应关闭 1 次，实际 {calls["quit"]}'
-print(f'落盘条数 {len(calls["saved"])} | 就补全 {len(calls["enriched"])} 次 | '
-      f'切回搜索标签 {calls["activate"]} 次 | 关闭浏览器 {calls["quit"]} 次')
 
-for r in calls['saved']:
-    for k in ('title', 'url', 'emails', 'phones', 'contact_url', 'score',
-              'rating', 'snippet', 'formula', 'country'):
-        assert k in r, f'落盘记录缺字段：{k}'
-
-# ---- STATE['rows']：前端实时明细表的数据源，必须与入库条数一致 ----
+# ---- ② STATE['rows'] 就是「待导出的那一份」：必须是与落盘同构的**完整 11 键行** ----
 live = m.STATE['rows']
 assert len(live) == 3, f'实时明细应有 3 条，实际 {len(live)}'
 assert live[0]['emails'] == ['sales@testco1.com'], '实时明细第一家的邮箱不对'
 assert live[0]['rating'] == '普通客户' and live[0]['score'] == 65, '实时明细评分/评级不对'
 assert live[1]['emails'] == [], '实时明细第二家邮箱应为空'
 assert [r['n'] for r in live] == [1, 2, 3], '实时明细序号应为 1/2/3'
+# ⛔ 元素必须是完整行（含 snippet / formula / industry）—— /api/export_excel 直接拿它逐条入库，
+#    少一个键就会静默写空（例如 industry 丢了 → 结果 Excel 的国家/行业名推断不出来）。
+for r in live:
+    for k in ('n', 'title', 'url', 'emails', 'phones', 'contact_url', 'score',
+              'rating', 'snippet', 'formula', 'industry', 'country'):
+        assert k in r, f'待导出明细缺字段：{k}'
 print('实时明细 {0} 条，序号 {1}，首条邮箱 {2}'.format(
     len(live), [r['n'] for r in live], live[0]['emails']))
 
-# ---- /api/status 必须带上 rows 与 db_total ----
+# ---- ③ 此刻客户库里**还没有**这些行（入库推迟到点「导出 Excel」那一刻）----
+conn = sqlite3.connect(m.db_path())
+conn.row_factory = sqlite3.Row
+n_before = conn.execute("SELECT COUNT(*) FROM customers WHERE website LIKE 'https://testco%'"
+                        ).fetchone()[0]
+conn.close()
+assert n_before == 0, f'采集阶段不该写库（实际已写入 {n_before} 条）'
+
+# ---- ④ /api/status 必须带上 rows / pending_export / db_total ----
 with m.app.test_client() as c:
     resp = c.get('/api/status?since=0').get_json()
 assert 'rows' in resp and len(resp['rows']) == 3, '/api/status 未返回 rows 或条数不符'
+assert resp.get('pending_export') is True, '/api/status 未返回 pending_export（前端按钮靠它启用）'
 assert resp.get('db_total') is not None, '/api/status 未返回 db_total（库总数徽章无法实时刷新）'
-print('接口 /api/status：rows {0} 条，db_total {1}'.format(len(resp['rows']), resp['db_total']))
+print('接口 /api/status：rows {0} 条，pending_export {1}，db_total {2}'.format(
+    len(resp['rows']), resp['pending_export'], resp['db_total']))
 
+# ---- ⑤ 点「📥 导出 Excel」→ 才写客户库 + 落盘 ----
+je = export_now()
+assert je.get('ok') is True and je.get('saved') is True, f'导出应成功：{je}'
+assert len(calls['saved']) == 3, f'导出应落盘 3 条，实际 {len(calls["saved"])}'
+for r in calls['saved']:
+    for k in ('title', 'url', 'emails', 'phones', 'contact_url', 'score',
+              'rating', 'snippet', 'formula', 'country'):
+        assert k in r, f'落盘记录缺字段：{k}'
+# ⛔ 导出成功后必须清空明细 + 复位状态，否则刷新页面会再导一次（重复入库 + 多出一份表）
+assert m.STATE['rows'] == [] and m.STATE['pending_export'] is False, \
+    f'导出后应清空明细并复位状态：rows={m.STATE["rows"]} pending={m.STATE["pending_export"]}'
+
+# ---- ⑥ 导出之后，库里才有这 3 条 ----
 conn = sqlite3.connect(m.db_path())
 conn.row_factory = sqlite3.Row
 # 只断言本轮写入的 3 条（init_customer_db 会顺带把项目里旧的结果 Excel 导入临时库，与本次无关）
@@ -140,12 +177,14 @@ rows = conn.execute("SELECT company_name,website,email,phone,score,rating,indust
 total = conn.execute('SELECT COUNT(*) FROM customers').fetchone()[0]
 conn.close()
 print(f'临时库总记录 {total} 条，其中本轮写入 {len(rows)} 条')
-assert len(rows) == 3, f'本轮应写入 3 条，实际 {len(rows)}'
+assert len(rows) == 3, f'导出后本轮应写入 3 条，实际 {len(rows)}'
 for r in rows:
     print('   库内：', dict(r))
 assert rows[0]['email'] == 'sales@testco1.com', '抓到邮箱的记录没写进库'
 assert rows[0]['industry'] == '宠物用品', '行业标签没写进库'
 assert rows[1]['email'] == '', '第二家没有邮箱，应为空'
+print(f'落盘条数 {len(calls["saved"])} | 就补全 {len(calls["enriched"])} 次 | '
+      f'切回搜索标签 {calls["activate"]} 次 | 关闭浏览器 {calls["quit"]} 次')
 
 # ---- 后续几轮：法国 + 法语产品词，验证「条件词按国家语言本地化」+「gl/hl 参数」 ----
 # 每轮只勾一个条件、用不同域名，避免被「已达标 / 客户库已有」提前中断。
@@ -213,6 +252,11 @@ def reset_calls(items):
     calls['formulas'].clear()
     calls['params'].clear()
     calls['saved'] = None
+    # ⛔ 每轮必须互相独立：清空「待导出明细」与行号发号器。
+    #    否则 export_now() 会把**前面几轮**攒下的行一起导出（len(calls['saved']) 就不是本轮的了），
+    #    而且 run_search 开头会把 n_seq 归零 → 与未清空的 rows 里的旧 n 撞号。
+    #    （真实链路不会这样：api_start 每轮都会清 STATE['rows']；直调 run_search 才要自己清。）
+    m.STATE.update(rows=[], result_count=0, n_seq=0, pending_export=False, export_error='')
 
 
 # 对照组：标准模式 + 默认中国过滤（17 项全开）→ 中国那条应当被过滤掉
@@ -220,7 +264,10 @@ reset_calls(mk_items('a'))
 print('\n---- 对照组：标准模式（中国过滤全开）----')
 m.run_search(['nouilles'], ['wholesale'], [('fr', '法国', 'fr', 'fr')], 1,
              '-alibaba', 'or', 1, '食品', True, '', None)
-assert calls['saved'] is not None and len(calls['saved']) == 1, \
+assert calls['saved'] is None, '采集阶段不该落盘'
+je = export_now()
+assert je.get('ok') is True and je.get('saved') is True, f'导出应成功：{je}'
+assert len(calls['saved']) == 1, \
     f'对照组应只留下法国那 1 条，实际 {len(calls["saved"] or [])}'
 assert calls['saved'][0]['url'] == 'https://grossiste-a.fr/', \
     f'对照组剩下的应是法国站，实际 {calls["saved"][0]["url"]}'
@@ -264,6 +311,8 @@ assert not any(('法国' in f) or ('France' in f) for f in calls['formulas']), \
 print('  ✓ 公式逐字原样；不拼排除词；国家只走 &gl=&hl=，没进搜索词')
 
 # ④ 落盘行：搜索公式原样、国家列打上「法国」、中国站**没被过滤**
+je = export_now()                     # ⛔ 新语义：先点「导出 Excel」才落盘
+assert je.get('ok') is True and je.get('saved') is True, f'导出应成功：{je}'
 saved = calls['saved'] or []
 assert len(saved) == 4, f'自定义模式应留下 4 条（不过滤中国站），实际 {len(saved)}'
 urls = {r['url'] for r in saved}
@@ -367,12 +416,14 @@ assert f_raw == ['cat litter grossiste'], f'自定义模式应原样：{f_raw}'
 assert p_raw == ['&gl=fr&hl=fr'], f'自定义模式不该加 cr：{p_raw}'
 print('  ✓ 互斥：自定义模式下国家限定被完全关掉')
 
-# ---- 运行中删除 → 那条**不进结果 Excel**（墓碑过滤） ----
-# 背景：结果 Excel 是 run_search 的 finally 用**它自己的局部 all_rows**写出的，与 STATE['rows']
-# 不是同一个列表。所以「页面上点 ✕」必须同时往 STATE['rows_deleted'] 记一笔，finally 才有据可滤。
+# ---- 运行中删除 → 那条**不进结果 Excel**（只动内存明细） ----
+# 背景（2026-10-13 新语义）：采集阶段既不写库也不落盘，`STATE['rows']` 本身就是「待导出的那一份」。
+# 所以页面上点 ✕ 只要从 `STATE['rows']` 里摘掉即可 —— 导出时自然就不会带上它。
+# （旧实现靠 `STATE['rows_deleted']` 记「墓碑」，让 worker 的 finally 按 n 过滤后再落盘；
+#   现在 per-round 的落盘被整个挪到 /api/export_excel，墓碑机制已**整套下线**。）
 # 这段走的是**真实路径**：采集跑到第 2 条时，用 flask test_client 真打一次 /api/live/delete。
 # ⚠️ 必须放在下面「/api/start 的 HTTP 层」之前 —— 那一段会把 m.run_search 换成假实现。
-# ⚠️ 删除接口要求 running and phase=='search'，所以这里得先把 STATE 摆成「采集中」。
+# ⚠️ 删除接口要求 running and phase=='search'（或 pending_export），所以这里得先把 STATE 摆成「采集中」。
 #    （run_search 的 finally 会自己把 running 置回 False，不用手动复位。）
 LIVE_ITEMS = [{'title': f'Live Co {i}', 'url': f'https://liveco{i}.example.com/',
                'snippet': 'wholesale distributor'} for i in (1, 2, 3)]
@@ -404,27 +455,36 @@ m.extract_results = fake_extract_live
 m.enrich = fake_enrich_live
 LIVE_DEL['enrich_n'] = 0
 reset_calls([])
-m.STATE.update(running=True, phase='search', rows=[], rows_deleted=[], result_count=0,
-               output='', stop=False)
+m.STATE.update(running=True, phase='search', rows=[], n_seq=0, result_count=0,
+               output='', stop=False, pending_export=False)
 m.run_search(['cat litter'], ['wholesale'], FR, 1, '-alibaba', 'or', 3, '食品', True)
 jd = LIVE_DEL['jd'] or {}
 assert jd.get('ok') is True, f'采集进行中删一条应成功：{jd}'
-assert jd.get('deleted') == 1, f'客户库应同步删掉 1 条：{jd}'
+# ⛔ 新语义：这些行**还没入库**，所以删除只动内存明细 —— deleted 必须恒为 0、也没有备份。
+assert jd.get('deleted') == 0, f'新语义只删内存、不碰客户库，deleted 应恒为 0：{jd}'
+assert jd.get('backup') == '', f'新语义没有删前备份这回事：{jd}'
+assert len(m.STATE['rows']) == 2, f'内存明细应剩 2 条：{len(m.STATE["rows"])}'
+assert [r['n'] for r in m.STATE['rows']] == [2, 3], f'应剩下 n=2,3：{m.STATE["rows"]}'
+assert m.STATE['result_count'] == 2, \
+    f'计数应跟着表格走（否则「本轮已采 N 个网站」比表格多 1）：{m.STATE["result_count"]}'
+# 跑完进入「待核对」—— 明细停在 2 条，等用户核对完再点导出
+assert m.STATE['pending_export'] is True, '跑完应进入「待导出」状态'
+assert calls['saved'] is None, '采集阶段不该落盘（落盘要等点「导出 Excel」）'
+# 点「📥 导出 Excel」→ 落盘只有 2 条，且不含被删那条
+je = export_now()
+assert je.get('ok') is True and je.get('saved') is True, f'导出应成功：{je}'
 saved = calls['saved'] or []
-assert len(saved) == 2, f'删掉 1 条后落盘应只剩 2 条（墓碑过滤没生效就会是 3）：{len(saved)}'
+assert len(saved) == 2, f'删掉 1 条后落盘应只剩 2 条（删内存没生效就会是 3）：{len(saved)}'
 saved_urls = {r['url'] for r in saved}
 assert 'https://liveco1.example.com/' not in saved_urls, \
     f'被删的那条仍进了结果 Excel（＝假删除）：{saved_urls}'
 assert saved_urls == {'https://liveco2.example.com/', 'https://liveco3.example.com/'}, \
     f'留下来的应该是第 2、3 条：{saved_urls}'
-assert m.STATE['rows_deleted'] == [1], f'墓碑没记下：{m.STATE["rows_deleted"]}'
-assert len(m.STATE['rows']) == 2, f'内存明细应剩 2 条：{len(m.STATE["rows"])}'
-assert m.STATE['result_count'] == 2, \
-    f'计数应跟着表格走（否则「本轮新增 N 个网站」比表格多 1）：{m.STATE["result_count"]}'
-print(f'  ✓ 采集中删掉第 1 条：客户库删 1 条、内存明细 2 条、计数 2、落盘 2 条且不含被删那条')
+print('  ✓ 采集中删掉第 1 条：只动内存（deleted=0、无备份）→ 明细剩 2 条、计数 2，'
+      '导出后落盘 2 条且不含被删那条')
 m.extract_results = _orig_extract
 m.enrich = _orig_enrich
-m.STATE.update(rows=[], rows_deleted=[], result_count=0)
+m.STATE.update(rows=[], n_seq=0, result_count=0, pending_export=False)
 
 # ---- /api/start 的 HTTP 层：自定义词要真能送进去，且「产品词必填」这条校验要跟着放宽 ----
 # 用「打桩 worker」验证**参数传递**（不起真线程、不联网、不写库）：
@@ -505,23 +565,26 @@ assert spy_run['kw'].get('country_limit') == 'none', \
     f'非法限定值应回落 none：{spy_run["kw"]}'
 print('  ✓ 国家限定透传给 run_search；非法值回落 none')
 
-# ---- /api/live/delete 的 HTTP 层：校验、双删、墓碑、删前备份与节流 ----
-# 这一支的三条静默失效：① 采集结束后还放行（库删了、结果 Excel 早写好了 → 假删除）；
-#                      ② 非法/缺失的行号被当成合法（`n=True` 在 Python 里是 1，会误删第一条）；
-#                      ③ 只删内存不删库（下次采到同站被判「已在客户库」永久跳过）。
+# ---- /api/live/delete 的 HTTP 层：窗口校验、只删内存明细（不碰客户库）----
+# ⛔ 语义 2026-10-13 变了：采集阶段不写库，所以删除**只动内存明细** —— deleted 恒为 0、无删前备份。
+# 仍要盯住三条静默失效：① 已导出后还放行（那时该去客户库查询页整批清理）；
+#                      ② 非法/缺失行号被当成合法（`n=True` 在 Python 里是 1，会误删第一条）；
+#                      ③ 不该删的窗口（导出飞书 phase=='export'）被放行。
 print('\n---- /api/live/delete：主页实时明细逐行删除 ----')
+# 故意先往（临时）库里塞两条 —— 用来证明**删除不会碰客户库**：新语义下它俩必须原封不动。
+# （顺带覆盖「删明细误伤同域名的库内记录」这种误删。）
 m.db_upsert_customer({'company_name': 'Live Del One', 'website': 'https://live-del-1.it/',
                       'snippet': 'x', 'search_formula': 'f', 'country': '意大利', 'industry': '食品'})
 m.db_upsert_customer({'company_name': 'Live Keep Two', 'website': 'https://live-keep-2.it/',
                       'snippet': 'x', 'search_formula': 'f', 'country': '意大利', 'industry': '食品'})
-assert m.db_has_customer('https://live-del-1.it/'), '前置：待删的那条应先落库'
-assert not m.db_has_customer('https://live-nodb-3.it/'), '前置：第 3 条库里本来就没有'
+assert m.db_has_customer('https://live-del-1.it/'), '前置：第 1 条已（人为）在库'
+assert m.db_has_customer('https://live-keep-2.it/'), '前置：第 2 条已（人为）在库'
 
 
 def live_row(n, title, url, score=50):
     return {'n': n, 'title': title, 'url': url, 'emails': [], 'phones': [], 'contact_url': '',
             'score': score, 'rating': '普通客户' if score >= 50 else '观察',
-            'industry': '食品', 'country': '意大利'}
+            'snippet': 'x', 'formula': 'f', 'industry': '食品', 'country': '意大利'}
 
 
 LIVE_ROWS = [live_row(1, 'Live Del One', 'https://live-del-1.it/'),
@@ -529,91 +592,67 @@ LIVE_ROWS = [live_row(1, 'Live Del One', 'https://live-del-1.it/'),
              live_row(3, 'Live No Db', 'https://live-nodb-3.it/', score=10)]
 
 
-def live_post(payload, running=True, phase='search'):
-    """打一次删除接口，并先把 STATE 摆成指定的运行态。"""
-    m.STATE.update(running=running, phase=phase)
+def live_post(payload, running=True, phase='search', pending=False):
+    """打一次删除接口，并先把 STATE 摆成指定的运行态 / 待导出态。"""
+    m.STATE.update(running=running, phase=phase, pending_export=pending)
     with m.app.test_client() as c:
         return c.post('/api/live/delete', json=payload).get_json()
 
 
 def live_reset():
-    m.STATE.update(rows=[dict(r) for r in LIVE_ROWS], rows_deleted=[], result_count=3,
-                   running=True, phase='search')
+    m.STATE.update(rows=[dict(r) for r in LIVE_ROWS], result_count=3, n_seq=3,
+                   running=True, phase='search', pending_export=False)
 
 
 live_reset()
-# ① 采集已结束 → 必须拒绝（前后端同判据：running and phase=='search'）
-jr = live_post({'n': 1}, running=False)
-assert jr.get('ok') is False, f'采集已结束时不该放行：{jr}'
-# ② 导出飞书阶段 → 也必须拒绝（running 是 True，但结果 Excel 早写好了）
-jex = live_post({'n': 1}, running=True, phase='export')
-assert jex.get('ok') is False, f'导出飞书阶段不该放行（库删了表还在 = 假删除）：{jex}'
+# ① 采集已结束、且没进「待导出」→ 必须拒绝（该去客户库查询页整批清理）
+jr = live_post({'n': 1}, running=False, phase='', pending=False)
+assert jr.get('ok') is False, f'采集已结束（也没待导出）时不该放行：{jr}'
+# ② 导出飞书阶段 → 也必须拒绝（running 是 True，但 phase='export'、结果 Excel 早写好了）
+jex = live_post({'n': 1}, running=True, phase='export', pending=False)
+assert jex.get('ok') is False, f'导出飞书阶段不该放行：{jex}'
 # ③ 非法/缺失行号一律拒绝，且不许动数据
 for _bad in ({}, {'n': 'abc'}, {'n': True}, {'n': 0}, {'n': -1}, {'n': None}):
     jb = live_post(_bad)
     assert jb.get('ok') is False, f'非法入参应拒绝：{_bad} → {jb}'
     assert len(m.STATE['rows']) == 3, f'被拒的请求不该动明细：{_bad}'
-    assert m.STATE['rows_deleted'] == [], f'被拒的请求不该留墓碑：{_bad}'
 jsome = live_post({'n': 999})
 assert jsome.get('ok') is False, f'删不存在的行号应拒绝：{jsome}'
 print('  ✓ 采集已结束 / 导出飞书阶段 / 非法与缺失行号 / 不存在的行号 —— 全部拒绝且不动数据')
 
-# ④ 合法删除：双删 + 墓碑 + 计数 + 删前备份
+# ④ 采集中合法删除：只删内存、deleted=0、无备份、客户库原封不动
 live_reset()
-# ⚠️ 备份判据必须看 **mtime**，不能只看「目录里有没有多出一个文件名」：
-#    core/db.py 的备份名只精确到**秒**（`客户库_删除前_%Y%m%d_%H%M%S`），而本脚本前面那段
-#    「运行中删除」也已经真删过一次、也写过一份备份。两次若落在**同一秒** → 第二次会直接覆盖
-#    同名文件 → 文件名的集合差集是空的 → 这条断言会**假红**（已经真的红过一次，别改回去）。
-#    所以改判「接口返回的那个文件名，这一次是不是被写过」：新文件（before 里没有）或 mtime 变新，都算。
-BDIR = m.db._backups_dir()
-
-
-def _bak_snap():
-    return {f: os.path.getmtime(os.path.join(BDIR, f)) for f in os.listdir(BDIR)} \
-        if os.path.isdir(BDIR) else {}
-
-
-snap_before = _bak_snap()
-m.db._DELETE_BACKUP_MIN_INTERVAL = 0        # 强制这一次一定备份（否则被 300 秒节流挡掉）
-m.db._last_delete_backup_at = 0
 jd = live_post({'n': 1})
 assert jd.get('ok') is True, f'采集中删一条应成功：{jd}'
-assert jd.get('deleted') == 1, f'客户库里应真删掉 1 条：{jd}'
+assert jd.get('deleted') == 0, f'新语义：只删内存、不碰客户库，deleted 应恒为 0：{jd}'
+assert jd.get('backup') == '', f'新语义：不再有删前备份：{jd}'
 assert jd.get('rows') == 2, f'删完明细应剩 2 条：{jd}'
-assert jd.get('backup'), f'返回里没带备份文件名（删前备份没生效）：{jd}'
-backup_path = os.path.join(m.db._backups_dir(), jd['backup'])
-assert os.path.isfile(backup_path), f'备份文件没真的落盘：{backup_path}'
-assert _under_tmp(backup_path), f'备份被写到了真实 DB/backups/：{backup_path}'
-assert len(m.STATE['rows']) == 2 and [r['n'] for r in m.STATE['rows']] == [2, 3], \
-    f'内存明细应剩下 n=2,3：{m.STATE["rows"]}'
-assert m.STATE['rows_deleted'] == [1], f'墓碑没记下：{m.STATE["rows_deleted"]}'
+assert [r['n'] for r in m.STATE['rows']] == [2, 3], \
+    f'内存明细应剩下 n=2,3（按 n 精确删、不连坐）：{m.STATE["rows"]}'
 assert m.STATE['result_count'] == 2, f'计数应跟着表格走：{m.STATE["result_count"]}'
-assert m.db_has_customer('https://live-del-1.it/') is False, '被删的那条应真的从客户库消失'
-assert m.db_has_customer('https://live-keep-2.it/') is True, '没被删的那条不该连坐'
-snap_after = _bak_snap()
-assert jd['backup'].startswith('客户库_删除前_'), \
-    f'返回的备份名应带「客户库_删除前_」前缀：{jd["backup"]}'
-assert snap_before.get(jd['backup']) != snap_after.get(jd['backup']), \
-    f'删除前应自动备份客户库（{jd["backup"]} 不是这次新写的快照）：{snap_after}'
-print(f'  ✓ 双删生效（客户库 -1、明细剩 n=2,3、计数 2），删前备份落在临时目录')
+assert m.db_has_customer('https://live-del-1.it/') is True, \
+    '⛔ 删明细不许碰客户库 —— 库里那条是别的来路进来的，动了就是误删'
+assert m.db_has_customer('https://live-keep-2.it/') is True, '没被删的那条当然也不该动'
+print('  ✓ 只删内存明细（deleted=0、无备份）：明细剩 n=2,3、计数 2、客户库两条都原封不动')
 
-# ⑤ 300 秒节流：紧接着再删一条，不该再产备份
-m.db._DELETE_BACKUP_MIN_INTERVAL = 300
-before2 = sorted(os.listdir(m.db._backups_dir()))
-jk = live_post({'n': 2})
-assert jk.get('ok') is True and jk.get('backup') == '', f'节流期间不该再备份：{jk}'
-assert sorted(os.listdir(m.db._backups_dir())) == before2, '节流期间 backups 目录不该新增文件'
-assert m.STATE['rows_deleted'] == [1, 2], f'第二条的墓碑也没记下：{m.STATE["rows_deleted"]}'
-assert m.db_has_customer('https://live-keep-2.it/') is False, '第二条也该从客户库删掉'
-# ⑥ 库里本来就没有的站：删得掉明细，但客户库返回 0（不是报错）
-jn = live_post({'n': 3})
-assert jn.get('ok') is True and jn.get('deleted') == 0, \
-    f'库里没有的站应正常返回 deleted=0（不能报错）：{jn}'
+# ⑤ 采集结束、进入「待导出」→ **仍然可以删**（用户当场核对：一边看一边删，再点导出）
+live_reset()
+jpend = live_post({'n': 2}, running=False, phase='', pending=True)
+assert jpend.get('ok') is True and jpend.get('deleted') == 0, \
+    f'「待导出」窗口应放开删除 —— 这正是本次改造的核心用法：{jpend}'
+assert [r['n'] for r in m.STATE['rows']] == [1, 3], f'应删掉 n=2：{m.STATE["rows"]}'
+print('  ✓ 采集结束、待核对窗口仍可删（用户点名要的用法）')
+
+# ⑥ 逐条删空：计数归零；再删不存在的行号被拒（绝不退化成清空客户库）
+live_reset()
+for _n in (1, 2, 3):
+    live_post({'n': _n})
 assert m.STATE['rows'] == [], f'明细应被删空：{m.STATE["rows"]}'
 assert m.STATE['result_count'] == 0, f'删空后计数应归零：{m.STATE["result_count"]}'
-print('  ✓ 300 秒节流生效；库里没有的站正常返回 deleted=0（明细照删、不报错）')
-m.db._DELETE_BACKUP_MIN_INTERVAL = 300
-m.STATE.update(rows=[], rows_deleted=[], result_count=0, running=False, phase='')
+jn = live_post({'n': 1})
+assert jn.get('ok') is False, f'已删空后再删应拒绝：{jn}'
+print('  ✓ 逐条删空后计数归零；再删已不存在的行号被拒（绝不退化成清空客户库）')
+m.STATE.update(rows=[], n_seq=0, result_count=0, running=False, phase='', pending_export=False)
 
 print('\n✅ 冒烟测试全部通过')
 

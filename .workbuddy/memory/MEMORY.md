@@ -34,31 +34,49 @@
 - **只两项刻意扫真实库**：`_check_db_keys.py`（只读）、`补历史欠账.py --dry`；其余打临时目录 → 红了多半是真实数据要人工修。**别拿固定数字当基线**（用户在持续采）→ 复核看 source 分布 + 测试域名残留。
 - **脆弱点（假红≠产品 bug）清单见 `TRAPS.md`**：别写死端口原因 / 别固定 sleep / 临时库落 `C:` / **备份名只到秒**… **红了先看错误类型。**
 - 静态断言看**代码**不看源码文本：用 `ast`；`STATE['xxx']` 是 `ast.Subscript`+`ast.Constant`，**不是 `ast.Name`**。
-- `_check_ext.py` C 组：`PREFERRED_PORTS` 逐字等于 `extension/ports.js` 的 `DP_PREFERRED_PORTS`。`_smoke_ext_live.py` 走真 Chrome + 真 Flask、**会真写库** → 靠 `DP_SHADOW_PORTS` 遮蔽；**跑全量前先关工具**。
+- `_check_ext.py` C 组：`PREFERRED_PORTS` 逐字等于 `extension/ports.js` 的 `DP_PREFERRED_PORTS`。`_smoke_ext_live.py` 走真 Chrome + 真 Flask、**会真写库** → 靠 `DP_SHADOW_PORTS` 遮蔽；它会自动探测「排在测试端口之前的本工具实例」并遮蔽（**工具开着也能跑**，但**确认它打印了「检测到……另一个实例」**再信）。
+- ⛔ **M22 起，`_smoke_search.py` / `_smoke_maps.py` 里「看到 `calls['saved']`」必须先调 `export_now()`**
+  （＝POST `/api/export_excel`）：采集阶段已不再落盘/入库，直接断言「结果未落盘」会**假红**。
+  同理「库里有没有这几条」也要分成**导出前（无）/ 导出后（有）**两段断言。
 - `_check_page.py` R4/R12 的 verbatim 断言清单、`_smoke_ext_popup.js` DOM 桩的局限 → 见 `TRAPS.md`。**该改断言就别改代码。**
 
-## ⛔ 入库时机分裂：自动「当场落库」，手动「点结束才落库」（2026-10-11，M20）
-- **自动**（`run_search`/`run_maps`）：采集那刻就 `db_upsert_customer`。**手动**（`collect_from_html` →
-  `_manual_row()`，**已不再写库**）：入库推迟到点「🏁 结束并生成 Excel」时的 `_flush_manual_session()`——
-  **先逐条 upsert，全部成功后才写结果 Excel**。动机：填错国家/行业的那一轮可直接丢掉、不污染库。
-  代价（用户拍板接受）：没点结束就关工具＝丢一轮。
+## ⛔ 入库时机：三条链路**都不在采集阶段写库/落盘**（自动 M22 2026-10-13 / 手动 M20 2026-10-11）
+**自动**（`run_search`/`run_maps`）：采集那刻**不写库、不落盘**，只往 `STATE['rows']` 攒行；跑完（含中途
+停止）在 `finally` 里置 `STATE['pending_export']=True` → 用户核对、✕ 掉不要的行 → 点**「📥 导出 Excel」**
+（`POST /api/export_excel`）才 ①逐条 `db_upsert_customer` ②全部成功才 `_save_enrich_excel`。
+**手动**（`collect_from_html` → `_manual_row()`）：点「🏁 结束并生成 Excel」→ `_flush_manual_session()`
+跑**同一套骨架**。动机：填错国家/行业的那一轮可直接丢掉、不污染库。
+代价（用户拍板接受）：没点结束/导出就关工具＝丢一轮。
 - ⛔ **不变量：结果 Excel 里的行，客户库里必须都有**（否则下次采到同站又当新客户重复进表）→
   顺序必须**先库后表**、入库失败就**不产出** Excel；upsert 幂等 → 重试不重复。
-- ⛔ **本轮内去重靠 `_session_has_url(url)`**（比 `session_rows` 里 kind='added' 行的 `normalize_domain`）：
-  本轮采的还没入库，`db_has_customer()` 看不见（踩过：同一个站在一份表里出现 3 次）。
-- ⛔ **删除不再三条路都双删**，各按各的口径：
+- ⛔ **`pending_export` 那段必须放在 `finally`**：中途「■ 停止」在 `try` 里是 `return`，只有 `finally`
+  能保证置上 —— 否则点完停止就卡在 `running=True`（既不能导出也开不了新一轮）。用户拍板：停止＝保留为待导出。
+- ⛔ **`/api/export_feishu` 硬挡 `pending_export`**（用户拍板「强制先导出 Excel」）：飞书读的是「最新结果
+  文件」，本轮没导出 Excel 时它拿到的是**上一轮**的表 → 会把旧数据推进飞书。
+- ⛔ **本轮内去重靠内存**：自动 `_live_has_url()`（查 `STATE['rows']`）/ 手动 `_session_has_url()`
+  （查 `session_rows`），都按 `normalize_domain(url)` 比。本轮采的还没入库，`db_has_customer()` 看不见
+  （踩过：同一个站在一份表里出现 3 次）。**两条链路各有一个，别只加一边**。
+- ⛔ **行号发号器 `STATE['n_seq']`**（自动链路）：`n` 取它而**不是** `len(STATE['rows'])` ——
+  用户删掉中间一条后 `len` 会缩短，再采一条就撞号、前端 ✕ 指错行。`api_start` + 两个 worker 开头都清零。
+- ⛔ **墓碑 `STATE['rows_deleted']` 已整套下线**（M22）：落盘挪到 `/api/export_excel` 且数据源就是
+  `STATE['rows']`，删掉的行自然不在里面。旧「墓碑 + worker `finally` 按 `n` 过滤」不要再抄回来。
+- ⛔ **删除三条路各按各的口径**（判据只有一条：**那条行当前是不是真的在客户库里**）：
+  - **主页 `STATE['rows']`**（`/api/live/delete`，按 `n`）：**只删内存明细、绝不碰客户库** ——
+    `deleted` 恒 0、`backup` 恒 `''`。⛔ **不许**再调 `_delete_customer_and_backup()` /
+    `backup_db_before_delete()`（R12 有负向 AST 断言）。可删窗口 = **`(running and phase=='search')
+    or pending_export`**（最后一个正是「跑完先核对」）；`phase=='export'` 仍挡。
+    ⚠️ `n=True` bool→int 变 1 → 先 `isinstance(raw,bool)` 置 None。
   - `/manual`（按 `rid`）：**默认只删内存明细**；仅当 `kind='added'` **且** `db_has_customer(url)` 为真
     才调 `_delete_customer_and_backup()`（来源＝「已入库但结果 Excel 没写成功」的保留行）。
     **灰字 `kind='existed'` 行永不碰库**（用户明确要求）。`kind` 不能丢——去重/删除都靠它。
-  - 主页实时明细（`/api/live/delete`，按 `n`）：**仍双删**（自动链路当场落库）→ 记墓碑
-    `STATE['rows_deleted']`，worker `finally` 按 `n` 过滤后落盘；`n` 单调递增不复用，两个 worker
-    开头 + `api_start` 都清墓碑。⚠️ **只在 `running and phase=='search'` 时可删**。
-    ⚠️ `n=True` bool→int 变 1 → 先 `isinstance(raw,bool)` 置 None。
   - `/db`（按主键 `id`）→ `db_delete_customers_by_ids(ids)` 返回 `(删除数, 没找到的 id)`；
     单行 ✕ 与批量同接口；**不动 `MANUAL_STATE`**。
 - 三条删除路都挡空输入（`''`/`[]`/`None`/非法 → **返回 0**，绝不退化成 `DELETE FROM customers`），都不做 email 兜底。
 - `backup_db_before_delete()`：**必须 sqlite3 在线 `backup()`；禁 `shutil.copy2`**（WAL 漏 `-wal`）；300 秒节流；失败不阻断；目录由 `db_path()` 推导。
-- 文案：`popup.js`/`live-table.js` 按 `d.deleted ? '（客户库同步删掉 1 条）' : '（客户库里没有这条记录）'` 报；`/manual` 的 `modal.body` + `removeTitle` 已在 `ui/manual.html` 按本页语义改写（组件默认那套是给主页写的）。
+- 文案：`ui/live-table.js` 的**默认** `removeTitle`/确认框正文已按自动链路新语义重写（「还没写进客户库 /
+  不进本轮结果 Excel」，不再提「会同时从客户库删掉 + 先备份」），并新增 `cfg.removeMsg`：
+  **主页传自己的**（「客户库未动 —— 这些行还没入库」），`/manual` 用默认那套（`popup.js`/`query.html`
+  同理，按 `d.deleted` 报）；`/manual` 的 `modal.body` + `removeTitle` 在 `ui/manual.html` 里覆盖。
 
 ## ⛔ 多值分隔符：邮箱 `', '` / 电话 `' / '`（M21，2026-10-11）
 全链路邮箱一律逗号（用户点名），电话仍是斜杠（用户明确保留，**两者刻意不同**）。

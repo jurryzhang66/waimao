@@ -44,8 +44,8 @@ print('页面长度：', len(html))
 # ---- 1. 关键文案就位 ----
 expects = [
     '搜到一个就顺手抓它的联系方式（推荐）',
-    '搜到一个网站就立刻抓联系方式',
-    '本轮新增',
+    '先核对明细',        # 副标题里的口径：核对 → 点导出才入库写表
+    '本轮已采',          # 原「本轮新增」：还没入库，叫「新增」会误导
     '搜索中（每搜到一个网站就同步抓联系方式）',
     '按新增个数计',
     '补历史欠账.py',
@@ -54,11 +54,12 @@ for t in expects:
     assert t in html, f'页面缺少文案：{t}'
     print('  ✓ 文案存在：', t)
 
-# ---- 1b. 实时入库明细表必须就位（后端 rows → 前端 renderRows） ----
-live_must = ['liveBody', 'liveCount', 'liveEmpty', 'renderRows(d.rows)', '本轮已入库明细']
+# ---- 1b. 实时明细表必须就位（后端 rows → 前端 renderRows） ----
+live_must = ['liveBody', 'liveCount', 'liveEmpty', 'renderRows(d.rows)', '本轮采集明细',
+             'btnExportExcel', 'exportExcel', '/api/export_excel', 'pending_export']
 for t in live_must:
     assert t in html, f'实时明细表缺少元素/逻辑：{t}'
-print('  ✓ 实时入库明细表元素与渲染逻辑就位')
+print('  ✓ 实时明细表元素与渲染逻辑就位（含「📥 导出 Excel」按钮与 pending_export 门禁）')
 assert 'd.db_total' in html, 'dbCounter 未接入 /api/status 的实时库总数'
 print('  ✓ 库总数徽章已改为跟随轮询刷新')
 
@@ -327,11 +328,16 @@ print('  ✓ R4 入口已无任何已搬迁的模块级定义（AST 扫描 19 �
 #       但组件正文被注入到构建结果里 → **只有 _BUILT_SHA 变，_TMPL_SHA 不变**（这正说明两个哈希各管一半）。
 #    ⑧ ui/live-table.js 的「邮箱」列多邮箱分隔符 ' / ' → ', '（用户要求，全链路统一成逗号；电话不变）
 #       —— 同样只动组件正文，**只有 _BUILT_SHA 变**。
-#    那八次都是**故意**改的；以后凡是故意动 page.html 或 ui/live-table.js，下面两个字面量必须**一起**重算（漏一个就红）。
+#    ⑨ 主页加「📥 导出 Excel」按钮 + 「待核对」状态（2026-10-13）：自动链路改成「点导出才入库 + 落盘」，
+#       page.html 本体（按钮/文案/modal 口径）与注入的组件正文都动了 → **两个哈希一起变**。
+#    ⑩ ui/live-table.js 的**默认**确认框/✕ title 按新语义重写（「还没写进客户库 / 不进本轮结果 Excel」，
+#       去掉「会同时从客户库删掉它 + 先备份」），并新增 cfg.removeMsg；page.html 传入本页专用的 removeMsg
+#       → 两边都动了，**两个哈希一起变**（⑨⑩ 是同一轮改造的收尾）。
+#    那十次都是**故意**改的；以后凡是故意动 page.html 或 ui/live-table.js，下面两个字面量必须**一起**重算（漏一个就红）。
 #    这条断言剩余的价值 = 「哪次误格式化/误翻译把模板改变形，立刻能被抓到」。
 #    ⛔ 如果只是改了别的东西却发现这里红：先看 diff，别顺手把基线改掉。
-_TMPL_SHA = '569c5fd836c67a5b0044afe99082a85986ff1326b9b0925d95d7fe22d0d99d77'
-_BUILT_SHA = '6f5a45bcaa1de3756b3f06c96d5a6dff52389bd6c087e775e9b0eae3fdf344aa'
+_TMPL_SHA = '753e38af23fb60e947e3af2a5b6c6dc3e34b92b4239802d0d9bfe6cacb34479e'
+_BUILT_SHA = '19c8c77538d385ac13fe193d29e8e1b25afff6bfc767e77f74996e368227c005'
 import hashlib as _hl
 _raw = open(os.path.join(_root, 'ui', 'page.html'), encoding='utf-8').read()
 assert _hl.sha256(_raw.encode('utf-8')).hexdigest() == _TMPL_SHA, \
@@ -631,11 +637,12 @@ assert _sig_rs.parameters['country_limit'].default == 'none', \
 print('  ✓ R11 主页国家限定：四选一控件/默认 none/预览同位置齐备，'
       'COUNTRY_LIMITS 与 COUNTRIES 对齐，api_start 读并透传，run_search 有独立限定分支')
 
-# --- R12 主页「本轮已入库明细（实时）」逐行删除（✕ / 居中模态框 / 墓碑过滤 / 锁外慢 IO）---
+# --- R12 主页「本轮采集明细（实时 · 待核对）」逐行删除（✕ / 居中模态框 / 只删内存 / 锁外慢 IO）---
 # 这一支最怕三件事，且**全都是静默失效型**（不报错，只是删得不对）：
-#   ① 只删了内存明细、没删客户库 → 那条仍在库里，下次采到同站被判「已在客户库」永久跳过；
-#   ② 没记墓碑 → 内存删了，但**结果 Excel 是用 worker 自己的局部 all_rows 写的**，那条照样进表、
-#      飞书照样推（＝假删除，与 /manual ③ 的语义不一致）；
+#   ① 删明细时又去碰客户库 → 采集阶段这些行**还没入库**，碰库就是白删/白备份（旧实现的
+#      「双删 + 删前备份」漏回来就是这个症状；那套口径现在只留在 /manual 的一条例外分支上）；
+#   ② 该能删的时候不让删、不该删的时候放开删 → 「跑完先核对」是本轮的核心用法，判据只用 running
+#      的话跑完就整表只读；反过来「导出飞书阶段」又必须挡住（那时结果 Excel 早写好，删了是假删除）；
 #   ③ 把备份/删库写进了 with STATE_LOCK 块 → backup_db_before_delete() 内部会调 log()，
 #      而 log() 自己抢同一把**非可重入**的锁 → 必死锁（现场表现为页面卡死、要重启工具）。
 # ⑥ 之后表格与逐行删除都搬进了共享组件 ui/live-table.js，所以「逐字钉住」的那几条要跟着变：
@@ -661,6 +668,9 @@ assert _pg_thead == _mn_thead, \
 for _col in ('>行业</th>', '>国家</th>'):
     assert _col in _pg_thead, f'主页实时表缺列「{_col}」（/manual 有、主页没有就是分家）'
 for _need in ('id="liveDelModal"', 'class="livedel-btn"', 'data-n',
+              # ⛔ 本页删除只动内存明细（后端 deleted 恒 0）—— 必须传自己的 removeMsg，
+              #    否则会复用组件默认那句「客户库里没有这条记录」（那是 /manual 的口径，会误导）。
+              'removeMsg:',
               'function deleteLiveRow(', "'/api/live/delete'", 'fetch(endpoint',
               "getElementById('liveBody').addEventListener('click'",
               "closest('.livedel-btn')", 'function syncLiveEditable(',
@@ -677,22 +687,32 @@ for _need in ('id="liveDelModal"', 'class="livedel-btn"', 'data-n',
 for _bad in ('confirm(', '#delModal', '.row-del', '.live-del', '.modal-t', '.btn-danger', '.btn-plain'):
     assert _bad not in m.PAGE_HTML, \
         f'主页出现了属于 /manual 或 /db 的选择器「{_bad}」——共用样式会互相污染，请改用 livedel- 前缀'
-# 数据层：STATE 必须有墓碑字段，且接口要真的注册上
-assert 'rows_deleted' in m.STATE, "STATE 里没有 rows_deleted（删了却还在结果 Excel 里）"
+# 数据层：STATE 必须有「待导出」标志，且两个接口都要真的注册上
+assert 'pending_export' in m.STATE, "STATE 里没有 pending_export（采集完却不知道要等用户点导出）"
 assert 'api_live_delete' in m.app.view_functions, 'POST /api/live/delete 没有注册'
+assert 'api_export_excel' in m.app.view_functions, \
+    'POST /api/export_excel 没有注册（那本轮就没有「入库 + 落盘」的入口了）'
 # ⚠️ 只用 AST 取标识符/字符串常量，不做源码子串匹配（docstring 里同名会造成假绿/假红）
 _tree_live = _ast2.parse(_insp2.getsource(m.api_live_delete))
 _names_live = {n.id for n in _ast2.walk(_tree_live) if isinstance(n, _ast2.Name)}
 _names_live |= {n.attr for n in _ast2.walk(_tree_live) if isinstance(n, _ast2.Attribute)}
 _consts_live = {n.value for n in _ast2.walk(_tree_live)
                 if isinstance(n, _ast2.Constant) and isinstance(n.value, str)}
-for _need in ('STATE_LOCK', 'STATE', '_delete_customer_and_backup'):
+# ⚠️ `STATE['pending_export']` 里那个键是**字符串常量**（不是 ast.Name），由下面 _state_keys 那条断言覆盖
+for _need in ('STATE_LOCK', 'STATE'):
     assert _need in _names_live, f'api_live_delete 缺少：{_need}'
+# ⛔ 负向（2026-10-13 改造的核心）：自动链路改成「点导出才入库」后，删明细时**库里根本没有这些行**，
+#    所以 api_live_delete 绝不能再碰客户库 —— 碰了就说明旧的「双删 + 删前备份」逻辑漏回来了
+#    （会在库里白删/白备份，而且 backup 内部调 log() 还会撞非可重入锁）。
+assert '_delete_customer_and_backup' not in _names_live, \
+    'api_live_delete 又在删客户库了 —— 采集阶段这些行还没入库，不该碰库'
+assert 'backup_db_before_delete' not in _names_live, \
+    'api_live_delete 又去做删前备份了 —— 它已经不删库了'
 
 
 def _state_keys(tree):
     """取出 tree 里 `STATE['xxx']` 这类下标访问的字符串键。
-    ⚠️ 必须结构化取，不能按源码子串匹配：`STATE['rows_deleted']` 里的 rows_deleted 是
+    ⚠️ 必须结构化取，不能按源码子串匹配：`STATE['pending_export']` 里的 pending_export 是
        **字符串常量**（dict 键），既不在 ast.Name 里，靠整段源码 grep 又会被注释/docstring 骗到。"""
     _out = set()
     for _n in _ast2.walk(tree):
@@ -702,10 +722,10 @@ def _state_keys(tree):
     return _out
 
 
-assert 'rows_deleted' in _state_keys(_tree_live), \
-    'api_live_delete 没有把 n 记进墓碑（内存删了，结果 Excel 里还在）'
+assert 'pending_export' in _state_keys(_tree_live), \
+    'api_live_delete 没把「待导出」也算进可删窗口（跑完就删不了了 —— 而核对恰恰是在跑完之后）'
 assert 'phase' in _state_keys(_tree_live) and 'search' in _consts_live, \
-    "api_live_delete 没有按 phase == 'search' 判定（导出飞书阶段会误删：库删了、表早写好了）"
+    "api_live_delete 没有按 phase == 'search' 判定（导出飞书阶段会误删：库里删了、表早就写好了）"
 # 慢 IO 必须在锁外：把「删库那半边」的调用按「祖先链里有没有 with」分成两组 —— 有一头进了 with
 # 块就是死锁隐患（backup 内部调 log()，而 log() 抢同一把非可重入的锁）。
 # ⑥ 之后这段是两个接口**共用**的 helper，所以两个接口都要过一遍 —— 顺带让 manual 那条链路也拿到
@@ -729,8 +749,8 @@ def _slow_io_split(tree):
     return _free, _locked
 
 
-for _label, _fn in (('api_live_delete', m.api_live_delete),
-                    ('api_manual_session_delete', m.api_manual_session_delete)):
+# ⑦ 2026-10-13 起 api_live_delete 不再删库（采集阶段根本没入库），只剩 /manual 那条路还走 helper。
+for _label, _fn in (('api_manual_session_delete', m.api_manual_session_delete),):
     _free, _locked = _slow_io_split(_ast2.parse(_insp2.getsource(_fn)))
     assert not _locked, \
         f'{_label}: 慢 IO 被写进了 with 块内（backup 内部会调 log()，STATE_LOCK 非可重入 → 必死锁）：{_locked}'
@@ -744,15 +764,40 @@ assert sorted(_helper_calls) == ['backup_db_before_delete', 'db_delete_customer'
     f'_delete_customer_and_backup 该做的两件事不齐：{_helper_calls}'
 assert not [n for n in _ast2.walk(_tree_helper) if isinstance(n, _ast2.With)], \
     '共用删库半边里出现了 with 块 —— 它必须留在锁外（拿 STATE_LOCK 会与 log() 互锁）'
-# 两个 worker 的 finally 都必须引用墓碑，否则「网页搜索」或「地图」有一条链路仍会把删掉的行落盘
+# 两个 worker 的 finally 都必须进入「待导出」状态（而不是自动落盘）——
+# 漏掉任何一条链路，那条链路的用户看到的仍是「跑完自动生成 Excel」的旧行为。
 _tree_maps = _ast2.parse(_insp2.getsource(m.run_maps))
-assert 'rows_deleted' in _state_keys(_tree_rs), \
-    'run_search 没碰 STATE[rows_deleted]（落盘前不过滤 → 删掉的行仍会进结果 Excel）'
-assert 'rows_deleted' in _state_keys(_tree_maps), \
-    'run_maps 没碰 STATE[rows_deleted]（地图链路落盘前不过滤 → 删掉的行仍会进结果 Excel）'
-print('  ✓ R12 主页实时明细逐行删除：✕ 列/居中模态框/事件委托齐备（表格与确认框来自共享组件 '
-      'ui/live-table.js，两页表头逐字一致、含「行业 / 国家」），api_live_delete 按 phase==search '
-      '判定，两个删除接口的删库半边都走共享 helper 且都在锁外，墓碑进了 STATE 与两个 worker 的落盘过滤')
+for _lbl, _tree in (('run_search', _tree_rs), ('run_maps', _tree_maps)):
+    assert 'pending_export' in _state_keys(_tree), \
+        f'{_lbl} 的 finally 没置 STATE[pending_export]（跑完不进「待核对」状态 → 用户没法先删再导出）'
+    # ⛔ 负向：采集链路**不许**自己写结果 Excel、也不许自己写客户库 ——
+    #    那两件事都挪到 /api/export_excel（用户点「📥 导出 Excel」的那一刻）了。
+    _calls_w = [c.func.id for c in _ast2.walk(_tree)
+                if isinstance(c, _ast2.Call) and isinstance(c.func, _ast2.Name)]
+    assert '_save_enrich_excel' not in _calls_w, \
+        f'{_lbl} 又在采集阶段落盘了 —— 只有 /api/export_excel 能写结果 Excel'
+    assert 'db_upsert_customer' not in _calls_w, \
+        f'{_lbl} 又在采集时写客户库了 —— 只有 /api/export_excel 能写库'
+    # 本轮内去重必须保留（本轮采的还没入库，db_has_customer 看不见它们）
+    assert '_live_has_url' in _calls_w, \
+        f'{_lbl} 丢了本轮内去重（_live_has_url）—— 同一个站会在结果表里重复出现'
+# /api/export_excel：唯一的「写库 + 落盘」入口，两件事必须都在
+_tree_x = _ast2.parse(_insp2.getsource(m.api_export_excel))
+_x_calls = [c.func.id for c in _ast2.walk(_tree_x)
+            if isinstance(c, _ast2.Call) and isinstance(c.func, _ast2.Name)]
+assert 'db_upsert_customer' in _x_calls and '_save_enrich_excel' in _x_calls, \
+    f'/api/export_excel 该做的两件事不齐（先入库 + 再落盘）：{_x_calls}'
+assert 'pending_export' in _state_keys(_tree_x), \
+    '/api/export_excel 没有按 pending_export 门禁（会凭空导出一份空表）'
+# 「导出到飞书」必须挡住「本轮还没导出 Excel」的状态：飞书读的是「最新结果文件」，
+# 不挡的话它会把**上一轮**的表推进飞书。
+_tree_fs = _ast2.parse(_insp2.getsource(m.api_export_feishu))
+assert 'pending_export' in _state_keys(_tree_fs), \
+    'api_export_feishu 没有挡「本轮还没导出 Excel」—— 会把上一轮的表推进飞书'
+print('  ✓ R12 主页明细逐行删除：✕ 列/居中模态框/事件委托齐备（表格与确认框来自共享组件 '
+      'ui/live-table.js，两页表头逐字一致、含「行业 / 国家」），api_live_delete 只删内存、'
+      '可删窗口含 pending_export；两个 worker 都不再自动写库/落盘，唯一的入库+落盘入口是 '
+      '/api/export_excel，且 /api/export_feishu 会挡住「还没导出 Excel」的状态')
 
 # --- R13 主页「1. 本次任务采集数量」（强必填 / 编号整轮顺延 / 后端不许有缺省值）---
 # 用户 2026-10-02 拍板：把采集数量从「参数」卡里提出来，做成排在「目标国家」之前的第 1 张卡，

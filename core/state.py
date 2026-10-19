@@ -26,16 +26,22 @@ STATE = {
     'phase': '',           # search / export
     'logs': [],
     'result_count': 0,
-    'rows': [],            # 本轮已入库明细（供前端实时表格显示：公司/域名/邮箱/电话/评分）
-    # 本轮被前端「📥 本轮已入库明细（实时）」逐行删掉的 n（墓碑）。
-    # 结果 Excel 是在 worker 的 finally 里用**它自己的局部 all_rows**写出的，与 STATE['rows']
-    # 不是同一个列表 —— 只删 STATE['rows'] 的话那条仍会进 Excel（＝假删除）。
-    # 所以删除时在这里记一笔，落盘前按 n 过滤掉。没人删过时这个过滤是**恒等**的（零影响）。
-    # 用 list 不用 set：保持 JSON 友好。清零点见 api_start 与两个 worker 的开头。
-    'rows_deleted': [],
+    # 本轮采集明细（供前端实时表格显示：公司/域名/邮箱/电话/评分/行业/国家）。
+    # ⛔ 自动链路（run_search / run_maps）**采集时不写客户库**了（2026-10-13）：
+    #    这些行一直只在内存里，直到用户点「📥 导出 Excel」才由 /api/export_excel 逐条入库 + 落盘。
+    #    所以元素必须是**完整 11 键行**（含 snippet / formula，`_row10()` 落盘要用），
+    #    再加一个本轮内唯一的 `n`（前端 ✕ 用它定位）。它就是「待导出的那一份」，
+    #    **不需要再维护第二个列表** —— 这也是原来那套墓碑机制能整条下线的原因。
+    'rows': [],
     'done': False,
     'output': '',
     'stop': False,
+    # ---- 「待核对 / 待导出」状态（自动链路，2026-10-13）----
+    # 采集跑完（含中途点「停止」）不再自动写结果 Excel，只把这里置 True：
+    # 用户先核对明细、删掉不想要的行，再点「📥 导出 Excel」才 ① 逐条入库 ② 写表。
+    # 同一时刻最多一轮待导出；api_start 重置、/api/export_excel 成功后清掉。
+    'pending_export': False,
+    'export_error': '',    # 导出失败原因（前端红字提示；数据保留，可直接重试）
 }
 STATE_LOCK = threading.Lock()
 
