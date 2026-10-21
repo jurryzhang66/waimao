@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """真机校验「谷歌地图名录」这个新数据源的界面切换与预览：
-  A. 切到地图模式 → 城市框出现、翻页/排除词隐藏、地图说明出现
-  B. 「5. 关键词组合预览」显示完整可点的地图 URL，且与后端 maps_search_url() 完全一致
+  A. 切到地图模式 → 城市框出现、翻页/平台排除词隐藏、说明出现；
+     仍生效的两组过滤（#chinaFilters / #contactFilters）**必须可见**
+  B. 「6. 关键词组合预览」显示完整可点的地图 URL，且与后端 maps_search_url() 完全一致
   C. 切回网页搜索 → 恢复原界面
 起临时 Flask 实例 + Chrome，不联网、不碰真实客户库。"""
 import importlib.util
@@ -45,18 +46,28 @@ try:
       r.checked = true; r.dispatchEvent(new Event('change'));
     """)
     time.sleep(0.4)
+    # ⚠️ 用 getComputedStyle 而不是读 inline style：外层被藏时 inline 仍是 'block'，
+    #    只看 inline 抓不到「把整组过滤连带藏掉」这种错。
+    # ⚠️ #chinaFilters / #contactFilters 是**仍生效**的两组（那 13 项里多数在结果阶段照常判断，
+    #    联系方式在地图链路更是直接就判），不许被 onSource() 连带隐藏。
     disp = page.run_js("""
-      const g = id => document.getElementById(id).style.display;
+      const g = id => getComputedStyle(document.getElementById(id)).display;
+      const vis = id => { const el = document.getElementById(id); return !!el && el.offsetParent !== null; };
       return {city:g('mapsCityWrap'), note:g('mapsNote'), pages:g('pagesWrap'),
-              excl:g('excludesWrap'), cond:g('condMapsHint'), china:g('chinaMapsHint'),
-              limit:g('countryLimit')};
+              excl:g('excludesWrap'), cond:g('condMapsHint'), hint:g('chinaMapsHint'),
+              limit:g('countryLimit'),
+              china: g('chinaFilters'), contact: g('contactFilters'),
+              chinaVis: vis('chinaFilters'), contactVis: vis('contactFilters')};
     """)
     print('地图模式下各区块 display：', disp)
     assert disp['city'] == 'block' and disp['note'] == 'block', '地图模式没显示城市框/说明'
-    assert disp['pages'] == 'none' and disp['excl'] == 'none', '地图模式应隐藏翻页与排除词'
-    assert disp['cond'] == 'block' and disp['china'] == 'block', '地图模式没显示条件/中国过滤提示'
+    assert disp['pages'] == 'none' and disp['excl'] == 'none', '地图模式应隐藏翻页与平台排除词'
+    assert disp['cond'] == 'block' and disp['hint'] == 'block', '地图模式没显示条件/过滤提示'
     # 国家限定只服务网页搜索 → 地图模式整块收起（它靠「城市名 + 视野锁」定位，已是另一套）
     assert disp['limit'] == 'none', '地图模式应把「国家限定」整块收起'
+    assert disp['china'] != 'none' and disp['contact'] != 'none' \
+        and disp['chinaVis'] and disp['contactVis'], \
+        f'地图模式把仍生效的两组过滤藏了（域名组 / 联系方式组）：{disp}'
 
     # 输入城市 → 预览应重绘
     page.run_js("""
@@ -102,12 +113,15 @@ try:
     """)
     time.sleep(0.4)
     back = page.run_js("""
-      const g = id => document.getElementById(id).style.display;
-      return {city:g('mapsCityWrap'), pages:g('pagesWrap'), excl:g('excludesWrap')};
+      const g = id => getComputedStyle(document.getElementById(id)).display;
+      return {city:g('mapsCityWrap'), pages:g('pagesWrap'), excl:g('excludesWrap'),
+              china:g('chinaFilters'), contact:g('contactFilters')};
     """)
     print('切回网页搜索后：', back)
     assert back['city'] == 'none' and back['pages'] == 'block' and back['excl'] == 'block', \
         '切回网页搜索没恢复界面'
+    assert back['china'] != 'none' and back['contact'] != 'none', \
+        f'切回网页搜索后两组过滤应仍可见：{back}'
     s2 = page.run_js("return document.getElementById('comboSummary').textContent;")
     assert '条地图查询' not in s2, '切回后预览没回到网页搜索文案'
     print('  ✓ 切回网页搜索：界面与预览均已还原')

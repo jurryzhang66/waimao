@@ -13,7 +13,8 @@ import os
 import re
 
 from core.config import (CHINA_FILTER_OPTIONS, COND_CATEGORY, COND_LANGS, COND_ROLES, CONDITIONS,
-                         COUNTRIES, COUNTRY_CENTERS, COUNTRY_LIMITS, EXCLUDE_OPTIONS, cond_template)
+                         CONTACT_FILTER_KEYS, COUNTRIES, COUNTRY_CENTERS, COUNTRY_LIMITS,
+                         EXCLUDE_OPTIONS, cond_template)
 from core.paths import _app_dir
 
 # 模板文件：<项目根>/ui/page.html
@@ -121,7 +122,11 @@ def _build_page():
     # 和预览里显示国家筛选参数（gl=fr&hl=fr）
     counts_js = [(k, name, k == 'us', hl, gl) for k, name, gl, hl in COUNTRIES]
     excls_js = [(k, v, d) for k, v, d in EXCLUDE_OPTIONS]
-    china_js = [(k, q, label, desc) for k, q, label, desc in CHINA_FILTER_OPTIONS]
+    # 第 5 位 = 是否属于「联系方式过滤」卡（前端按它把同一份 17 项分流到两个容器）。
+    # ⚠️ 刻意**不新增占位符**：多一份 JSON 就多一处漂移点（加 key 忘同步另一份）。
+    #    分组真源在 core.config.CONTACT_FILTER_KEYS，页面只认这个布尔。
+    china_js = [(k, q, label, desc, k in CONTACT_FILTER_KEYS)
+                for k, q, label, desc in CHINA_FILTER_OPTIONS]
     # 国家代码 → [纬度, 经度]：给前端拼地图搜索 URL 用，与后端 COUNTRY_CENTERS 同源
     centers_js = {k: [lat, lng] for k, (lat, lng) in COUNTRY_CENTERS.items()}
     # 国家代码 → {cr, site}：给前端「国家限定」预览用，与后端 COUNTRY_LIMITS 同源。

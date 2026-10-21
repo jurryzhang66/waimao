@@ -24,6 +24,10 @@ COUNTRY_STANDARD = {'沙特': '沙特阿拉伯', '加拿大(法语)': '加拿大
 STATE = {
     'running': False,
     'phase': '',           # search / export
+    # 本轮数据源：'google' / 'maps'（api_start 写入）。/api/status 会带给页面 ——
+    # ⚠️ 手机 / 平板打开页面时**没有经过 start()**，收不到本地的 RUN_SOURCE，
+    #    只能靠这里回传，否则地图任务会显示成「搜索中 / 个网站」。
+    'source': 'google',
     'logs': [],
     'result_count': 0,
     # 本轮采集明细（供前端实时表格显示：公司/域名/邮箱/电话/评分/行业/国家）。
@@ -42,6 +46,11 @@ STATE = {
     # 同一时刻最多一轮待导出；api_start 重置、/api/export_excel 成功后清掉。
     'pending_export': False,
     'export_error': '',    # 导出失败原因（前端红字提示；数据保留，可直接重试）
+    # 轮次序号（M28）：凡是「清空 logs 开新一轮」的地方（api_start / api_export_feishu）
+    # 都要 +1。/api/status 回传给页面 —— 前端靠它判断「日志被清过了」，把本地的日志游标
+    # `since` 归零。没有它时，另一台设备（手机）的 since 会停在上一轮的大数字，
+    # 后端切片 `logs[since:]` 永远为空 → 日志区永久空白，且不报任何错。
+    'round': 0,
 }
 STATE_LOCK = threading.Lock()
 

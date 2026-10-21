@@ -33,6 +33,11 @@ button { border:none; border-radius:8px; padding:12px 24px; font-size:15px; curs
 .kw-lab { margin:0; }
 .kw-lab input { width:14px; height:14px; }
 .btn-mini { background:#f1f3f4; color:#333; border:1px solid #ccc; border-radius:6px; padding:8px 14px; font-size:13px; cursor:pointer; font-weight:500; }
+/* 过滤项：右侧并排显示该项对应的搜索语法（.syn）；query 为空的项标「不进搜索词」（.syn-off）。
+   ⚠️ 只给过滤项加 .filter-row，别改 label.cond 的全局 flex-wrap —— manual.html 也在用它。 */
+.filter-row { flex-wrap:wrap; align-items:flex-start; }
+.syn { margin-left:auto; font-family:Consolas,monospace; font-size:12px; color:#5f6368; background:#f1f3f4; border-radius:4px; padding:1px 6px; word-break:break-all; }
+.syn-off { color:#b26a00; background:#fff7e6; }
 button:disabled { background:#ccc; cursor:not-allowed; }
 .status { margin-top:12px; font-size:14px; color:#555; }
 .log { background:#1e1e1e; color:#d4d4d4; border-radius:10px; padding:16px; font-family:Consolas,monospace; font-size:13px; height:420px; overflow-y:auto; white-space:pre-wrap; line-height:1.7; margin-top:16px; }
@@ -71,6 +76,12 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
 .tag-r1 { background:#fdeceb; color:#d93025; }
 .tag-r2 { background:#eef3fe; color:#1a73e8; }
 .tag-r3 { background:#f1f3f4; color:#777; }
+/* 「只标记不删除」的徽章（自定义搜索词模式下命中联系方式过滤时出现）。
+   与 .tag-r 区分颜色（黄底），让人一眼看出是「警告」而不是评级。
+   ⚠️ 只有主页自动链路会产生它；/manual 与 /db 共用这份样式但不会渲染这个 span。 */
+.live-mark { display:inline-block; margin-left:5px; padding:1px 6px; border-radius:9px;
+             background:#fef3d7; color:#8a5a00; font-size:11px; font-weight:500;
+             vertical-align:middle; white-space:nowrap; }
 /* 顶栏导航：主页 → 手动采集页 / 客户库查询。
    ⚠️ 这段样式会被 _page_style() 一并注入 manual.html / query.html（它们共用本 <style>），
       但 .nav / .nav-a 只在主页用到，副页面里是无害的死规则。 */
@@ -78,7 +89,7 @@ table.live tr.row-new { animation: rowIn .9s ease-out; }
 .nav-a { display:inline-block; background:#fff; color:#1a73e8; border:1px solid #dbe4f0; border-radius:8px;
   padding:8px 14px; font-size:13px; font-weight:600; text-decoration:none; }
 .nav-a:hover { background:#e8f0fe; border-color:#1a73e8; }
-/* 自定义搜索词卡片（第 7 卡）。⚠️ 与上面 .nav 同理：这几条也会被注入副页面，
+/* 自定义搜索词卡片（第 8 卡）。⚠️ 与上面 .nav 同理：这几条也会被注入副页面，
    但 .raw-card / .raw-off 只在主页用到，在那两页是无害的死规则 → 不必另开 <style>
    （更不许在本 <style> 之前插新块：_STYLE_RE.search() 只取第一个）。 */
 .raw-card textarea { width:100%; box-sizing:border-box; font-family:inherit; font-size:13px;
@@ -115,6 +126,14 @@ th.livedel-col, td.livedel-cell { width:38px; text-align:center; }
   padding:8px 18px; font-size:13px; font-weight:600; cursor:pointer; }
 .livedel-danger:hover { background:#c5221f; }
 .livedel-danger:disabled { background:#e8a5a1; border-color:#e8a5a1; cursor:not-allowed; }
+</style>
+<style>
+/* ---- 主页专有样式（M28）----
+   ⛔ 这个块必须留在**第一个** style 之后，而且只能放「主页才用到」的规则：
+      core/ui.py 的 _STYLE_RE.search() 只抠**第一块**注入 /manual 与 /db —— 插到前面会让
+      那两页拿到这一小段、丢掉全部公共样式（页面静默变丑，不报任何错）。 */
+.upd { margin:-4px 0 0; font-size:12px; color:#8a94a6; line-height:1.6; min-height:16px; }
+.upd.bad { color:#b26a00; }
 </style>
 </head>
 <body>
@@ -199,16 +218,21 @@ th.livedel-col, td.livedel-cell { width:38px; text-align:center; }
         <div style="margin:12px 0 4px; font-size:14px;">搜索方式：</div>
         <label class="cond"><input type="checkbox" id="autoEnrich" checked> 搜到一个就顺手抓它的联系方式（推荐）</label>
         <div class="note">勾选：每搜到一个新客户，立刻访问它抓邮箱/电话并评分，抓完（或确认抓不到）再搜下一个，凑够数量即停。每条会多花几秒，但不用等全部搜完；结果文件在整轮结束时一次写出。<br>不勾：只收集网站线索，邮箱电话留空，速度快，适合先铺量，稍后再双击「补历史欠账.py」批量补。<br>（地图模式下：地图本来就给电话和地址，不勾就是不再访问官网补邮箱。）</div>
+      <!-- 域名过滤：原「排除条件」与「中国商家过滤」合并成一块（同属「要把什么站挡掉」），
+           再按「域名 / 联系方式」拆成两张卡 —— 联系方式那 4 项搬到了下面的「7. 联系方式过滤」。
+           ⚠️ 区块标题与批量按钮必须放在 #excludesWrap **外面**：那一块在地图模式下整体收起
+              （没有查询公式），按钮放里面会跟着一起消失。 -->
+      <div style="margin:12px 0 4px; font-size:14px;">域名过滤（默认全部勾选，可逐项关闭）</div>
+      <div class="note" style="margin:0 0 6px;">含平台词 / 地址 / 同行 / 名录站等网站信号；每项右侧是该选项对应的搜索语法。</div>
+      <div style="display:flex; gap:8px; margin-bottom:6px;">
+        <button type="button" class="btn-mini" onclick="toggleDomainFilters(true)">全部勾选</button>
+        <button type="button" class="btn-mini" onclick="toggleDomainFilters(false)">全部取消</button>
+      </div>
       <div id="excludesWrap">
-        <div style="margin:12px 0 4px; font-size:14px;">排除条件（勾选要排除的，默认全排除）</div>
+        <div style="margin:6px 0 4px; font-size:13px; color:#666;">平台排除词（仅标准网页搜索追加到查询里）</div>
       <div id="excludes"></div>
       </div>
-      <div style="margin:12px 0 4px; font-size:14px;">中国商家过滤（默认全部勾选，可逐项关闭）</div>
-      <div style="display:flex; gap:8px; margin-bottom:6px;">
-        <button type="button" class="btn-mini" onclick="toggleChinaFilters(true)">全部勾选</button>
-        <button type="button" class="btn-mini" onclick="toggleChinaFilters(false)">全部取消</button>
-      </div>
-      <div id="chinaMapsHint" class="note" style="display:none;">地图模式没有查询公式，所以「排除 China manufacturer」这类查询词选项不生效；但「中文地址 / +86 电话 / 平台域名」这些在结果上判断的项照常生效</div>
+      <div id="chinaMapsHint" class="note" style="display:none;">地图模式没有查询公式，上面收起的平台排除词不会追加到查询里；本卡其余各项仍按域名 / 页面内容在结果阶段判断。<br>电话 / 微信 / QQ / 邮箱的判断已单独拆到「7. 联系方式过滤」，它们在地图模式下同样生效。</div>
       <div id="chinaFilters"></div>
       <div class="note">⚠️ 搜索中会弹出 Chrome 窗口，遇到谷歌验证码请在浏览器里手动通过</div>
     </div>
@@ -224,18 +248,32 @@ th.livedel-col, td.livedel-cell { width:38px; text-align:center; }
     </div>
   </div>
 
-  <!-- 自定义搜索词（第 7 卡）：完全原样发给谷歌 —— 不套条件模板、不自动加引号、不拼排除词，
+  <!-- 联系方式过滤（第 7 卡）：从原「中国商家过滤」里拆出来的 4 项（+86 电话 / 微信 / QQ / .cn 邮箱）。
+       这 4 项的搜索公式为空 —— 不进搜索词、不影响上面的组合预览，只在结果 / 联系方式上判断。
+       所以放在预览之后自成一张整行卡：它改的是筛选结果，不改查询本身。 -->
+  <div class="card" style="margin-bottom:16px;">
+    <h3>7. 联系方式过滤（默认全部勾选）</h3>
+    <div style="display:flex; gap:8px; margin-bottom:6px;">
+      <button type="button" class="btn-mini" onclick="toggleContactFilters(true)">全部勾选</button>
+      <button type="button" class="btn-mini" onclick="toggleContactFilters(false)">全部取消</button>
+    </div>
+    <div id="contactFilters"></div>
+    <div class="note">这 4 项<b>不写进搜索词</b>，只在抓到页面内容 / 联系方式后判断，所以不影响上面的关键词组合预览；标准网页搜索与谷歌地图都生效。<br>⚠️ 邮箱 .cn 与 +86 电话通常要等「顺手抓联系方式」抓到之后才判得出来（不勾它时这两项基本命不中）；地图会直接给电话，所以地图模式下 +86 也能命中。<br>🏷️ <b>自定义搜索词模式下命中只做标记、不删行</b>（明细里显示徽章、导出时写进「摘要」列）；标准模式与地图模式命中仍会整条丢弃。</div>
+  </div>
+
+  <!-- 自定义搜索词（第 8 卡）：完全原样发给谷歌 —— 不套条件模板、不自动加引号、不拼排除词，
        也不做中国商家过滤；与上面的标准模式互斥（这栏有内容就只跑这里）。
        目标国家只用于给采到的数据打「国家」标记，不会写进搜索词。 -->
   <div class="card raw-card" id="rawCard">
-    <h3>7. 自定义搜索词（原样搜，不套上面的条件）</h3>
+    <h3>8. 自定义搜索词（原样搜，不套上面的条件）</h3>
     <textarea id="rawQueries" rows="4" placeholder="一行一条，原样发给谷歌。例：
 cat litter grossiste -site:.cn
 &quot;pet food&quot; importer Lyon"></textarea>
     <div class="note">
       这里写什么就<b>原样搜什么</b>：不自动加双引号、不套上面的条件词、不拼排除词，也不做中国商家过滤。<br>
       只要这一栏有内容，本轮就<b>只跑这里</b>，上面第 4 步勾选的条件会被忽略；清空它即恢复正常模式。<br>
-      目标国家（第 2 步）只用于给采到的数据打「国家」标记，<b>不会</b>写进你的搜索词。
+      目标国家（第 2 步）只用于给采到的数据打「国家」标记，<b>不会</b>写进你的搜索词。<br>
+      <b>自定义模式下的两步过滤</b>：① 第 5 卡「域名过滤」勾选的平台域名（amazon / ebay / alibaba / 1688 / .cn 等）会在<b>抓取前</b>就挡掉，不打开详情页、不抓联系方式；② 第 7 卡「联系方式过滤」的 4 项在抓到联系方式后判断，命中<b>只做标记、不删行</b>。
     </div>
     <div class="note raw-off" id="rawMapsHint" style="display:none;">
       ⚠️ 地图模式不使用自定义搜索词：它走「关键词库 + 城市 + 身份词」。切回谷歌网页搜索即可使用。
@@ -251,6 +289,9 @@ cat litter grossiste -site:.cn
       <span class="counter" id="dbCounter" style="background:#eef8ee;color:#188038;">客户库加载中...</span>
   </div>
   <div class="status" id="status"></div>
+  <!-- 「更新于 N 秒前」（M28）：⛔ 必须是 #status 的**兄弟**节点，不能放进 #status ——
+       那个 div 每次轮询都被 innerHTML 整块重写，放进去会立刻被覆盖掉。 -->
+  <div class="upd" id="updatedAt"></div>
 
   <div class="card live-wrap" id="liveWrap">
     <div class="live-head">
@@ -294,7 +335,46 @@ cat litter grossiste -site:.cn
 <script>LIVE_TABLE_JS_PLACEHOLDER</script>
 
 <script>
-let since = 0, polling = null;
+let since = 0;            // 日志增量游标（后端返回 total_logs，前端只取 logs[since:]）
+
+// ---------- 心跳调度（M28）----------
+// 全页**只有一个**定时器：setTimeout 自调度链，每拍决定「这一拍该不该发请求」。
+// 顺手用它驱动「更新于 N 秒前」—— 不要再为那个小字另开一个 setInterval。
+const POLL_TICK_MS         = 1000;    // 定时器节拍（也是「更新于」的刷新精度）
+const POLL_GAP_RUN_DESKTOP = 1000;    // 运行中 · 电脑
+const POLL_GAP_RUN_MOBILE  = 2000;    // 运行中 · 手机 / 平板
+const POLL_GAP_HIDDEN      = 10000;   // 页面在后台：降频，但**绝不彻底停摆**（见下）
+const POLL_BACKOFF_MIN     = 2000;    // 连续失败退避起点
+const POLL_BACKOFF_MAX     = 15000;   // 退避上限
+// ⛔ 没有「空闲间隔」这个常量：**后端没在跑任务时链会彻底停掉、一个请求都不发**（用户 2026-10-20 拍板：
+//    「不跑任务的时候，不要刷新」）。别再加空闲心跳 —— 那是白耗流量和电。
+//    空闲后要重新开始轮询只有三个入口：① 本机点了开始 / 导出 ② 切回前台 / 网络恢复（各补一次，
+//    拉到 running 为真就自动续上 1s 节奏）③ 刷新页面（进页面拉一次）。
+
+// 设备类型：只在加载时算一次。
+// ⛔ 不许拿 window.innerWidth 当主判据 —— 无头 / 窄窗口 Chrome 会被判成「手机」，
+//    运行中节奏变 2s，回归里等 2.2s 的断言就假红；真机上判反则是白白多耗一倍电。
+//    判不出来一律当电脑（宁可多拉一次，也不要漏更新）。
+const POLL_IS_MOBILE = (function(){
+  try {
+    const ua = navigator.userAgent || '';
+    if (navigator.maxTouchPoints > 1 && /Macintosh/.test(ua)) return true;   // iPadOS 伪装成 Mac
+    if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) return true;
+    return /Android|iPhone|iPad|iPod|Windows Phone|Mobile/i.test(ua);
+  } catch(e){ return false; }
+})();
+
+let pollTimer   = null;    // setTimeout 句柄（取代原来的 polling）
+let pollStarted = false;   // 调度链是否已启动（幂等：多处调用也只挂一条链）
+let pollDueAt   = 0;       // 下一次允许发请求的时刻戳（0 = 立刻）
+let pollBusy    = false;   // 请求在飞：这一拍不发（防重入，手机慢网不会堆请求）
+let pollFails   = 0;       // 连续失败次数（退避用，成功即清零）
+let pollLastOk  = 0;       // 上次成功拿到 /api/status 的时刻（「更新于」用）
+let pollRunning = false;   // 上一帧后端是否在跑（决定间隔）
+let pollRefetch = false;   // 换轮补拉：本帧 logs 是用旧 since 切的残片
+let lastRound   = null;    // 已见过的最新轮次；null = 下一帧只采纳、不清屏
+let pollWatched = false;   // 前台/网络事件是否已绑（防重复订阅）
+
 // 现在能不能删 = 「采集进行中」**或**「采集已结束、待核对还没导出」（后者是这次改造的核心用法：
 // 跑完先核对、删掉不要的，再点导出）。导出飞书阶段不算 —— 那时结果 Excel 早写好了，删了也是假的。
 // 共享组件不自己猜这个状态，每次 syncLiveEditable() 都回头读这个变量。
@@ -352,10 +432,38 @@ function ratingCls(r){
 async function poll(){
   const r = await fetch('/api/status?since=' + since);
   const d = await r.json();
-  if (d.logs && d.logs.length){
+  // ---------- 轮次自愈（M28）----------
+  // api_start / api_export_feishu 会 logs=[] 开新一轮，但只有「点按钮的那台设备」知道，
+  // 别的设备（手机）的 since 还停在上一轮的大数字 → 后端 logs[since:] 永远为空 → 日志区
+  // 永久空白且不报错。后端用 STATE['round'] 报轮次，前端发现变了就把 since 归零。
+  // ⛔ lastRound 的首帧必须走「只采纳、不清屏」那一支：写成 round !== lastRound 会因
+  //    null !== 0 恒真 → 每帧清空日志框 → 日志区永远空白（最隐蔽的一条）。
+  const round = (d.round == null ? 0 : d.round);
+  let roundChanged = false;
+  if (lastRound === null){
+    lastRound = round;
+  } else if (round !== lastRound){
+    lastRound = round;
+    roundChanged = true;
+    since = 0;
+    clearLogBox();                 // 顺序：先归零 → 再清框 → 再重置表格游标 → 最后才追加新日志
+    liveTable.reset();
+  } else if (d.total_logs < since){
+    // 兜底：轮次没变，但日志确实被清过（老进程 / 别处清日志）。
+    since = 0;
+    clearLogBox();
+    liveTable.reset();
+  }
+  // 数据源以后端为准：手机 / 平板打开页面时**没走过 start()**，本地 RUN_SOURCE 是默认值，
+  // 只有靠后端回传才能把「搜索中 / 地图采集中」和「个网站 / 个商家」说对。
+  if (d.source) RUN_SOURCE = d.source;
+  // ⛔ 换轮那一帧的 d.logs 是用**旧 since**切出来的残片，直接追加会永久丢掉前 N 行；
+  //    那种情况只打标 pollRefetch，让调度器落地后立刻用 since=0 再拉一次。
+  if (!roundChanged && d.logs && d.logs.length){
     for (const l of d.logs) logBox(l);
     since = d.total_logs;
   }
+  if (roundChanged) pollRefetch = true;
   // ⚠️ 这是「本轮已采到的候选数」，**不是已入库数** —— 自动链路改成「点『📥 导出 Excel』才入库」
   //    之后，采集阶段客户库里一条都没有，叫「新增」会误导。
   document.getElementById('counter').textContent =
@@ -371,8 +479,10 @@ async function poll(){
     document.getElementById('dbCounter').textContent = 'SQLite 已存 ' + d.db_total + ' 条（已评分 ' +
       (d.db_verified == null ? '-' : d.db_verified) + '）';
   }
-  if (!d.running && d.done && polling){
-    clearInterval(polling); polling = null;
+  // ⚠️ 这里原来还带一个 `&& polling` 条件，导致**首次** poll（polling 还是 null，
+  //    手机 / 平板刚打开页面就是这种情况）永远渲染不出「完成 / 待核对」状态行。
+  //    现在也不在完成时掐定时器：交给调度器判（`shouldKeepTicking()` 为假 → 自己停链）。
+  if (!d.running && d.done){
     setButtons(false);
     const s = document.getElementById('status');
     if (d.pending_export){
@@ -397,6 +507,178 @@ async function poll(){
                     : d.phase === 'search' ? '搜索中（每搜到一个网站就同步抓联系方式）…'
                   : '运行中…';
   }
+  // 调度器靠这三个值决定下一拍：是否在跑、节奏多快、数据到底新不新。
+  pollRunning = !!d.running;
+  pollLastOk  = Date.now();
+  return d;          // 供 resumeRunningTask() 判断「后端还在不在跑」
+}
+
+// ---------- 心跳调度器（M28）----------
+// 为什么从 setInterval 换成 setTimeout 自调度链：
+//   ① 间隔要能按「运行中 / 空闲 / 后台」动态变，setInterval 改间隔得清掉重挂，容易漏；
+//   ② 手机网络慢时 setInterval 会让请求堆叠，这里靠 pollBusy + 到期时刻双重挡；
+//   ③ 失败要退避，setInterval 做不到。
+// ⛔ 两个 finally 是这个设计的地基，删掉就是「页面从此再不更新且不报错」：
+//    pollBusy 不复位 → 永远不再发请求；schedulePollTick 不重挂 → 定时器链断掉。
+function pollGapMs(){
+  if (document.visibilityState === 'hidden') return POLL_GAP_HIDDEN;
+  return POLL_IS_MOBILE ? POLL_GAP_RUN_MOBILE : POLL_GAP_RUN_DESKTOP;
+}
+
+// 这一拍之后还要不要继续排下一拍？
+// ⛔ 只在「后端正在跑任务」或「上一拍失败、状态未知」时继续。
+//    空闲（没在跑 / 已跑完待核对）一律停链 —— 用户明确要求不跑任务时不要刷新。
+//    失败时不能停：那多半是后端刚重启 / 断网，停了就再也不会自己恢复，只能手动刷新。
+function shouldKeepTicking(){
+  if (pollFails > 0) return true;
+  return pollRunning;
+}
+
+function clearLogBox(){
+  const b = document.getElementById('log');
+  if (b) b.textContent = '';
+}
+
+// 「更新于 N 秒前」：只由心跳节拍调用，没有独立定时器。
+function renderUpdatedAge(){
+  const el = document.getElementById('updatedAt');
+  if (!el) return;                                   // 元素被删也不能把心跳链带崩
+  if (document.visibilityState === 'hidden') return; // 后台没人看，省掉这次 DOM 操作
+  if (!pollRunning && !pollFails){
+    // 没在跑任务 → 链随时会停，这个时间戳会冻住不动（写着「更新于 刚刚」却一直不变 = 骗人）。
+    // 空闲态直接不显示，跑起来自然出现。
+    el.className = 'upd';
+    el.textContent = '';
+    return;
+  }
+  if (pollFails && !pollBusy){
+    el.className = 'upd bad';
+    el.textContent = '⚠️ 连接中断，正在重试（第 ' + pollFails + ' 次）…';
+    return;
+  }
+  el.className = 'upd';
+  if (!pollLastOk){ el.textContent = ''; return; }
+  const s = Math.max(0, Math.floor((Date.now() - pollLastOk) / 1000));
+  el.textContent = '更新于 ' + (s < 2 ? '刚刚'
+                                  : s < 60 ? s + ' 秒前'
+                                  : Math.floor(s / 60) + ' 分钟前');
+}
+
+async function pollOnce(){
+  if (pollBusy) return null;                         // 上一请求还没回来：这一拍直接跳过
+  pollBusy = true;
+  try {
+    const d = await poll();
+    pollFails = 0;                                   // ⛔ 成功必须清零，否则一次闪断后永久退避
+    pollDueAt = pollRefetch ? 0 : Date.now() + pollGapMs();
+    pollRefetch = false;
+    return d;
+  } catch(e){
+    pollFails += 1;
+    pollDueAt = Date.now() + Math.min(POLL_BACKOFF_MAX,
+                                      POLL_BACKOFF_MIN * Math.pow(2, pollFails - 1));
+    return null;                                     // 断网 / 后端重启：不往上抛，交给心跳重试
+  } finally {
+    pollBusy = false;
+    renderUpdatedAge();
+  }
+}
+
+function schedulePollTick(){
+  if (pollTimer) clearTimeout(pollTimer);
+  // 后台把节拍一起降下来，否则 1s 空转白耗电
+  pollTimer = setTimeout(pollTick,
+    document.visibilityState === 'hidden' ? POLL_GAP_HIDDEN : POLL_TICK_MS);
+}
+
+// ⛔ 必须 async + await pollOnce：这一拍的请求回来后 pollRunning 才是新值，
+//    在它落地**之前**判断「该不该继续轮询」会拿到上一帧的旧值 ——
+//    从空闲被 kickPoll 拉起的第一拍就会误判成「没在跑」→ 立刻停链 → 拉到了 running 也不再更新。
+async function pollTick(){
+  pollTimer = null;
+  try {
+    renderUpdatedAge();
+    if (!pollBusy && Date.now() >= pollDueAt) await pollOnce();
+  } catch(e){
+    // 渲染异常绝不能把链断掉 —— 断了就再也不更新，而且除了控制台没人知道
+  } finally {
+    // ⛔ 这里是「空闲停链」的唯一出口：条件写错成无条件 schedulePollTick()
+    //    就退化回常驻轮询（不跑任务也在刷，用户明确要求过不要）；
+    //    写成无条件停链则任务跑起来也不更新。两个方向都是静默的。
+    if (shouldKeepTicking()){
+      pollStarted = true;
+      schedulePollTick();
+    } else {
+      stopPolling();
+    }
+  }
+}
+
+function startPolling(){
+  if (pollStarted) return;      // 幂等：start / resume 都能安全重复调
+  if (pollTimer){ clearTimeout(pollTimer); pollTimer = null; }
+  pollStarted = true;
+  schedulePollTick();
+}
+
+// 停链：空闲后不再有任何定时器在跑（pollStarted 必须复位，否则下次 startPolling 直接 return，
+// 表现为「点了开始却再也不刷新」）。
+function stopPolling(){
+  pollStarted = false;
+  if (pollTimer){ clearTimeout(pollTimer); pollTimer = null; }
+  renderUpdatedAge();           // 顺手把小字清掉
+}
+
+// 切回前台 / 网络恢复 / 重新聚焦：立刻补一次，不等下一个整拍
+function kickPoll(){
+  pollDueAt = 0;
+  if (pollBusy) return;         // 在飞：它落地后最多 1 秒就有下一拍
+  if (pollTimer){ clearTimeout(pollTimer); pollTimer = null; }
+  pollTick();
+}
+
+function bindPollWatchers(){
+  if (pollWatched) return;      // ⛔ 防重复订阅：绑两次 = 每次切回前台发两个请求
+  pollWatched = true;
+  // 手机切别的 App / 锁屏时浏览器会限流甚至挂起定时器，切回来不一定自己恢复 → 立刻补一拍。
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible'){
+      if (Date.now() - pollLastOk > 500) kickPoll();   // 刚拉过就别重复打请求
+    } else {
+      pollDueAt = Date.now() + POLL_GAP_HIDDEN;        // 回后台：先按后台节奏排下一拍
+    }
+  });
+  // bfcache 恢复（手机上「后退」回来很常见）：定时器被冻过，必须补。首次加载 persisted=false，不重复拉。
+  window.addEventListener('pageshow', function(e){
+    if (e.persisted) kickPoll();
+  });
+  window.addEventListener('focus', function(){
+    if (Date.now() - pollLastOk > 2000) kickPoll();    // 频繁失焦/聚焦时别每次都打请求
+  });
+  window.addEventListener('online', function(){
+    pollFails = 0;                                     // 网络恢复：立刻清退避
+    kickPoll();
+  });
+}
+
+
+// ---------- 任何设备打开本页都要跟上正在跑的任务 ----------
+// ⛔ 原来 poll() 只在 start() / exportExcel() / exportFeishu() 里 setInterval：
+//    没点过「开始」的那一端（手机、平板、另开的标签页）永远不轮询 ——
+//    后端在跑同一个任务（STATE 是进程内单例），但它看到的界面是一具空壳
+//    （「本轮已采 0 个网站」、明细表空白、状态区空白），看起来就像「不是同一个页面」。
+// 进页面先拉一次（顺带把历史日志一次性补齐），然后**无论成功失败**都把心跳链挂上：
+// 首帧就断网时也要能自己重试，不能等人手动刷新。
+async function resumeRunningTask(){
+  const d = await pollOnce();
+  if (d && d.running){
+    setButtons(true);        // 「开始 / 导出」置灰、只留「停止」——手机上误点也不会重复起任务
+    startPolling();
+  } else if (pollFails > 0){
+    // 首帧就失败（后端还没起来 / 断网）：状态未知，必须继续重试，不能等人手动刷新
+    startPolling();
+  }
+  // 空闲且请求成功 → 不挂链：一个定时器都不留（用户要求不跑任务时不刷新）
 }
 
 // ---------- 「本轮已入库明细」逐行删除 ----------
@@ -440,7 +722,12 @@ async function start(){
     // 下面那道校验会直接拦住，绝不会偷偷按 10 跑。别在这里补默认值。
     const targetCount = tcEl ? tcEl.valueAsNumber : NaN;
     const exclude = [...document.querySelectorAll('#excludes input:checked')].map(i=>i.value).join(' ');
-    const chinaFilters = [...document.querySelectorAll('#chinaFilters .china-filter:checked')]
+    // 同一批勾选项的 **key**（amazon / ebay / etsy / wikipedia / youtube / facebook）。
+    // 后端只在「自定义搜索词模式」用它做抓取前的域名拦截 —— 标准模式仍用上面那个拼好的
+    // 搜索词串，这个数组在那边完全不参与（保证标准模式行为一字不变）。
+    const excludeKeys = [...document.querySelectorAll('#excludes input:checked')].map(i => i.dataset.key);
+    // 两组容器一起收：提交的仍是 key（后端 18 项语义不变），界面怎么分卡与后端无关。
+    const chinaFilters = [...document.querySelectorAll('#chinaFilters .china-filter:checked, #contactFilters .china-filter:checked')]
       .map(i => i.dataset.key);
   const match = (document.querySelector('input[name="match"]:checked') || {}).value || 'or';
     const industry = document.getElementById('kwIndustry').value || '';   // 行业标签，取自关键词库的行业选择
@@ -448,7 +735,7 @@ async function start(){
     const lang = curLang();                                                // 条件词语言（随后国家自动联动）
     const source = curSource();                                            // google=网页搜索 / maps=谷歌地图
     const city = curCity();                                                // 仅地图用
-    const raws = rawQueries();                                             // 第 7 卡自定义搜索词；地图模式下恒为空
+    const raws = rawQueries();                                             // 第 8 卡自定义搜索词；地图模式下恒为空
     const countryLimitVal = countryLimit();                                // 国家限定四选一（none/cr/site/both，仅标准模式生效）
     // 采集数量是第 1 步，所以**先校验它**（三种链路都必填：标准网页 / 自定义搜索词 / 谷歌地图）
     if (!Number.isFinite(targetCount)){
@@ -461,19 +748,26 @@ async function start(){
       if (tcEl){ tcEl.focus(); tcEl.select(); }
       return;
     }
-    if (!raws.length && !products.trim()){ alert('请填写产品关键词，或在第 7 步填一条自定义搜索词'); return; }
+    if (!raws.length && !products.trim()){ alert('请填写产品关键词，或在第 8 步填一条自定义搜索词'); return; }
     if (source !== 'maps' && !raws.length && !conditions.length){
-      alert('请至少勾选一个搜索条件，或在第 7 步填一条自定义搜索词'); return; }
+      alert('请至少勾选一个搜索条件，或在第 8 步填一条自定义搜索词'); return; }
     const r = await fetch('/api/start', { method:'POST',
       headers:{'Content-Type':'application/json'},
       body: JSON.stringify({products, conditions, countries, pages, target_count: targetCount, exclude,
+        exclude_keys: excludeKeys,
         china_filters: chinaFilters, match, industry, auto_enrich: autoEnrich, lang, source, city,
         custom_queries: raws, country_limit: countryLimitVal}) });
   const d = await r.json();
   if (!d.ok){ alert(d.msg); return; }
   RUN_SOURCE = source;
-  logBox(source === 'maps' ? '====== 开始谷歌地图采集 ======' : '====== 开始搜索 ======');
+  // 新一轮：后端 logs=[]（round+1），本机也把游标、日志框、退避全归零。
+  // ⛔ lastRound = null 表示「下一帧只采纳轮次、不清屏」—— 否则会立刻把下面刚写的 banner 清掉。
+  lastRound = null;
   since = 0;
+  pollRefetch = false;
+  pollFails = 0;
+  clearLogBox();
+  logBox(source === 'maps' ? '====== 开始谷歌地图采集 ======' : '====== 开始搜索 ======');
   // 清空上一轮的实时明细，等后端 rows 到达后重建。
   // ⚠️ 组件内部会把「已渲染行数」与「已渲染末行主键」两个游标**一起**清零 —— 只清前者的话，
   //    新一轮首帧若「条数没变少 + 末行主键恰好等于上一轮遗留的值」，增量判定会以为无需重画
@@ -482,7 +776,8 @@ async function start(){
   document.getElementById('status').textContent = '运行中...';
   lastPending = false;          // 新一轮开始：上一轮没导出的直接被丢弃（后端 api_start 也会清）
   setButtons(true);
-  polling = setInterval(poll, 1000);
+  startPolling();
+  kickPoll();                   // 立刻拉一帧，别等第一个整拍
 }
 
 // 「📥 导出 Excel」= 本轮**唯一**一次「写客户库 + 生成结果表格」。
@@ -493,10 +788,11 @@ async function exportExcel(){
   const r = await fetch('/api/export_excel', { method:'POST' });
   const d = await r.json();
   if (!d.ok){ alert(d.msg || '导出失败'); return; }
-  since = 0;
+  // ⛔ 这里**不能** since = 0：/api/export_excel 不清 logs（只清 rows），归零会让整轮日志
+  //    在日志框里再追加一遍（双份）。它也不 bump round，所以 lastRound 不用动。
   logBox(d.saved ? '====== 已导出 Excel ======' : '（本轮没有新增客户，未产出结果文件）');
-  if (!polling) polling = setInterval(poll, 1000);
-  poll();          // 立刻重拉一次，把状态行/按钮切到「✅ 完成」
+  startPolling();
+  kickPoll();          // 立刻重拉一次，把状态行/按钮切到「✅ 完成」
 }
 
 async function exportFeishu(){
@@ -504,10 +800,15 @@ async function exportFeishu(){
   const d = await r.json();
   if (!d.ok){ alert(d.msg); return; }
   logBox('====== 开始导出到飞书 ======');
+  // 后端这次也会 logs=[]（round+1）—— 与 start() 同样处理
+  lastRound = null;
   since = 0;
+  pollRefetch = false;
+  pollFails = 0;
   document.getElementById('status').textContent = '导出中...';
   setButtons(true);
-  polling = setInterval(poll, 1000);
+  startPolling();
+  kickPoll();
 }
 
 async function stop(){
@@ -616,18 +917,40 @@ function onCountry(){
 }
 const EXCLS = EXCLS_PLACEHOLDER;
 const exclBox = document.getElementById('excludes');
+// 每项右侧并排显示它对应的搜索语法（用户点名要看到 -taobao -tmall 这种）。
 EXCLS.forEach(e => {
   exclBox.insertAdjacentHTML('beforeend',
-    `<label class="cond"><input type="checkbox" value="${e[1]}" checked> <b>${e[1]}</b> <span style="color:#888">${e[2]}</span></label>`);
+    `<label class="cond filter-row"><input type="checkbox" data-key="${esc(e[0])}" value="${esc(e[1])}" checked> <b>${esc(e[2])}</b> <code class="syn">${esc(e[1])}</code></label>`);
 });
 const CHINA_FILTERS = CHINA_FILTERS_PLACEHOLDER;
 const chinaBox = document.getElementById('chinaFilters');
+const contactBox = document.getElementById('contactFilters');
+// e = [key, query, label, desc, isContact]：第 5 位由 core.ui 按 CONTACT_FILTER_KEYS 注入，
+// 真值分流到「7. 联系方式过滤」，其余留在「5. 域名过滤」。
+// ⛔ value 必须 esc()：supplier_words / factory_words / made_in_china_words 的 query 里带双引号，
+//    直接拼进 value="..." 会被浏览器截断成 "-" → renderCombos 里 filter(v => v !== '-') 把它
+//    悄悄丢掉 → 预览少 3 个排除词而实搜照样拼上（预览与实搜不一致，老 bug）。
 CHINA_FILTERS.forEach(e => {
-  chinaBox.insertAdjacentHTML('beforeend',
-    `<label class="cond"><input type="checkbox" class="china-filter" data-key="${e[0]}" value="${e[1]}" checked> <b>${e[2]}</b> <span style="color:#888">${e[3]}</span></label>`);
+  const box = e[4] ? contactBox : chinaBox;
+  const syn = e[1]
+    ? `<code class="syn">${esc(e[1])}</code>`
+    : '<code class="syn syn-off">不进搜索词 · 结果里判断</code>';
+  box.insertAdjacentHTML('beforeend',
+    `<label class="cond filter-row"><input type="checkbox" class="china-filter" data-key="${esc(e[0])}" value="${esc(e[1])}" checked> <b>${esc(e[2])}</b> <span style="color:#888">${esc(e[3])}</span> ${syn}</label>`);
 });
-function toggleChinaFilters(on){
+// 域名过滤（第 5 卡）：一键管「平台排除词」+「其余中国商家判断」两段。
+// ⚠️ 地图模式下 #excludesWrap 整块是隐藏的 → 不许连带清它，否则切回网页搜索时排除词
+//    已经在用户看不见的情况下被清空（搜索词变脏、且没有任何提示）。
+function toggleDomainFilters(on){
+  if (curSource() !== 'maps'){
+    document.querySelectorAll('#excludes input[type="checkbox"]').forEach(x => x.checked = on);
+  }
   document.querySelectorAll('#chinaFilters .china-filter').forEach(x => x.checked = on);
+  renderCombos();
+}
+// 联系方式过滤（第 7 卡）：只动本卡的 4 项，绝不连坐域名组。
+function toggleContactFilters(on){
+  document.querySelectorAll('#contactFilters .china-filter').forEach(x => x.checked = on);
   renderCombos();
 }
 let KW_DATA = {};
@@ -646,6 +969,147 @@ async function loadKeywords(){
   ind.innerHTML = inds.map(n => `<option value="${n}">${n}</option>`).join('');
   onIndustry();
 }
+
+// ==================== 上次参数记忆（1 / 2 / 4 / 5 卡，2026-10-20） ====================
+// 用户要求：刷新页面 / 重启工具后，这几卡的参数回到上一次用的值。
+// ⛔ 存后端 `DB/ui_prefs.json`（`/api/ui_prefs`），**不用 localStorage** ——
+//    本工具端口会漂移（PREFERRED_PORTS 逐个试），换端口就是换 origin，localStorage 会静默全丢。
+// ⛔ 恢复必须在 `loadKeywords()` **之后**：行业/品类/产品的 <option> 由库数据渲染，
+//    库还没到就 set value → 落在不存在的 option 上，静默失败（用户会看到「根本没记住」）。
+let PREF_RESTORING = false;     // 恢复期间禁止回写，否则把页面默认值当成用户选择存一遍
+let PREF_TIMER = null;
+
+function collectPrefs(){
+  const g = id => document.getElementById(id);
+  const prefs = {};
+  if (g('targetCount').value !== '') prefs.targetCount = g('targetCount').value;   // 清空不记忆（它是强必填）
+  prefs.country  = g('countries').value;
+  prefs.industry = g('kwIndustry').value;
+  prefs.category = g('kwCategory').value;
+  prefs.product  = g('kwProduct').value;
+  prefs.lang     = g('kwLang').value;
+  prefs.mapsCity = g('mapsCity').value;
+  if (g('pages').value !== '') prefs.pages = g('pages').value;
+  prefs.conds = [...document.querySelectorAll('#conds input:checked')].map(x => x.value);
+  const src = document.querySelector('input[name="source"]:checked');
+  if (src) prefs.source = src.value;
+  const lim = document.querySelector('input[name="country_limit"]:checked');
+  if (lim) prefs.countryLimit = lim.value;
+  prefs.autoEnrich = g('autoEnrich').checked;
+  prefs.excludes = [...document.querySelectorAll('#excludes input:checked')].map(x => x.dataset.key);
+  prefs.chinaFilters = [...document.querySelectorAll('#chinaFilters .china-filter:checked')].map(x => x.dataset.key);
+  // 第 7 卡是原「中国商家过滤」里拆出来的联系方式 4 项 —— 同属「参数」，一起记
+  prefs.contactFilters = [...document.querySelectorAll('#contactFilters .china-filter:checked')].map(x => x.dataset.key);
+  return prefs;
+}
+
+function savePrefs(){
+  if (PREF_RESTORING) return;
+  clearTimeout(PREF_TIMER);
+  PREF_TIMER = setTimeout(() => {
+    fetch('/api/ui_prefs', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(collectPrefs()),
+    }).catch(() => {});          // 存不上不影响搜索，静默处理
+  }, 400);
+}
+
+function pickOption(sel, value){
+  return [...sel.options].some(o => o.value === value);
+}
+
+function applyPrefs(p){
+  if (!p || typeof p !== 'object' || !Object.keys(p).length) return;
+  PREF_RESTORING = true;
+  try {
+    // 1. 本次任务采集数量
+    if (typeof p.targetCount === 'string' && p.targetCount !== '') {
+      document.getElementById('targetCount').value = p.targetCount;
+    }
+    // 2. 目标国家（先设：它决定默认搜索语言与条件词）
+    const c = document.getElementById('countries');
+    if (typeof p.country === 'string' && pickOption(c, p.country)) c.value = p.country;
+    applyCountryLang();
+    // 2. 关键词库三级：必须逐级重建下拉（行业 → 品类 → 产品）
+    const ind = document.getElementById('kwIndustry');
+    if (typeof p.industry === 'string' && KW_DATA[p.industry]) {
+      ind.value = p.industry;
+      onIndustry();
+      const cat = document.getElementById('kwCategory');
+      if (typeof p.category === 'string' && pickOption(cat, p.category)) {
+        cat.value = p.category;
+        onCategory();
+        const prod = document.getElementById('kwProduct');
+        if (typeof p.product === 'string' && pickOption(prod, p.product)) prod.value = p.product;
+      }
+    }
+    const lang = document.getElementById('kwLang');
+    if (typeof p.lang === 'string' && pickOption(lang, p.lang)) lang.value = p.lang;
+    // ⚠️ 放在 onIndustry 之后：它内部的 applyCountryLang() 会把语言重置成国家默认值
+    onProduct();
+    // 4. 搜索条件
+    if (Array.isArray(p.conds)) {
+      document.querySelectorAll('#conds input[type="checkbox"]').forEach(x => {
+        x.checked = p.conds.includes(x.value);
+      });
+    }
+    // 5. 参数
+    if (typeof p.source === 'string') {
+      const r = document.querySelector(`input[name="source"][value="${p.source}"]`);
+      if (r) r.checked = true;
+    }
+    if (typeof p.mapsCity === 'string') document.getElementById('mapsCity').value = p.mapsCity;
+    if (p.pages !== undefined && p.pages !== '') document.getElementById('pages').value = p.pages;
+    if (typeof p.countryLimit === 'string') {
+      const r = document.querySelector(`input[name="country_limit"][value="${p.countryLimit}"]`);
+      if (r) r.checked = true;
+    }
+    if (typeof p.autoEnrich === 'boolean') document.getElementById('autoEnrich').checked = p.autoEnrich;
+    if (Array.isArray(p.excludes)) {
+      document.querySelectorAll('#excludes input[type="checkbox"]').forEach(x => {
+        x.checked = p.excludes.includes(x.dataset.key);
+      });
+    }
+    if (Array.isArray(p.chinaFilters)) {
+      document.querySelectorAll('#chinaFilters .china-filter').forEach(x => {
+        x.checked = p.chinaFilters.includes(x.dataset.key);
+      });
+    }
+    if (Array.isArray(p.contactFilters)) {
+      document.querySelectorAll('#contactFilters .china-filter').forEach(x => {
+        x.checked = p.contactFilters.includes(x.dataset.key);
+      });
+    }
+    onSource();                   // 摆好地图 / 网页两套界面，并刷新预览
+  } finally {
+    PREF_RESTORING = false;
+  }
+  renderCombos();
+}
+
+// 任何相关控件变化 → 400ms 防抖存一次（单选框 / 下拉用 change，输入框用 input）
+document.addEventListener('change', e => {
+  if (e.target.closest && e.target.closest(
+      '#conds, #excludes, #chinaFilters, #contactFilters, #countryLimit, #countries, '
+      + '#kwIndustry, #kwCategory, #kwProduct, #kwLang, #autoEnrich, input[name="source"]')) savePrefs();
+});
+document.addEventListener('input', e => {
+  if (['targetCount', 'mapsCity', 'pages'].includes(e.target.id)) savePrefs();
+});
+
+// 启动：先加载关键词库（三级下拉才有 option），再恢复上次参数
+async function loadPrefsAndStart(){
+  await loadKeywords();
+  let prefs = {};
+  try { prefs = await (await fetch('/api/ui_prefs')).json(); } catch(e) { prefs = {}; }
+  applyPrefs(prefs);
+  // 最后再对齐后端：手机 / 平板打开页面时，这里把它接上电脑正在跑的那一轮。
+  // ⚠️ 必须排在 applyPrefs 之后 —— 先恢复表单再拉状态，手机上看到的「参数」和「进度」
+  //    都是对的，不会出现「进度有、参数还是默认值」的错觉。
+  await resumeRunningTask();
+}
+
 // 行业 → 细分品类
 function onIndustry(){
   applyCountryLang();
@@ -752,7 +1216,7 @@ function productQueries(){
   const joined = pwords.join(' OR ');
   return [pwords.length > 1 ? '(' + joined + ')' : joined];
 }
-// 自定义搜索词（第 7 卡）：按行取，去掉空行与首尾空格。
+// 自定义搜索词（第 8 卡）：按行取，去掉空行与首尾空格。
 // 有内容即进入「自定义模式」—— 原样发给谷歌，与标准模式互斥（后端 run_search 同步实现）。
 function rawQueries(){
   const el = document.getElementById('rawQueries');
@@ -764,7 +1228,8 @@ function renderCombos(){
   const sum = document.getElementById('comboSummary');
   const pqs   = productQueries();
   const conds = [...document.querySelectorAll('#conds input:checked')];
-  const excl  = [...document.querySelectorAll('#excludes input:checked, #chinaFilters input:checked')]
+  // 联系方式那 4 项 value 为空（不进搜索词），带进来也不会改变预览 —— 只为口径一致。
+  const excl  = [...document.querySelectorAll('#excludes input:checked, #chinaFilters input:checked, #contactFilters input:checked')]
     .map(i => i.value).filter(v => v && v !== '-').join(' ');
   const csel  = document.getElementById('countries');
   const cname = (csel.selectedOptions[0] || {}).textContent || '未选择';
@@ -798,7 +1263,7 @@ function renderCombos(){
       + '</div>');
     return;
   }
-  // 自定义搜索词（第 7 卡）：有内容就以它为准 —— 预览必须与后端实搜一致，
+  // 自定义搜索词（第 8 卡）：有内容就以它为准 —— 预览必须与后端实搜一致，
   // 所以这里也按「原样」，不拼排除词、不加引号。
   const raws = rawQueries();
   if (raws.length){
@@ -855,11 +1320,13 @@ document.getElementById('mapsCity').addEventListener('input', renderCombos);
 document.getElementById('rawQueries').addEventListener('input', renderCombos);
 document.querySelectorAll('input[name="match"]').forEach(r => r.addEventListener('change', renderCombos));
 document.addEventListener('change', e => {
-  if (e.target.closest && e.target.closest('#conds, #excludes, #chinaFilters, #countryLimit')) renderCombos();
+  if (e.target.closest && e.target.closest('#conds, #excludes, #chinaFilters, #contactFilters, #countryLimit')) renderCombos();
 });
 onSource();   // 初始化：按默认数据源摆好界面，并渲染一次预览
 
-loadKeywords();
+// 事件监听先挂上（切回前台/网络恢复才不会被漏掉），再走「加载关键词库 → 恢复上次参数」。
+bindPollWatchers();
+loadPrefsAndStart();   // 关键词库就绪后再恢复上次参数（1/2/4/5 卡），末尾接上后端正在跑的那一轮
 </script>
 </body>
 </html>

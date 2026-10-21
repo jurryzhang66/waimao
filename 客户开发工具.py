@@ -57,7 +57,8 @@ from core.config import (CONDITIONS, COND_TEMPLATE, COND_ROLES, COND_LANGS, cond
                          KEYWORD_LIB, COUNTRIES, COUNTRY_CENTERS, COUNTRY_LIMITS,
                          COUNTRY_LIMIT_MODES, COUNTRY_LIMIT_DEFAULT, MAPS_CENTER_DEFAULT,
                          EXCLUDE_OPTIONS, EXCLUDE_DEFAULT, CHINA_FILTER_OPTIONS,
-                         CHINA_FILTER_DEFAULTS, BLOCK_DOMAINS, BLOCK_SUBSTR,
+                         CHINA_FILTER_DEFAULTS, BLOCK_DOMAINS, BLOCK_SUBSTR, CONTACT_FILTER_KEYS,
+                         DOMAIN_FAMILY, DOMAIN_SUFFIX_RULES, DOMAIN_RULE_KEYS, MARK_LABELS,
                          SEARCH_ENGINE_PREFIX)
 from core.paths import (LEGACY_RESULT_FILES, RESULT_DATE_RE, OUTPUT_DIRNAME, MAPS_PLACE_ID_RE,
                         _app_dir, output_dir, _safe_name_part, build_result_name,
@@ -147,6 +148,41 @@ def is_blocked(href):
     if netloc.startswith(SEARCH_ENGINE_PREFIX):     # google.com.hk / google.de 等区域域名
         return True
     return any(netloc == d or netloc.endswith('.' + d) for d in BLOCK_DOMAINS)
+
+
+def domain_rule_hit(url, enabled_keys=None):
+    """按「域名过滤」里勾选的 key，判一个网址是不是该挡的平台/排除站。
+
+    ⛔ **只在自定义搜索词模式调用**（M24，2026-10-19 用户拍板「只给自定义模式」）。
+       标准网页搜索与谷歌地图仍走 is_blocked() + china_filter_reasons()，那边一字不改。
+
+    为什么需要它：自定义模式按用户要求「搜索词一个字符都不加」，没法像标准模式那样
+    拼 `-alibaba` 请谷歌别给 —— 只能拿到结果后在**本地按域名**判，命中就 continue，
+    连详情页都不开、不抓联系方式（＝用户说的「不进入抓取分析」）。
+
+    与 is_blocked() 的区别（两个都要，不是替代）：
+      · is_blocked() 的清单写死 20 个 `.com`/`.org` 域 —— `amazon.de`、`ebay.co.uk` 漏网，
+        且 alibaba/1688/taobao 根本不在里面（它们只在 china_filter_reasons 里，而自定义模式关掉了）。
+      · 本函数按**品牌标签**判：host 任意一段完全相等即命中，所以 amazon.de / amazon.co.uk /
+        sellercentral.amazon.com 全中，而 amazonas.com 不会被误杀（不是子串匹配）。
+
+    返回命中的 key（如 'amazon'）；没命中返回 None。
+    """
+    keys = set(enabled_keys or ())
+    if not keys:
+        return None
+    host = normalize_domain(url)
+    if not host:
+        return None
+    segs = host.split('.')
+    for key in keys:
+        for brand in DOMAIN_FAMILY.get(key, ()):
+            if brand in segs:           # ⚠️ 段相等，不是 in host（子串会误杀 amazonas.com）
+                return key
+        suf = DOMAIN_SUFFIX_RULES.get(key)
+        if suf and (host == suf.lstrip('.') or host.endswith(suf)):
+            return key
+    return None
 
 
 def china_filter_terms(enabled_keys):
@@ -480,10 +516,15 @@ def _closest_snippet(node):
     return ''
 
 
-def extract_results(page, seen_titles, china_filters=None):
+def extract_results(page, seen_titles, china_filters=None, domain_keys=None):
     """抓取一页自然结果。返回 (结果列表, 被黑名单过滤的条数)。
     seen_titles 只在确认保留后才写入，避免被过滤掉的标题污染去重集合。
-    DrissionPage 4.1 的 parent() 找不到元素会抛异常而不是返回 None，故一律包 try。"""
+    DrissionPage 4.1 的 parent() 找不到元素会抛异常而不是返回 None，故一律包 try。
+
+    `domain_keys`：自定义搜索词模式「第一步：先排除平台域名」要挡的 key 集合
+    （见 domain_rule_hit / core/config.py 的 DOMAIN_FAMILY）。
+    ⚠️ 默认 None → 标准网页搜索与地图模式的行为**一字不变**（用户 2026-10-19 拍板只给自定义模式）。
+    ⚠️ 命中的计入 blocked（与 is_blocked 同口径），这样日志里的「黑名单过滤 N」能把两边都算进去。"""
     results, blocked = [], 0
     china_reasons = Counter()
     try:
@@ -506,6 +547,11 @@ def extract_results(page, seen_titles, china_filters=None):
             raw = ''
         real = resolve_goto(page, raw, a)      # 传 a 是为了能从卡片 <cite> 兜底取真域名
         if not real or is_blocked(real):
+            blocked += 1
+            continue
+        # 自定义模式「第一步」：勾选的平台域名在这里就挡掉（不开详情页、不抓联系方式）。
+        # ⚠️ 标准/地图模式 domain_keys 恒为 None，这一步整体跳过。
+        if domain_keys and domain_rule_hit(real, domain_keys):
             blocked += 1
             continue
         snippet = _closest_snippet(h3)
@@ -1269,7 +1315,7 @@ def maps_detail(page, place_url):
 # ================= 后台任务 =================
 def run_search(products, cond_keys, countries, pages, exclude, match='or', target_count=10, industry='',
                auto_enrich=True, lang='', china_filters=None, raw_queries=None,
-               country_limit=COUNTRY_LIMIT_DEFAULT):
+               country_limit=COUNTRY_LIMIT_DEFAULT, exclude_keys=None):
     """搜索 + 补全一体化闭环：每搜到一个新网站，立刻访问它抓邮箱/电话并评分、回写客户库，
     然后再去搜下一个；凑够 target_count 个新增网站就停。
     lang = 条件词的搜索语言（如 fr），留空则按所搜国家的 hl 自动取，取不到用 en。
@@ -1281,7 +1327,16 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
     （china_filters 置空）。与产品词/条件/match 互斥，那些参数在自定义模式下全部忽略。
     目标国家照旧只走 URL 的 gl/hl 并写进结果行的 country，**不写进搜索词**。
     ⚠️ 注意：「中国商家过滤」与 is_blocked() 的平台黑名单是两层 —— 自定义模式只关前者，
-    亚马逊/维基/领英这类黑名单域名照样会被挡（那是另一个开关，本次不做）。
+    亚马逊/维基/领英这类黑名单域名照样会被挡（那是另一个开关）。
+
+    `exclude_keys` / DOMAIN_FAMILY（2026-10-19 新增，只服务自定义模式）：
+    自定义模式虽然「搜索词一字符不加」，但用户要求「第一步先排除平台常用域名、不进入抓取分析」——
+    所以拿到结果卡片后**在本地按域名判**（domain_rule_hit），命中就 continue，连详情页都不开。
+    挡哪些 = 用户在「5. 参数 · 域名过滤」勾的项（exclude_keys 是同 EXCLUDE_OPTIONS 的 key；
+    中国过滤里那几个域名类 key 也从 china_filters 原值里取）。
+    ⛔ 标准模式完全不碰这条：`exclude_keys` / `domain_keys` 恒为 None，行为与改动前逐字一致。
+    ⛔ china_filters 本身仍被置空（自定义模式「不做中国商家过滤」的语义没变）；
+       只有**联系方式 4 项**例外：补全抓到联系方式后判一次，命中**只标记、不丢行**（用户拍板）。
 
     country_limit = **国家限定**（可选，默认 'none' 什么都不加）：'cr' 只加 &cr=countryXX（挂 URL，
     按主机托管国硬过滤）、'site' 只加 site:.xx（拼进搜索词）、'both' 都加。**只对标准网页模式生效** ——
@@ -1292,11 +1347,19 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
     custom_mode = bool(raw_queries)
     if country_limit not in COUNTRY_LIMIT_MODES:
         country_limit = COUNTRY_LIMIT_DEFAULT     # 非法值静默回落「不改」，与其它参数一致
+    # 置空前的原值：自定义模式下还要靠它取「联系方式 4 项」和「域名类 key」。
+    # ⚠️ china_filters 传 None 表示「全勾」→ 必须先落到 CHINA_FILTER_DEFAULTS 再保存，
+    #    否则自定义模式拿到的 requested_china 是空集，第二步的标记会整体失效。
+    requested_china = set(CHINA_FILTER_DEFAULTS if china_filters is None else china_filters)
     if custom_mode:
         china_filters = set()          # 用户拍板：自定义模式下完全不做中国商家过滤
         country_limit = 'none'         # 同一纪律：自定义模式也不叠加国家限定
     else:
-        china_filters = set(CHINA_FILTER_DEFAULTS if china_filters is None else china_filters)
+        china_filters = requested_china
+    # 自定义模式「第一步」：勾选的平台域名在抓取前挡掉。标准模式恒 None → 一个字都不影响。
+    domain_keys = ((set(exclude_keys or ()) | requested_china) & DOMAIN_RULE_KEYS) if custom_mode else None
+    # 自定义模式「第二步」：只判联系方式 4 项，命中**只标记、不丢行**（用户 2026-10-19 拍板）。
+    contact_keys = (requested_china & set(CONTACT_FILTER_KEYS)) if custom_mode else set()
     search_tab_id = None      # 搜索主标签 id：补全会开临时标签，抓完要切回来
     search_ok = True
     try:
@@ -1396,7 +1459,8 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                                 break
                             if not wait_captcha(page):
                                 break
-                        items, blocked_n, china_reasons = extract_results(page, seen_titles, china_filters)
+                        items, blocked_n, china_reasons = extract_results(
+                            page, seen_titles, china_filters, domain_keys)
                         stat['cand'] += len(items) + blocked_n
                         stat['blocked'] += blocked_n
                         stat['china'].update(china_reasons)
@@ -1413,16 +1477,32 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                             if auto_enrich and not STATE['stop']:
                                 info = enrich(page, item['url'])
                                 _back_to_search(page, search_tab_id)
-                            contact_reasons = china_filter_reasons(
-                                item['title'], item['url'], item['snippet'],
-                                emails=info.get('emails'), phones=info.get('phones'),
-                                html_text=info.get('china_signal_text', ''),
-                                enabled_keys=china_filters)
-                            if contact_reasons:
-                                stat['blocked'] += 1
-                                stat['china'].update(contact_reasons)
-                                log(f'   过滤：{item["title"][:40]}（{"；".join(contact_reasons)}）')
-                                continue
+                            # ② 联系方式判据 —— 两种模式两种处置（2026-10-19 用户拍板）：
+                            #    · 标准模式：命中即**整条丢弃**（原逻辑，一字不改）
+                            #    · 自定义模式：只判「联系方式过滤」那 4 项，命中**只标记**，
+                            #      行照样进明细、照样能导出（用户：「只做标记不做删除」）
+                            mark_reasons = []
+                            if custom_mode:
+                                if contact_keys:
+                                    mark_reasons = [MARK_LABELS.get(r, r) for r in china_filter_reasons(
+                                        item['title'], item['url'], item['snippet'],
+                                        emails=info.get('emails'), phones=info.get('phones'),
+                                        html_text=info.get('china_signal_text', ''),
+                                        enabled_keys=contact_keys)]
+                                    if mark_reasons:
+                                        log(f'   🏷️ 标记：{item["title"][:40]}'
+                                            f'（{"、".join(mark_reasons)}）—— 只标记、行保留')
+                            else:
+                                contact_reasons = china_filter_reasons(
+                                    item['title'], item['url'], item['snippet'],
+                                    emails=info.get('emails'), phones=info.get('phones'),
+                                    html_text=info.get('china_signal_text', ''),
+                                    enabled_keys=china_filters)
+                                if contact_reasons:
+                                    stat['blocked'] += 1
+                                    stat['china'].update(contact_reasons)
+                                    log(f'   过滤：{item["title"][:40]}（{"；".join(contact_reasons)}）')
+                                    continue
                             # ② 去重：库里已有的老客户 **＋ 本轮内存里已经采过的同一个站**。
                             # ⛔ 本轮采到的东西**还没入库**（要等用户点「📥 导出 Excel」才写库），
                             #    db_has_customer() 看不见它们 —— 同轮重复只能靠内存挡（_live_has_url）。
@@ -1454,6 +1534,10 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                                     'formula': formula,
                                     'industry': industry,
                                     'country': cname,
+                                    # 「只标记不删除」的标记（短标签，如 ['微信', '.cn 邮箱']）。
+                                    # 标准模式恒为空列表；只有自定义模式命中联系方式 4 项时才有值。
+                                    # ⚠️ 前端徽章与 Excel 摘要前缀都读它 —— 别改名。
+                                    'marks': mark_reasons,
                                 })
                                 STATE['result_count'] = len(STATE['rows'])
                                 added_n = STATE['result_count']
@@ -1849,9 +1933,18 @@ def split_emails(raw):
 
 
 def _row10(row):
-    """把内部行（11 键）映射成结果 Excel 的 10 列 —— 顺序必须与 _save_enrich_excel 一致。"""
+    """把内部行（11 键）映射成结果 Excel 的 10 列 —— 顺序必须与 _save_enrich_excel 一致。
+
+    ⛔ 10 列契约不可改（飞书导出与建库都按下标读）。所以「只标记」的痕迹**不新增列**，
+       而是给「摘要」列加个前缀：`[标记] 微信、.cn 邮箱 · 原摘要`。
+       没有 marks 的行（标准模式、手动采集、地图）输出逐字不变。
+    """
+    snippet = row.get('snippet', '')
+    marks = row.get('marks') or []
+    if marks:
+        snippet = '[标记] ' + '、'.join(marks) + ' · ' + snippet
     return [row['title'], row['url'], EMAIL_SEP.join(row['emails']), ' / '.join(row['phones']),
-            row['contact_url'], row['score'], row['rating'], row['snippet'],
+            row['contact_url'], row['score'], row['rating'], snippet,
             row['formula'], row.get('country', '')]
 
 
@@ -2611,7 +2704,7 @@ def api_manual_close_browser():
     return jsonify({'ok': True, 'closed': close_manual_browser()})
 
 
-# 自定义搜索词（主页第 7 卡）单轮条数上限：一条 × 每条抓 pages 页 × 每页约 10 条，
+# 自定义搜索词（主页第 8 卡，M23 起）单轮条数上限：一条 × 每条抓 pages 页 × 每页约 10 条，
 # 20 条已足够撑满一次 100 条的目标；再多大概率触发谷歌限流（限流要等 90 秒才恢复）。
 RAW_QUERY_MAX = 20
 
@@ -2621,7 +2714,7 @@ def api_start():
     if STATE['running']:
         return jsonify({'ok': False, 'msg': '任务正在运行'})
     data = request.get_json()
-    # 自定义搜索词（主页第 7 卡）：一行一条，**原样**当一条查询用。
+    # 自定义搜索词（主页第 8 卡，M23 起）：一行一条，**原样**当一条查询用。
     # 空行/纯空白丢弃、去重保序；硬上限防「误粘一大段文本」把整轮拖成几小时（谷歌还会限流）。
     raw_in = data.get('custom_queries')
     raw_queries = []
@@ -2657,18 +2750,32 @@ def api_start():
     with STATE_LOCK:
         # 开新一轮：清空上一轮的一切（含「待导出」状态 —— 上一轮没导出就直接丢弃，用户拍板接受）。
         # n_seq 一并清零：行号只在本轮内有意义。
-        STATE.update(running=True, done=False, logs=[], result_count=0, rows=[], n_seq=0,
+        # round +1：日志被清空了，所有设备（不只是点「开始」的这一台）的 since 都要作废。
+        STATE.update(round=STATE.get('round', 0) + 1,
+                     running=True, done=False, logs=[], result_count=0, rows=[], n_seq=0,
                      output='', stop=False, phase='search',
                      pending_export=False, export_error='')
     exclude = data.get('exclude', EXCLUDE_DEFAULT)
     china_filters = [k for k in data.get('china_filters', CHINA_FILTER_DEFAULTS)
                      if k in CHINA_FILTER_DEFAULTS]
+    # 「排除条件」勾了哪几个 **key**（amazon / ebay / etsy / wikipedia）。
+    # 只服务自定义模式的「第一步：抓取前挡平台域名」—— 标准模式仍靠拼好的 exclude 搜索词，
+    # 这个 key 列表在那边完全不参与（保证标准模式零行为变化）。
+    # ⚠️ 白名单校验：前端传什么都不能让脏 key 混进来。
+    _exclude_key_whitelist = {k for k, _, _ in EXCLUDE_OPTIONS}
+    exclude_keys = [k for k in (data.get('exclude_keys') or []) if k in _exclude_key_whitelist]
     match = data.get('match', 'or')
     industry = (data.get('industry') or '').strip()
     auto_enrich = bool(data.get('auto_enrich', True))   # 搜索时是否就地抓取联系方式（不勾=只收集网站线索）
     lang = (data.get('lang') or '').strip()             # 条件词的搜索语言，留空由 run_search 按国家 hl 推断
     # 数据源：google=谷歌网页搜索（默认，老链路），maps=谷歌地图名录（新链路）
     source = (data.get('source') or 'google').strip()
+    # 记进全局状态：/api/status 会带给页面。
+    # ⚠️ 手机 / 平板打开页面**没有经过这里的 start()** → 拿不到前端本地的 RUN_SOURCE，
+    #    只能靠这个字段回传，否则地图任务在手机上会显示成「搜索中 / 个网站」。
+    #    只允许两个合法值：前端传任何其它字符串都按 google 处理（与下面的分支判断保持一致）。
+    with STATE_LOCK:
+        STATE['source'] = 'maps' if source == 'maps' else 'google'
     city = (data.get('city') or '').strip()             # 仅地图用：城市/地区名，会拼进查询词
     # 国家限定（主页第 5 步，可选，默认关）：none / cr / site / both。非法值静默回落 none。
     # 只对网页搜索生效 —— 地图走 run_maps（根本不接收该参数），自定义模式在 run_search 内强制置 none。
@@ -2689,7 +2796,8 @@ def api_start():
     t = threading.Thread(target=run_search,
                          args=(products, cond_keys, countries, pages, exclude, match, target_count, industry,
                                auto_enrich, lang, china_filters),
-                         kwargs={'raw_queries': raw_queries, 'country_limit': country_limit},
+                         kwargs={'raw_queries': raw_queries, 'country_limit': country_limit,
+                                 'exclude_keys': exclude_keys},
                          daemon=True)
     t.start()
     return jsonify({'ok': True})
@@ -2781,7 +2889,9 @@ def api_export_feishu():
         return jsonify({'ok': False,
                         'msg': '本轮结果还没导出 Excel —— 请先点「📥 导出 Excel」再导飞书'})
     with STATE_LOCK:
-        STATE.update(running=True, done=False, logs=[], result_count=0,
+        # round +1 同上：这次也要 logs=[]（飞书导出自己会打日志，不能和上一轮混在一起）。
+        STATE.update(round=STATE.get('round', 0) + 1,
+                     running=True, done=False, logs=[], result_count=0,
                      output='', stop=False, phase='export')
     threading.Thread(target=run_export_feishu, daemon=True).start()
     return jsonify({'ok': True})
@@ -2804,6 +2914,67 @@ def api_keywords():
             return jsonify(json.load(f))
     except Exception:
         return jsonify({})
+
+
+# ==================== 主页「上次参数」记忆（2026-10-20）====================
+# 用户要求：1 / 2 / 4 / 5 卡的表单参数记住上一次（采集数量、目标国家 + 行业三级、搜索条件、参数）。
+# ⛔ 存 DB 目录下的 JSON，**不用 localStorage** —— 本工具端口会漂移（PREFERRED_PORTS 逐个试），
+#    换端口就是换 origin，localStorage 立刻全丢，用户会以为「根本没记住」。
+# ⛔ 路径必须由 db.db_path() 推导（测试把 m.db.db_path 打到临时目录时，这个文件自动跟着走），
+#    不许写死 _app_dir()/DB —— 否则回归会把真实用户的记忆写脏。
+UI_PREF_KEYS = frozenset({
+    'targetCount', 'country', 'industry', 'category', 'product', 'lang',
+    'conds', 'source', 'mapsCity', 'pages', 'countryLimit', 'autoEnrich',
+    'excludes', 'chinaFilters', 'contactFilters',
+})
+UI_PREFS_MAX_BYTES = 64 * 1024
+
+
+def ui_prefs_path():
+    """上次参数文件：与客户库同目录（DB/ui_prefs.json）。
+
+    ⛔ 测试（_check_*_ui / _check_startup）会真的在页面上点控件 → 触发 POST 保存，
+       所以回归必须靠 `DP_UI_PREFS` 环境变量把它挡到临时目录，否则会把用户的真实记忆写脏。
+       `_run_all_reg.py` 统一注入这个变量（单项直跑时由测试脚本自己设）。
+    """
+    override = os.environ.get('DP_UI_PREFS')
+    if override:
+        return override
+    return os.path.join(os.path.dirname(db.db_path()), 'ui_prefs.json')
+
+
+@app.route('/api/ui_prefs')
+def api_ui_prefs_get():
+    try:
+        with open(ui_prefs_path(), 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        return jsonify(data if isinstance(data, dict) else {})
+    except Exception:
+        return jsonify({})        # 文件不存在 / 坏掉 → 一律当「没有记忆」，用页面默认值
+
+
+@app.route('/api/ui_prefs', methods=['POST'])
+def api_ui_prefs_save():
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({'ok': False, 'error': '参数必须是对象'}), 400
+    clean = {k: v for k, v in data.items() if k in UI_PREF_KEYS}
+    try:
+        raw = json.dumps(clean, ensure_ascii=False)
+    except Exception:
+        return jsonify({'ok': False, 'error': '参数无法序列化'}), 400
+    if len(raw.encode('utf-8')) > UI_PREFS_MAX_BYTES:
+        return jsonify({'ok': False, 'error': '参数过大'}), 400
+    path = ui_prefs_path()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + '.tmp'
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(raw)
+        os.replace(tmp, path)     # 原子替换：写到一半退出也不会留下半个 JSON
+        return jsonify({'ok': True, 'saved': len(clean)})
+    except Exception as e:
+        return jsonify({'ok': False, 'error': str(e)}), 500
 
 
 @app.route('/api/db_stats')
@@ -3006,6 +3177,12 @@ def api_status():
         payload = {
             'running': STATE['running'],
             'phase': STATE['phase'],
+            # 本轮数据源：页面据此决定「搜索中 / 地图采集中」与「个网站 / 个商家」。
+            # ⚠️ 必须回传：手机 / 平板打开页面时没走过 start()，本地 RUN_SOURCE 是默认值。
+            'source': STATE.get('source', 'google'),
+            # 轮次序号（M28）：日志被清空过（api_start / api_export_feishu）时这个数会变，
+            # 前端据此把本地 since 归零 —— 否则另一台设备（手机）的日志区会永久空白。
+            'round': STATE.get('round', 0),
             'done': STATE['done'],
             'result_count': STATE['result_count'],
             'output': STATE['output'],
@@ -3046,18 +3223,34 @@ def pick_port(host='127.0.0.1', preferred=PREFERRED_PORTS):
     **看不到任何进程占用**，极易被误判成「端口被别的程序抢了」。
     更要命的是保留段每次开机由 winnat 重新生成、会漂移，所以固定换一个端口只是治标，
     正确做法就是启动时实测一遍。
+
+    ⚠️ 每个候选要探**两个地址**：(127.0.0.1, p) 和 (host, p)。
+    因为 host='0.0.0.0' 时，Windows 上即使 127.0.0.1:PORT 已被别的进程占着，
+    通配地址仍可能 bind 成功（对方 socket 设了 SO_REUSEADDR 就是如此，Werkzeug 默认就设）。
+    只探 host 的话 → 两个实例挑中同一个端口、日志打出同一个 URL，而实际访问落到
+    **先启动的那个进程**（Windows 具体地址优先于通配地址）→ 用户会以为「新实例没生效」。
     """
     reason = ''
     for p in preferred:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            s.bind((host, p))
+        first_err = None
+        usable = True
+        # dict.fromkeys 去重且保序：host 本身是 127.0.0.1 时只探一次
+        for probe_host in dict.fromkeys(('127.0.0.1', host)):
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind((probe_host, p))
+            except OSError as e:
+                usable = False
+                if first_err is None:
+                    first_err = e
+            finally:
+                s.close()
+            if not usable:
+                break
+        if usable:
             return p, reason
-        except OSError as e:
-            if not reason:                      # 只记第一个失败的原因，通常就是 5000
-                reason = f'{e.strerror}（WinError {e.errno}）'
-        finally:
-            s.close()
+        if first_err is not None and not reason:   # 只记第一个失败的原因，通常就是 5000
+            reason = f'{first_err.strerror}（WinError {first_err.errno}）'
     # 候选全试不通：让系统分配一个空闲端口，记下号再释放（交给 app.run 重新绑）
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -3067,9 +3260,34 @@ def pick_port(host='127.0.0.1', preferred=PREFERRED_PORTS):
         s.close()
 
 
+def lan_ip():
+    """猜本机局域网 IPv4（启动日志里印给手机 / 平板用），猜不到返回 ''。
+
+    UDP `connect()` **不发包**，只是让系统按默认路由挑一块网卡，再取它的地址。
+    比遍历 `gethostbyname_ex` 可靠（后者在有 VMware / Hyper-V 虚拟网卡时经常返回虚拟地址）。
+
+    ⚠️ 只是「猜」：多网卡机器可能猜中虚拟网卡。真猜错时启动日志还会提示用 ipconfig 看，
+    不要为这个写复杂的枚举逻辑。
+    APIPA（169.254.x，网线没插 / WiFi 没连时的自动地址）和回环都不算，返回空串。
+    """
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('8.8.8.8', 80))
+        ip = s.getsockname()[0]
+    except OSError:
+        return ''
+    finally:
+        s.close()
+    return '' if ip.startswith('127.') or ip.startswith('169.254.') else ip
+
+
 if __name__ == '__main__':
     init_customer_db()
-    HOST = '127.0.0.1'
+    # 绑 0.0.0.0 = 本机回环 + 局域网各网卡全开 → 手机 / 平板在同一路由器下也能打开。
+    # ⚠️ 代价（用户 2026-10-20 拍板接受）：同一局域网内**任何**设备只要知道地址就能打开
+    #    这个页面 —— 能看客户库、能调 /api/db/delete。发现异常就去路由器改 WiFi 密码。
+    # ⛔ 别改回 127.0.0.1：那是**回环**地址，只接受本机连接，手机填它指的是「手机自己」。
+    HOST = '0.0.0.0'
     PORT, PORT_REASON = pick_port(HOST)
     if PORT_REASON:
         print(f'⚠️ 首选端口 {PREFERRED_PORTS[0]} 不能用：{PORT_REASON}')
@@ -3077,9 +3295,17 @@ if __name__ == '__main__':
               f'（Windows 把成片端口保留给 Hyper-V/WinNAT，属正常现象，不影响使用）')
     # 回填真实端口：/api/ping 会把它告诉 Chrome 扩展（扩展靠它发现该连哪个端口）
     _RUN_PORT = PORT
-    url = f'http://{HOST}:{PORT}/'
+    # 本机地址：⛔ 这一行的格式被 `.workbuddy/_check_startup.py` 用正则抓
+    #    （r'http://127\.0\.0\.1:(\d+)/'）—— 改格式会让真机启动 e2e 抓不到 URL。
+    url = f'http://127.0.0.1:{PORT}/'
+    lan = lan_ip()
     print(f'启动本地网页服务：{url}')
     print(f'  手动采集页：{url}manual      页面右上角扩展请连端口 {PORT}')
+    if lan:
+        print(f'  手机 / 平板（连同一个路由器）：http://{lan}:{PORT}/')
+    else:
+        print(f'  ⚠️ 没探测到局域网地址：手机访问前先用 ipconfig 看本机 IPv4，'
+              f'再开 http://<那个IP>:{PORT}/')
     print('请在浏览器中打开（若未自动打开请手动访问）')
     webbrowser.open(url)
     app.run(host=HOST, port=PORT, threaded=True, debug=False)

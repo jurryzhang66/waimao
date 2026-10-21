@@ -91,7 +91,7 @@ def main():
         child_env[_k] = _tmp
     print(f'临时目录（子进程）：{_tmp}')
 
-    for name, interp, rel, extra in ITEMS:
+    for _idx, (name, interp, rel, extra) in enumerate(ITEMS):
         if only and not any(o in name for o in only):
             continue
         path = os.path.join(ROOT, rel)
@@ -102,8 +102,13 @@ def main():
         log_path = os.path.join(BK, '_reg__' + name.replace(' ', '_').replace('--', '').strip('_') + '.log')
         t0 = time.time()
         cmd = [interp, '-X', 'utf8', path] + extra if interp == PY else [interp, path] + extra
+        # ⛔ 主页「上次参数」会随控件操作自动 POST 落盘（2026-10-20）：
+        #    每个测试给一个**独立**临时文件，否则会把真实 DB/ui_prefs.json 写脏，
+        #    而且前一个测试留下的值会改变后一个测试看到的页面默认状态。
+        run_env = dict(child_env)
+        run_env['DP_UI_PREFS'] = os.path.join(_tmp, f'_ui_prefs_{_idx}.json')
         r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
-                           errors='replace', cwd=ROOT, timeout=900, env=child_env)
+                           errors='replace', cwd=ROOT, timeout=900, env=run_env)
         dt = time.time() - t0
         with open(log_path, 'w', encoding='utf-8') as f:
             f.write('$ ' + ' '.join(cmd) + '\n')

@@ -32,7 +32,7 @@
 | 层 | 选型 | 说明 |
 |---|---|---|
 | 运行时 | Python 3.13 | 解释器路径见「本机环境」 |
-| Web 服务 | Flask | 本地 `127.0.0.1`，端口运行时实测挑选 |
+| Web 服务 | Flask | 监听 `0.0.0.0`（局域网可访问），端口运行时实测挑选 |
 | 浏览器自动化 | DrissionPage（ChromiumPage） | 驱动独立 Chrome 实例，不依赖用户已开的 9222 |
 | 数据库 | SQLite（标准库 `sqlite3`） | WAL 模式，单文件 `DB/客户库.sqlite3` |
 | Excel | openpyxl | 结果文件读写 |
@@ -390,7 +390,9 @@ D:\waimao\dp\
 - **实现方法**：
   - **服务端渲染在 import 期构建一次**：`_build_page()` 把条件/国家/排除项/中国过滤/地图坐标/身份词以 JSON 注入 `*_PLACEHOLDER`，结果赋值给 `PAGE_HTML` / `MANUAL_HTML`；`_build_query_page()` 另出 `QUERY_HTML`。**改 `ui/*.html` 必须重启工具**。
   - `manual.html` / `query.html` 都用 `PAGE_CSS_PLACEHOLDER` 占位，构建时（`_page_style()` + `_inject_page_style()`）把 `page.html` 的整个 `<style>` 块注入 → **三个页面共用一份 CSS**。⚠️ 反过来说：往那一份里加规则会**连带影响全部三个页面**，副页面专有的样式要写进它们自带的第二个 `<style>`。
-  - 状态轮询：前端每秒拉 `/api/status`（主链路：logs/result_count/phase/rows/db_total/db_verified）与 `/api/manual/state`（手动链路：本轮明细 + 最近 50 条）。
+  - 状态轮询：主页拉 `/api/status`（logs/result_count/phase/rows/db_total/db_verified/round），
+    节奏自适应（M28：运行中电脑 1s / 手机 2s、后台 10s、**空闲彻底停链不发请求**，详见 §4.5 心跳调度）；
+    `/manual` 仍是常驻 1s 拉 `/api/manual/state` + 日志（**未套用**自适应策略，用户拍板）。
   - CORS 三重门：`before_request` 放行 OPTIONS 预检 → `after_request` 只对 `chrome-extension://` 回显 ACAO，并**顺手当扩展心跳**（写 `MANUAL_STATE['ext_last_seen']`）。
 - **与其他模块的关系**：所有模块的入口与展示层。
 - **依赖**：Flask、`core/ui`、`core/config`
@@ -399,8 +401,8 @@ D:\waimao\dp\
 - **修改时注意**：
   - ⚠️ **`ui/page.html` 的 sha256 被 `_check_page.py` R5 用两条基线守着**：`_TMPL_SHA`（模板文本）+ `_BUILT_SHA`（`_build_page()` 结果）。**故意改主页必须同步重算这两条**（已重算过多次：顶栏导航 / M14 / M15 / M16 / M17 各一次）—— ⛔ **别在本文件里写死 hash**，一律以 `_check_page.py` 顶部的常量为准。它的价值是「误格式化 / 误翻译把转义改变形时立刻抓到」。副页面专有的样式写进 `ui/manual.html` / `ui/query.html` 自带的第二个 `<style>` —— 混进 page.html 那份会连带影响三页。
   - 📌 **主页卡片顺序（`ui/page.html`，编号硬编码在 `<h3>` 文字里，没有 CSS 计数器 / `<ol>`）**：
-    `1. 本次任务采集数量`(M17) → `2. 目标国家` → `📋 产品关键词库`（**刻意无编号**）→ `.grid` 内 `3. 产品关键词` / `4. 搜索条件` / `5. 参数` / `6. 关键词组合预览` → `7. 自定义搜索词`(`#rawCard`) → `.btn-row` → `📥 本轮已入库明细`。
-    ⛔ **插卡/挪卡必须整轮重排编号**，并同步改这些**用户可见**的提示语：`start()` 的两条 alert（「或在第 7 步填一条自定义搜索词」）、组合预览里的占位（「请先填写「3. 产品关键词」，并至少勾选一个「4. 搜索条件」」）、`#rawCard` 的说明（「上面第 4 步勾选的条件」/「目标国家（第 2 步）」）。漏改**不报任何错**，只是提示语指到错的步骤 —— `_check_page.py` R13 与 `_check_live_ui.py` G 段一起守着。
+    `1. 本次任务采集数量`(M17) → `2. 目标国家` → `📋 产品关键词库`（**刻意无编号**）→ `.grid` 内 `3. 产品关键词` / `4. 搜索条件` / `5. 参数`（含**域名过滤**区块，M23）/ `6. 关键词组合预览` → `7. 联系方式过滤`（M23，整行卡）→ `8. 自定义搜索词`(`#rawCard`) → `.btn-row` → `📥 本轮采集明细（实时 · 待核对）`。
+    ⛔ **插卡/挪卡必须整轮重排编号**，并同步改这些**用户可见**的提示语：`start()` 的两条 alert（「或在第 8 步填一条自定义搜索词」）、组合预览里的占位（「请先填写「3. 产品关键词」，并至少勾选一个「4. 搜索条件」」）、`#rawCard` 的说明（「上面第 4 步勾选的条件」/「目标国家（第 2 步）」）。漏改**不报任何错**，只是提示语指到错的步骤 —— `_check_page.py` R13 与 `_check_live_ui.py` G 段一起守着。
   - ⚠️ 改 `ui/*.html` 后**必须重启工具**（import 期构建）。
   - ⚠️ `MANUAL_HTML` / `QUERY_HTML` / `PAGE_HTML` 是模块级常量，不在函数里构建。
   - ✅ 首页顶栏有 `.nav` 导航（V1.5 加）：`📝 手动采集页` → `/manual`、`📊 客户库查询` → `/db`。R6 有断言守着这两个 `href` —— ⚠️ href 写错或被人删掉**不会有任何运行时报错**，只会静默少一个入口。
@@ -462,7 +464,7 @@ D:\waimao\dp\
 
 ### M14. 自定义搜索词（完全原样搜索）
 
-- **功能作用**：主页第 7 卡。用户自己写完整谷歌查询（一行一条），**原样**发出去 —— 不套条件模板、不自动加英文双引号、不自动拼产品词、不拼排除词、不做中国商家过滤。用于标准模式覆盖不到的长尾查询（例如手写 `-site:.cn`、`OR`、`(...)`、指定城市名）。
+- **功能作用**：主页第 8 卡（M23 后由 7 顺延）。用户自己写完整谷歌查询（一行一条），**原样**发出去 —— 不套条件模板、不自动加英文双引号、不自动拼产品词、不拼排除词、不做中国商家过滤。用于标准模式覆盖不到的长尾查询（例如手写 `-site:.cn`、`OR`、`(...)`、指定城市名）。
 - **所在位置**：`ui/page.html` 的 `#rawCard` / `#rawQueries`（卡片 + `rawQueries()` + `renderCombos()` 分支 + `start()` 校验 + `onSource()` 置灰）；后端 `客户开发工具.py` 的 `api_start`（读 `custom_queries`、`RAW_QUERY_MAX = 20`）与 `run_search(..., raw_queries=None)`。
 - **核心文件**：`ui/page.html`、`客户开发工具.py`
 - **实现方法**：
@@ -654,6 +656,151 @@ D:\waimao\dp\
     `db_upsert_customer` 的 email 兜底会把第二条合并到第一条上 —— Excel 里仍两行、库里一条。
   - ⚠️ 旧实例打新路由是 **404**（新路由不会热加载进已经跑着的进程）。
 
+### M23. 过滤项拆成「域名过滤 / 联系方式过滤」两张卡（2026-10-19）
+
+- **功能作用**：用户指出「『排除条件』和『中国商家过滤』其实是一个功能」→ 先在**第 5 卡**里
+  合并成一块「**域名过滤**」，再把**联系方式那 4 项单独拆成第 7 卡「联系方式过滤」**；
+  每项右侧同时显示它对应的**搜索语法**（如 `-taobao -tmall`），query 为空的项标
+  「不进搜索词 · 结果里判断」。
+- **所在位置**：`core/config.py`（新增 `CONTACT_FILTER_KEYS`，单一真源）；`core/ui.py`（`china_js` → 5 元组，
+  第 5 位 `is_contact`）；`ui/page.html`（卡 5 的过滤区重排 + 新增 `#contactFilters` 卡 + `.syn/.syn-off` 样式 +
+  渲染/选择器改造）；`ui/page.html` 的两处 `value` 改 `esc()`。
+- **实现方法**：
+  1. **界面分组不改后端**：提交的仍是 `china_filters` 的 **key 数组**（17 项语义一字不变），
+     `china_filter_terms()` / `china_filter_reasons()` 完全没动。分组真源在 `core/config.py`，
+     经 `core/ui.py` 作为**第 5 个字段**注入同一份 `CHINA_FILTERS_PLACEHOLDER` JSON（不新增占位符，
+     避免两份数组漂移）。
+  2. **成员**：域名组 = `EXCLUDE_OPTIONS` 6 项 + `CHINA_FILTER_OPTIONS` 除 4 项联系方式外的 14 项
+     （`#excludes` / `#chinaFilters`）；联系组 = `phone_86 / wechat / qq / email_cn`（`#contactFilters`）。
+     `address_cn` 是地址信号、不是联系方式，留在域名组。
+  3. **卡片编号**：新增 `7. 联系方式过滤`（整行卡，在 `.grid` 之后、`#rawCard` 之前），
+     原 `7. 自定义搜索词` 顺延为 **8.**；`6. 关键词组合预览` 编号与 `.grid` 两列布局**都没动**
+     （这 4 项 query 为空、不影响预览，排在其后语义成立）。
+  4. **地图模式**：只藏 `#excludesWrap`（纯查询词，没有公式就没意义）；`#chinaFilters` 与
+     `#contactFilters` **必须保持可见**（那 13 项里多数在结果阶段照常判断，联系方式在地图链路更是直接判）。
+  5. **批量按钮分组**：`toggleDomainFilters()` 管 `#excludes` + `#chinaFilters`；`toggleContactFilters()`
+     只管 `#contactFilters`。⚠️ 地图模式下域名组那对按钮**跳过隐藏的 `#excludes`**，
+     否则用户在看不见的情况下把排除词清空、切回网页搜索时搜索词已经变脏。
+  6. **顺手修的既有 bug**：`value="${e[1]}"` 对 `-"China manufacturer" -"Chinese supplier"` 这类
+     含双引号的 query 会被浏览器截断成 `value="-"` → `renderCombos` 里 `filter(v => v !== '-')`
+     把它悄悄丢掉 → **预览一直少 3 个排除词，而后端实搜照样拼上**。改 `esc(e[1])` 后预览与实搜一致。
+- **回归怎么守**：`_check_page.py` **R14**（两个容器存在且唯一、`toggleDomain/ContactFilters`、
+  `#chinaFilters .china-filter:checked, #contactFilters .china-filter:checked`、地图不许藏这两组、
+  `value="${e[1]}"` 必须消失且 `esc()` 版本存在、`CONTACT_FILTER_KEYS` 四个 key 且 query 全空）+ R5 双哈希；
+  `_check_live_ui.py` **H 段**（13/4 分流、默认全勾、两组批量互不连坐、`supplier_words` 的 value 完整、
+  语法 `.syn` 17 个 / `.syn-off` 8 个、地图只藏平台排除词）；`_check_maps_ui.py` A/C 段改用
+  `getComputedStyle` 并断言两组在两种模式下都可见。
+- **当前完成状态**：✅ 已投产（2026-10-19），全量回归待跑完确认，尚未 git commit。
+- **修改时注意**：
+  - ⛔ 加/删联系方式项只改 `core/config.py` 的 `CONTACT_FILTER_KEYS`，**别在前端另写一份 key 列表**。
+  - ⛔ 那 4 项的 `query` 必须为空（`_check_page.py` R14 有断言）—— 有 query 就该留在域名组。
+  - ⛔ 改 `ui/page.html` 后必须**重启工具** + **重算 R5 两条 sha256**（模板与构建结果都变了）。
+
+### M24. 自定义搜索词模式的两步过滤（2026-10-19）
+
+- **功能作用**：用户发现「8. 自定义搜索词 / 7. 联系方式过滤 / 5. 平台排除词」三者互不关联 ——
+  自定义模式下平台站照样进详情页抓联系方式。要求改成：
+  **① 第一步排除平台常用域名，不进入抓取分析；② 拿到联系方式后再做联系方式过滤，只做标记不做删除。**
+- **所在位置**：`core/config.py`（`DOMAIN_FAMILY` / `DOMAIN_SUFFIX_RULES` / `DOMAIN_RULE_KEYS` / `MARK_LABELS`）；
+  `客户开发工具.py`（`domain_rule_hit()`、`extract_results(domain_keys=)`、`run_search(exclude_keys=)`、
+  `_row10()` 摘要前缀、`api_start` 读 `exclude_keys`）；`ui/page.html`（`data-key`、提交 `exclude_keys`、
+  `.live-mark` 样式、两处文案）；`ui/live-table.js`（`buildRow` 挂徽章）。
+- **实现方法**：
+  1. **第一步 = 本地域名判定，不是搜索词排除**。自定义模式按用户要求「搜索词一字符不加」，
+     没法拼 `-alibaba` 让谷歌别给（而且给了也不保证听话）。所以拿到结果卡片、解析出真域名后，
+     在 `extract_results` 里**紧接着 `is_blocked()`** 判一次 `domain_rule_hit()`，命中即 `continue` ——
+     连详情页都不打开（＝「不进入抓取分析」）。
+  2. **判据是「品牌标签 + 域名段相等」**：`host.split('.')` 里任意一段完全等于品牌名就命中。
+     所以 `amazon.de` / `amazon.co.uk` / `sellercentral.amazon.com` 全中，而 `amazonas.com`（亚马逊州）、
+     `my-ebay-shop.com` **不会**被误杀。⛔ 绝不能用子串匹配。
+     `.cn` 那项走后缀判定（`DOMAIN_SUFFIX_RULES`）。
+  3. **挡哪些 = 用户在「5. 参数 · 域名过滤」勾的项**：`api_start` 读 `exclude_keys`（`EXCLUDE_OPTIONS`
+     的 key，带白名单校验）+ `china_filters` 的**置空前原值**，两者并集再与 `DOMAIN_RULE_KEYS` 交集，
+     作为 `domain_keys` 传给 `extract_results`。全取消 = 一个都不挡（开关语义成立）。
+  4. **第二步 = 只判 4 项联系方式，命中只标记**：`china_filters` 仍被置空（「自定义模式不做中国商家过滤」
+     的语义没变），但 `requested_china`（置空前原值）∩ `CONTACT_FILTER_KEYS` 会被单独拿出来判一次；
+     命中后**不 `continue`** —— `STATE['rows']` 的 `marks` 字段记短标签（`MARK_LABELS` 把 reason 串
+     换成「微信 / +86 电话 / QQ / .cn 邮箱」），行照常进明细、照常能导出。
+  5. **标记的两个落点**：实时明细在公司名后挂 `.live-mark` 徽章；结果 Excel 的**「摘要」列**加
+     `[标记] 微信、.cn 邮箱 · 原摘要` 前缀。⛔ **不加列** —— 10 列契约是硬约定，飞书导出与建库都按下标读。
+  6. **内容类 5 项（供应商关键词 / 工厂关键词 / 中国制造 / 中文地址 / 平台关键词）自定义模式不判**：
+     用户只要求「域名 + 联系方式」两步，其余保持「你写什么就搜什么」的干净语义。
+- **零影响保证**：`domain_keys` 在标准模式恒为 `None`、`marks` 恒为 `[]`、`exclude_keys` 默认 `None` ——
+  标准网页搜索、谷歌地图、手动采集三条链路行为**一个字都没变**。`_smoke_search.py` 有断言钉住
+  「标准模式下 `extract_results` 收到的 `domain_keys` 必须全部是 None」。
+- **回归怎么守**：`_check_page.py` **R14 追加段**（`data-key` / `exclude_keys` 提交、`DOMAIN_RULE_KEYS` 成员、
+  `amazon.de` 命中而 `amazonas.com` 不命中、`_row10` 带 marks 仍 10 列且摘要带前缀、无 marks 时摘要逐字不变）
+  + R5 双哈希（⑫ 条）；`_smoke_search.py`（桩加第 4 参并复现拦截、`.cn` 被挡、`domain_rule_hit` 单测、
+  联系方式命中只标记 + 摘要前缀 + 取消勾选不标记、`exclude_keys` 白名单透传）；`_check_live_ui.py` **I 段**
+  （有 marks 才渲染徽章、无 marks 一个不多）。
+- **潜规则 / 坑**：
+  - ⛔ `_smoke_search.py` 里 `m.extract_results` 的桩**必须收第 4 个参数** `domain_keys`，否则 TypeError；
+    而且桩要**自己复现一遍拦截**（真实现藏在 `extract_results` 内部，整函数被替换就测不到）。
+  - ⛔ `requested_china` 必须在 `china_filters = set()` **之前**取，且 `china_filters is None` 要先落成
+    `CHINA_FILTER_DEFAULTS`（否则自定义模式拿到的勾选集是空，标记整体失效）。
+  - ⛔ `MARK_LABELS` 与 `china_filter_reasons()` 里那 4 条判据的**文案**绑定：改文案要同步，否则徽章显示长句
+    （不会崩，只是变长）。
+  - 只标记**只给自定义模式**（用户拍板）；标准模式与地图模式命中仍整条丢弃，别统一。
+
+#### M24 补：平台排除词加 YouTube / Facebook，Temu 归入中国电商平台（2026-10-19~20）
+
+- **用户原话**：「平台排除应该加上 youtube.com、facebook。」→「temu.com 这个你并没有加上去。」
+  → 再明确：「这个是域名筛选功能……现在的域名筛选是什么规则你就把这个加上去，比如说像阿里巴巴、淘宝，这个就类似淘宝一样。」
+- **两条清单的分工（用户拍板的口径）**：
+  - **YouTube / Facebook 是国际平台** → 进 `EXCLUDE_OPTIONS`（第 5 卡「平台排除词」，拼 `-youtube` / `-facebook`）。
+    （这两个站本来就在 `BLOCK_DOMAINS` 里，但那边只挡 `.com` 主域；`youtu.be` / `fb.com` 靠 `DOMAIN_FAMILY` 挡。）
+  - **Temu 是中国电商平台** → 与 `taobao` / `1688` / `alibaba` 同类，进 `CHINA_FILTER_OPTIONS`
+    （`('temu', '-temu', '排除 Temu', '中国电商平台')`），留在「域名过滤」第 5 卡的中国商家段。
+    ⛔ 不要放 `EXCLUDE_OPTIONS` —— 用户点名「像淘宝一样」。
+- **改动（两处配置）**：
+  1. `EXCLUDE_OPTIONS` 追加 `('youtube', '-youtube', 'YouTube（视频平台）')`、`('facebook', '-facebook', 'Facebook（社交平台）')`。
+  2. `CHINA_FILTER_OPTIONS` 在 `taobao` 之后追加 `('temu', '-temu', '排除 Temu', '中国电商平台')`
+     （自动进 `CHINA_FILTER_DEFAULTS` = 默认勾选；`china_filter_terms()` 自动拼进标准模式搜索词）。
+  3. `DOMAIN_FAMILY` 追加 `'youtube': ('youtube','youtu','youtube-nocookie')`、`'facebook': ('facebook','fb')`、
+     `'temu': ('temu',)` —— 自定义模式第一步按域名段挡（`DOMAIN_RULE_KEYS` 自动跟着扩）。
+  4. `BLOCK_DOMAINS` **不动**（重复，且会混掉「硬挡」与「可勾选」两套语义）。
+- **`FB` / `TEMU` 段为什么安全**：判据是**域名段完全相等**（`'fb' in host.split('.')`），
+  `fb-exports.com` 的段是 `fb-exports`、`temuco-chile.com` 的段是 `temuco-chile`，都不命中。
+- **零影响**：地图模式藏 `#excludesWrap`（YouTube/Facebook 那两项），中国商家段在地图模式仍生效且可见。
+- **回归**：`_check_page.py` R14 的 `DOMAIN_RULE_KEYS` 集合含 `temu`，并新增
+  `youtu.be` / `youtube-nocookie.com` / `m.facebook.com` / `fb.com` / `temu.com` / `temu.eu` 命中断言
+  + `temuco-chile.com` 不误杀；R5 只重算 `_BUILT_SHA`（两条清单都是注入数据，page.html 原文没动，⑬ 条）；
+  `_check_live_ui.py` H 段计数：`#chinaFilters` **14** 项、`#contactFilters` 4 项、`.syn` **18**、`.syn-off` 8、
+  `#excludes` **6** 项。
+
+### M25. 主页「上次参数」记忆（1/2/4/5 卡，2026-10-20）
+
+- **功能作用**：用户要求「1、2、4、5 的卡片功能参数保留上一次记忆功能」——
+  刷新页面 / 重启工具后，采集数量、目标国家 + 行业三级、搜索条件、参数自动回到上次用的值。
+- **所在位置**：`客户开发工具.py`（`UI_PREF_KEYS` / `ui_prefs_path()` / `GET|POST /api/ui_prefs`）；
+  `ui/page.html`（`PREF_RESTORING` / `collectPrefs` / `savePrefs` / `applyPrefs` / `loadPrefsAndStart`）。
+- **实现方法**：
+  1. **存后端文件，不用 `localStorage`**：工具端口会自动避让（`PREFERRED_PORTS` 逐个试），
+     换端口 = 换 origin，`localStorage` 会静默全丢。文件 = `DB/ui_prefs.json`（与客户库同目录）。
+  2. **路径由 `db.db_path()` 推导**，否则回归会把真实用户的记忆写脏；
+     另支持 `DP_UI_PREFS` 环境变量覆盖 —— `_run_all_reg.py` 给每个测试注入**独立**临时文件。
+  3. **恢复必须排在 `loadKeywords()` 之后**：行业/品类/产品的 `<option>` 由库数据渲染，
+     库没到就 set value → 落在不存在的 option 上，静默失败（页面看着像「根本没记住」）。
+  4. **三级联动逐级重建**：设行业 → `onIndustry()` → 设品类 → `onCategory()` → 设产品；
+     `lang` 必须在 `onIndustry()` **之后**设（它内部 `applyCountryLang()` 会把语言重置成国家默认值）。
+  5. **写侧防抖 400ms + `PREF_RESTORING` 门禁**：恢复期间禁止回写，否则会把页面默认值当用户选择存一遍。
+  6. **范围**：卡 1（`targetCount`）、卡 2（`country`）+ 关键词库（`industry/category/product/lang`）、
+     卡 4（`conds`）、卡 5（`source/mapsCity/pages/countryLimit/autoEnrich/excludes/chinaFilters`）
+     + 第 7 卡（`contactFilters` —— 它是原「中国商家过滤」拆出来的，同属参数）。
+     ⛔ 卡 3「产品关键词」（`products`）**不记**；卡 6 预览 / 卡 8 自定义搜索词**不记**。
+  7. **存不上不影响搜索**：POST 失败静默忽略；GET 遇到坏文件一律当「没有记忆」返回 `{}`（不许 500）。
+- **回归怎么守**：`_check_page.py` **R15**（`loadPrefsAndStart` 存在、恢复排在关键词库之后、
+  没有 `localStorage.` 调用、`/api/ui_prefs` 已接、行业先设再重建、路径跟随 `db_path` 打桩、
+  `DP_UI_PREFS` 覆盖生效、白名单 15 字段且不含 `products`）+ R5 双哈希（⑭ 条）；
+  `_smoke_search.py` ⑦（落临时目录、只存白名单、GET 回读、坏文件回落空对象、非对象体 400）；
+  `_check_live_ui.py` **J 段**（真机改数量/国家/取消条件 → 存盘 → 重载 → 三项都恢复，`products` 未入库）。
+- **潜规则 / 坑**：
+  - ⛔ 任何会打开主页并**操作控件**的测试，都必须有 `DP_UI_PREFS` 指向临时文件，
+    否则 400ms 防抖保存会把测试值写进用户真实记忆（`_run_all_reg.py` 已统一注入，单项直跑要自己设）。
+  - ⛔ `applyPrefs` 里漏字段**不会报错**，只是「这一项没记住」—— 加字段时前端收集/恢复 +
+    后端白名单 + R15 断言四处一起改。
+  - 硬刷新不丢（存后端）；换浏览器也不丢（同一个文件）。
+
 ---
 
 ## 4. 核心实现方式
@@ -755,10 +902,69 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 - 真实端口通过 `/api/ping` 报给扩展（`_RUN_PORT` 在 `__main__` 里回填）。
 - ⚠️ 改 `PREFERRED_PORTS` 必须同步改 `extension/ports.js` 的 `DP_PREFERRED_PORTS`（`_check_ext.py` 有硬断言）。
 
+### 4.4b 监听地址：`0.0.0.0`（M26，2026-10-20）
+
+- **用户原话**：「为什么我手机不能访问这个，我换了 192.168.6.239 也不行。」
+- **根因**：原来 `HOST = '127.0.0.1'` —— **回环地址**，只接受本机连接。手机填 `127.0.0.1` 指的是**手机自己**；
+  填电脑 IP 又因为服务没在网卡上监听而被拒（跟防火墙无关，该机器防火墙本就是关闭的）。
+- **改法**：`HOST = '0.0.0.0'`（通配 = 回环 + 所有网卡）。`__main__` 里本机地址仍打印
+  `http://127.0.0.1:{PORT}/`（**格式被 `_check_startup.py` 正则抓，⛔ 别改**），另起一行打印
+  `手机 / 平板（连同一个路由器）：http://<lan_ip>:{PORT}/`。
+- **`lan_ip()`**：UDP `connect(('8.8.8.8', 80))` **不发包**，只让系统按默认路由挑网卡再取地址；
+  比 `gethostbyname_ex` 可靠（后者的 VMware / Hyper-V 虚拟网卡经常排前面）。回环与 APIPA（169.254.x）返回 `''`。
+  实测本机 → `192.168.6.239`（以太网卡，`192.168.6.0/24`）。
+- ⛔ **`pick_port()` 必须同时探 `127.0.0.1` 和 `host`**：`host='0.0.0.0'` 时，Windows 上即使
+  `127.0.0.1:PORT` 已被占用，通配地址**仍可能 bind 成功**（对方 socket 有 `SO_REUSEADDR`，
+  Werkzeug 默认就设）。只探 host → 两个实例挑中同一端口、日志打同一个 URL，而实际访问落到
+  **先启动的进程**（Windows 具体地址优先）→ 用户以为「新实例没生效」。实测改造前
+  `pick(0.0.0.0)=5000` 而 `pick(127.0.0.1)=8000`，正是这个坑。
+- **安全代价（用户拍板接受）**：同一局域网内**任何**设备知道地址就能打开页面 —— 能看客户库、
+  能调 `/api/db/delete`。CORS 仍只回显 `chrome-extension://`，但那挡不住直接打开页面的浏览器。
+- **不受影响**：Chrome 扩展（`host_permissions` 是 `http://127.0.0.1/*`，回环照旧可用）；
+  `_check_ext.py` C 组端口一致性；`_check_startup.py` 的 A 段（进程内仍传 `'127.0.0.1'`）。
+- **验收**：临时脚本起真实例 → `http://192.168.6.239:8000/` HTTP 200（长度 72398，`mapsCity` 命中）+ 回环 200。
+- ⚠️ 手机仍连不上时按顺序查：① 手机与电脑是否**同一个路由器**（不是手机的 4G/5G）
+  ② 路由器是否开了「AP 隔离 / 客户端隔离」③ 地址用的是 `192.168.6.x` 那个、不是 `127.0.0.1`
+  ④ 电脑有多块网卡时 `lan_ip()` 可能猜中虚拟网卡 → 用 `ipconfig` 看真实那块。
+
 ### 4.5 页面/组件如何通信
 
 - **无框架、无构建**。Python 在 import 期读 `ui/*.html`，把数据以 JSON 注入 `*_PLACEHOLDER`，结果整页返回。**注入的既可以是数据，也可以是「共享代码文本」**：`<style>` 走 `PAGE_CSS_PLACEHOLDER`（从 `ui/page.html` 抽给 `/manual` `/db`），`ui/live-table.js` 走 `LIVE_TABLE_JS_PLACEHOLDER`（从独立文件注入主页与 `/manual`）。两种都发生在 **import 期** → 改完**必须重启工具**。
 - 前端与后端只通过 **HTTP 轮询**通信（无 WebSocket、无 SSE）。
+  - **谁启动轮询（M27）**：`STATE` 是进程内**单例**，`/api/status` 直接读它 → 同一台机器上
+    **任何**设备打开页面看到的都是同一个任务。但轮询**不是页面自带**的，原来只在
+    `start()` / `exportExcel()` / `exportFeishu()` 里 `setInterval` → 没点过「开始」的那一端
+    （手机、平板、另开的标签页）**永远不轮询**，界面是一具空壳（「本轮已采 0 个网站」），
+    看起来像「不是同一个页面」。现在 `loadPrefsAndStart()` 末尾调 `resumeRunningTask()`：
+    先进页面拉一次（历史日志一次性补齐）；只有「拉到 running 为真」或「这次请求失败（状态未知）」才挂心跳链，
+    空闲且成功则一个定时器都不留。
+  - **心跳调度（M28）**：`setInterval` 已整体换成一条 `setTimeout` 自调度链
+    （`pollTick()` → `schedulePollTick()`，**全页唯一一个定时器**，顺带驱动「更新于 N 秒前」）。
+    | 场景 | 间隔 |
+    |---|---|
+    | 运行中 · 电脑 | 1s |
+    | 运行中 · 手机 / 平板 | 2s（`POLL_IS_MOBILE`：`pointer: coarse` / `maxTouchPoints` / UA，**不看窗口宽度**） |
+    | 空闲（没在跑 / 已跑完待核对） | **不发请求**：`shouldKeepTicking()` 为假 → `stopPolling()` 彻底停链（用户 2026-10-20 拍板「不跑任务的时候，不要刷新」） |
+    | 页面在后台 | 10s（**降频但绝不停摆**：老 Safari 不派 `visibilitychange`） |
+    | 连续失败 | 指数退避 2s → 15s（失败时**不许停链**，否则后端重启后永不恢复） |
+
+    `visibilitychange` / `pageshow(persisted)` / `focus` / `online` **各绑恰好一次**（`pollWatched` 幂等），
+    切回前台立刻 `kickPoll()` 补一拍 —— 这是空闲后唯一的自动入口（不点开始、不刷新页面也能跟上
+    另一台设备起的任务，代价只是「切回前台」这一个动作）。`pollBusy` 防重入（手机慢网不堆请求）。
+    - ⛔ `stopPolling()` 必须复位 `pollStarted = false`：不复位下次 `startPolling()` 直接 `return`，
+      表现为「点了开始却再也不刷新」（静默）。
+    - ⛔ `pollTick` 必须 `async` + `await pollOnce()`：不 await 就在 `finally` 里判「继续/停链」拿到的是
+      **上一帧**的 `pollRunning`，从空闲被 `kickPoll` 拉起的第一拍会误判「没在跑」→ 立刻停链。
+    - 空闲态「更新于」小字清空（链停了它会冻成一个不变的时间，看着像还在刷）。
+  - **`round` 轮次自愈**：`api_start` / `api_export_feishu` 都会 `logs=[]`，别的设备的 `since`
+    停在大数字 → `logs[since:]` 永远空 → **日志区永久空白且不报错**。后端 `STATE['round']` 在这两处
+    `+1`、`/api/status` 回传；前端 `lastRound === null` 首帧**只采纳不清屏**（写成 `!==` 就每帧清屏）。
+    换轮那一帧的 `d.logs` 是用旧 `since` 切的残片 → 置 `pollRefetch` 让下一拍立刻用 `since=0` 重取。
+    ⛔ `/api/export_excel` **不许** `+1`（它不清 logs），`exportExcel()` 也**不许** `since=0`。
+  - **数据源也要回传**：`STATE['source']`（`api_start` 写入 `'google' / 'maps'`），`/api/status` 带给页面
+    → 手机才知道该显示「搜索中 / 个网站」还是「地图采集 / 个商家」。没有它，手机看地图任务文案是错的。
+  - ⛔ `poll()` 里「完成 / 待核对」那一支**不能带 `&& polling` 门禁**（`polling` 已下线）：首次 poll
+    （手机刚打开页面就是这种情况）会永远渲染不出状态行。完成态渲染完就交给调度器判停 —— 它会停链。
 - 扩展与工具只通过 **HTTP + 自定义头**通信；扩展内部只通过 `chrome.runtime.sendMessage` 通信（`fetch` 只在 service worker 里）。
 
 ### 4.6 核心算法
@@ -1038,7 +1244,7 @@ M20（手动链路延后入库）+ M22（自动链路也延后入库）之后，
 | 关键词库三级联动 + 条件词多语言化 | ✅ |
 | 计数报两组数（有效 X = 新增 / 采集总数 Y = 新增 + 已在库）（**M19**） | ✅ |
 | 客户库查询页 `/db`（多维筛选 + 分页 + 导出 Excel + **勾选/✕ 删除客户** + 居中模态框二次确认） | ✅ |
-| 主页「7. 自定义搜索词」（**M14**：原样搜、不套条件模板、不做中国过滤、国家只做标记） | ✅ |
+| 主页「8. 自定义搜索词」（**M14**：原样搜、不套条件模板、不做中国过滤、国家只做标记） | ✅ |
 | 主页「国家限定」四选一（**M15**：`none`/`cr`/`site`/`both`，默认关、仅标准网页模式） | ✅ |
 | 主页「本轮采集明细（实时 · 待核对）」逐行删除（**M16**，**M22 起重写**：可删窗口 = 采集中 **或** 待导出、居中模态框确认、**只删内存不碰客户库**） | ✅ |
 | 主页「1. 本次任务采集数量」提为第 1 张卡 + **强必填**（**M17**：原 1~6 号整体顺延、三条链路统一、清空即拦且零请求） | ✅ |
@@ -1170,7 +1376,7 @@ M20（手动链路延后入库）+ M22（自动链路也延后入库）之后，
 | Chrome（浏览器自动化） | 优先 Playwright 自带 Chromium，回退系统 Chrome / Edge（见 `create_browser_page()`） |
 | lark-cli | `C:\Users\admin\.trae-cn\plugins\trae-remote-official\lark\1.0.5\bin\lark-cli.exe` |
 | 启动方式 | 双击 `启动客户开发工具.bat`，或 `python 客户开发工具.py` |
-| 访问地址 | 启动日志会打印真实端口（`pick_port()` 实测决定，**别假设是 5000**） |
+| 访问地址 | 本机：`http://127.0.0.1:<端口>/`；手机 / 平板（同一路由器）：`http://192.168.6.x:<端口>/`，端口由 `pick_port()` 实测决定，**别假设是 5000** |
 
 ---
 

@@ -222,6 +222,25 @@ assert 'port=PORT' in _main and 'port=5000' not in _main, '__main__ 里端口又
 assert 'pick_port(' in _main, '__main__ 没调用 pick_port'
 print('  ✓ 启动端口自动避让就位（_check_startup.py 做真机 e2e 验证）')
 
+# ---- 5b. 必须监听 0.0.0.0（手机 / 平板同局域网访问） ----
+# 用户 2026-10-20 反馈手机打不开：127.0.0.1 是**回环**地址，只接受本机连接，
+# 手机填它指的是「手机自己」，填电脑 IP 又因为没在那个网卡上监听而被拒 → 必须绑 0.0.0.0。
+assert hasattr(m, 'lan_ip'), '缺少 lan_ip()（启动日志要印出手机能用的局域网地址）'
+assert "HOST = '0.0.0.0'" in _main, \
+    "listen 地址不是 0.0.0.0 —— 改回 127.0.0.1 手机/平板就再也连不上"
+assert 'lan_ip()' in _main, '__main__ 没调 lan_ip()，启动日志不会印局域网地址'
+# ⛔ 本机地址那行的**格式**被 _check_startup.py 用正则 r'http://127\.0\.0\.1:(\d+)/' 抓，
+#    改成 http://0.0.0.0:... 或去掉这行 → 真机启动 e2e 抓不到 URL 直接红。
+assert 'http://127.0.0.1:{PORT}/' in _main, \
+    '启动日志里丢了 http://127.0.0.1:{PORT}/ 这一行（_check_startup.py 靠它抓 URL）'
+import inspect as _insp
+_pk = _insp.getsource(m.pick_port)
+assert "'127.0.0.1'" in _pk, \
+    'pick_port 不再单独探 127.0.0.1 —— host=0.0.0.0 时会绕过已被占用的端口，' \
+    '两个实例抢同一端口、总访问到旧进程'
+assert m.pick_port.__defaults__[0] == '127.0.0.1', 'pick_port 的 host 默认值被改了'
+print('  ✓ 监听 0.0.0.0（局域网可访问）+ 启动日志仍保留本机地址 + 端口探测不吃回环占用')
+
 # ================= 6. 拆包防护断言（阶段 A：入口 + core/ 包） =================
 # 这几条守的是「会静默出错、不报错」的坑：算错程序根 → 悄悄换成空库；
 # 打桩失效 → 假数据进真实库；ENRICH_FILE 变成快照 → 外部脚本读到旧路径。
@@ -333,11 +352,37 @@ print('  ✓ R4 入口已无任何已搬迁的模块级定义（AST 扫描 19 �
 #    ⑩ ui/live-table.js 的**默认**确认框/✕ title 按新语义重写（「还没写进客户库 / 不进本轮结果 Excel」，
 #       去掉「会同时从客户库删掉它 + 先备份」），并新增 cfg.removeMsg；page.html 传入本页专用的 removeMsg
 #       → 两边都动了，**两个哈希一起变**（⑨⑩ 是同一轮改造的收尾）。
-#    那十次都是**故意**改的；以后凡是故意动 page.html 或 ui/live-table.js，下面两个字面量必须**一起**重算（漏一个就红）。
+#    ⑪ 主页过滤项拆卡（2026-10-19）：第 5 卡把「排除条件 + 中国商家过滤」合并成「域名过滤」，
+#       新增整行卡「7. 联系方式过滤」（原 7. 自定义搜索词顺延为 8.），每项右侧显示搜索语法
+#       （.syn/.syn-off）；顺手把过滤项 value 属性改成 esc() 转义（原来含双引号的 3 个排除词
+#       被截断成 "-"，预览一直少它们）。模板本体动了 → **两个哈希一起变**。
+#    ⑫ 自定义搜索词模式的两步过滤（2026-10-19，M24）：① 第 5 卡勾选的平台域名在**抓取前**按域名挡
+#       （domain_rule_hit，不进详情页）；② 联系方式 4 项命中**只标记不删行**（明细挂 .live-mark 徽章、
+#       摘要列加「[标记] …」前缀）。page.html 动了（data-key / exclude_keys 提交 / 两处文案 / .live-mark 样式）
+#       且 ui/live-table.js 动了（buildRow 挂徽章）→ **两个哈希一起变**。
+#    ⑭ 主页「上次参数」记忆（2026-10-20）：1/2/4/5 卡的表单参数存后端 `DB/ui_prefs.json`
+#       （`/api/ui_prefs` GET/POST），刷新/重启后恢复。page.html 新增一整块 JS（PREF_RESTORING /
+#       collectPrefs / savePrefs / applyPrefs / loadPrefsAndStart）+ 底部启动改成 `loadPrefsAndStart()`；
+#       入口新增 `UI_PREF_KEYS` / `ui_prefs_path()` / 两个路由 → **两个哈希一起变**。
+#    ⑮ 手机 / 平板看进度（2026-10-20，M27）：进页面自动对齐正在跑的任务。
+#       poll() 原来只在 start()/exportExcel()/exportFeishu() 里 setInterval → 没点过「开始」的那一端
+#       永远不轮询（后端同一份 STATE，界面却是空壳）。新增 resumeRunningTask() 挂到
+#       loadPrefsAndStart() 末尾；完成态渲染去掉 `&& polling` 门禁；RUN_SOURCE 改由 /api/status 回传
+#       （后端 STATE['source'] / api_start 写入）。模板本体动了 → **两个哈希一起变**。
+#    ⑯ 常驻心跳 + 切回补拉 + 轮次自愈（2026-10-20，M28）：poll 从 setInterval 换成单条 setTimeout
+#       自调度链（运行中电脑 1s / 手机 2s、空闲 5s、后台降频 10s、失败退避），新增 #updatedAt
+#       「更新于 N 秒前」与第二个 style 块；poll() 增加 round 换轮自愈（since 归零 + 清日志框 +
+#       liveTable.reset）；后端 STATE 加 round 并在 api_start / api_export_feishu 各 +1
+#       → **两个哈希一起变**。
+#    ⑰ 空闲停链：不跑任务时**一个请求都不发**（2026-10-20，M28 二次调整，用户原话「改一下，
+#       不跑任务的时候，不要刷新」）。删掉 POLL_GAP_IDLE，新增 shouldKeepTicking() / stopPolling()：
+#       pollTick 的 finally 只在「后端在跑」或「上一拍失败」时续排下一拍，否则彻底停链并把
+#       pollStarted 复位；空闲态「更新于」小字清空（链停了会冻成一个不变的时间）→ **两个哈希一起变**。
+#    那十七次都是**故意**改的；以后凡是故意动 page.html 或 ui/live-table.js，下面两个字面量必须**一起**重算（漏一个就红）。
 #    这条断言剩余的价值 = 「哪次误格式化/误翻译把模板改变形，立刻能被抓到」。
 #    ⛔ 如果只是改了别的东西却发现这里红：先看 diff，别顺手把基线改掉。
-_TMPL_SHA = '753e38af23fb60e947e3af2a5b6c6dc3e34b92b4239802d0d9bfe6cacb34479e'
-_BUILT_SHA = '19c8c77538d385ac13fe193d29e8e1b25afff6bfc767e77f74996e368227c005'
+_TMPL_SHA = 'af209fa7ca24a7b8ea509fb70e774e0aeb99b579983a3990941a04c436ee6533'
+_BUILT_SHA = '16b704f9eea68b39828fdf2d09c822353643507707790056ed86e971ab29c7b8'
 import hashlib as _hl
 _raw = open(os.path.join(_root, 'ui', 'page.html'), encoding='utf-8').read()
 assert _hl.sha256(_raw.encode('utf-8')).hexdigest() == _TMPL_SHA, \
@@ -557,7 +602,7 @@ finally:
 print('  ✓ R9 客户库查询页 /db：成品、共享样式已注入、控件齐全、行业枚举未硬编码、'
       '哨兵值与后端一致、导出落 output/查询导出/ 子目录、勾选/✕ 双入口删除就位')
 
-# --- R10 主页「7. 自定义搜索词」（原样搜 / 与标准模式互斥 / 不做中国过滤）---
+# --- R10 主页「8. 自定义搜索词」（原样搜 / 与标准模式互斥 / 不做中国过滤）---
 # 这一卡的价值全压在两条约定上：① 搜索词**一个字符都不加**；② 它与标准模式互斥。
 # 两条都是**静默失效**型 —— 写错了不会有任何运行时报错，只会悄悄拼上排除词、或悄悄整卡不生效。
 import ast as _ast2
@@ -602,7 +647,7 @@ for _need in ('id="countryLimit"', 'name="country_limit"',
               'value="none" checked', 'value="cr"', 'value="site"', 'value="both"',
               'function countryLimit()', 'function effectiveLimit()', 'function siteTerm()',
               "getElementById('countryLimit').style.display",
-              '#conds, #excludes, #chinaFilters, #countryLimit',
+              '#conds, #excludes, #chinaFilters, #contactFilters, #countryLimit',
               'country_limit: countryLimitVal'):
     assert _need in m.PAGE_HTML, f'主页缺少国家限定实现：{_need}'
 # 预览与实搜必须同位置：site: 拼在条件模板之后（后端 core + ' ' + site）
@@ -809,14 +854,16 @@ _pg = m.PAGE_HTML
 assert _pg.count('id="targetCount"') == 1, \
     f'#targetCount 出现了 {_pg.count("id=\"targetCount\"")} 次（搬卡时留下了重复 id？）'
 for _need in ('<h3>1. 本次任务采集数量', '<h3>2. 目标国家（单选，下拉选择）',
-              '<h3>7. 自定义搜索词（原样搜，不套上面的条件）',
-              '或在第 7 步填一条自定义搜索词',
+              '<h3>7. 联系方式过滤（默认全部勾选）',
+              '<h3>8. 自定义搜索词（原样搜，不套上面的条件）',
+              '或在第 8 步填一条自定义搜索词',
               '请先填写本次任务采集数量',
               '按新增个数计'):          # ⚠️ 这句原本在被搬走的那段 .note 里，必须逐字活下来
     assert _need in _pg, f'主页采集数量卡缺失：{_need}'
 # 编号必须**整轮**顺延：不能还留着任何一个旧号（否则提示语与实际卡片对不上）
-for _gone in ('<h3>6. 自定义搜索词', '<h3>1. 目标国家', '<h3>2. 产品关键词',
-              '<h3>3. 搜索条件', '<h3>4. 参数', '<h3>5. 关键词组合预览'):
+for _gone in ('<h3>7. 自定义搜索词', '<h3>6. 自定义搜索词', '<h3>1. 目标国家',
+              '<h3>2. 产品关键词', '<h3>3. 搜索条件', '<h3>4. 参数',
+              '<h3>5. 关键词组合预览'):   # ⚠️ 6. 预览**是**当前编号（新增的联系方式卡占了 7），别加进来
     assert _gone not in _pg, f'主页编号没有整轮顺延，仍残留旧标题：{_gone}'
 # ⛔ 负向守卫：前端必须没有「清空后兜底默认值」那一段（有它就等于没必填）。
 #    注意别把这段字面量写进注释，否则这条断言会被自己的注释撞红（老坑，踩过两次）。
@@ -845,7 +892,259 @@ assert _has_msg, 'api_start 里没有「本次任务采集数量」的拒绝文�
 print('  ✓ R13 主页采集数量卡：提为「1.」且编号整轮顺延、#targetCount 唯一、'
       '前端无兜底默认值，api_start 的 data.get("target_count") 不带缺省值且有拒绝文案')
 
+# --- R14 过滤项拆卡（域名过滤 / 联系方式过滤）---
+# 用户 2026-10-19 要求：「排除条件」与「中国商家过滤」本是一个功能 → 合并后再拆成两卡。
+# 这一支最怕三件事，且**全是静默失效型**：
+#   ① 联系方式那 4 项还在 #chinaFilters 里（界面上看着像拆了，其实一键批量会一起清空）；
+#   ② 切地图时把仍生效的组一起藏了（那 13 项里多数在结果阶段照常判断）；
+#   ③ value 属性没转义 → 含双引号的排除词被截断成 "-"，预览少词而实搜照样拼上。
+for _need in ('id="contactFilters"', 'id="chinaFilters"', 'id="excludesWrap"',
+              'toggleDomainFilters(true)', 'toggleDomainFilters(false)',
+              'toggleContactFilters(true)', 'toggleContactFilters(false)',
+              '<h3>7. 联系方式过滤', 'filter-row', 'syn-off',
+              '#chinaFilters .china-filter:checked, #contactFilters .china-filter:checked'):
+    assert _need in _pg, f'过滤项拆卡缺少：{_need}'
+# 三个容器都必须唯一（复制粘贴时最容易留下重复 id）
+for _cid in ('contactFilters', 'chinaFilters', 'excludesWrap'):
+    _cnt = _pg.count('id="%s"' % _cid)
+    assert _cnt == 1, f'id="{_cid}" 出现了 {_cnt} 次，必须唯一'
+# 地图模式只许藏「平台排除词」那一块；两组仍生效的过滤不许被藏
+for _bad in ("getElementById('chinaFilters').style.display",
+             "getElementById('contactFilters').style.display"):
+    assert _bad not in _pg, f'地图模式把仍生效的过滤组藏了：{_bad}'
+# value 必须转义（否则含双引号的 query 被截断 → 预览少排除词）
+assert 'value="${e[1]}"' not in _pg, '过滤项 value 没转义（含双引号的排除词会被截断成 "-"）'
+assert 'value="${esc(e[1])}"' in _pg, '过滤项 value 没用 esc() 转义'
+# 配置层真源：4 个 key、都在默认集里、query 必须为空（否则会同时进搜索词，语义就变了）
+import core.config as _cc
+assert _cc.CONTACT_FILTER_KEYS == ('phone_86', 'wechat', 'qq', 'email_cn'), \
+    f'CONTACT_FILTER_KEYS 被改了：{_cc.CONTACT_FILTER_KEYS}'
+assert set(_cc.CONTACT_FILTER_KEYS) <= m.CHINA_FILTER_DEFAULTS, \
+    '联系方式组的 key 不在 CHINA_FILTER_DEFAULTS 里（默认不勾选 → 静默不生效）'
+assert all(not q for k, q, _, _ in m.CHINA_FILTER_OPTIONS if k in _cc.CONTACT_FILTER_KEYS), \
+    '联系方式组的某项有搜索公式（它就不该单独成卡）'
+assert len(_cc.CONTACT_FILTER_KEYS) == 4, '联系方式组应为 4 项'
+
+# ---- R14 追加：自定义搜索词模式的两步过滤（M24，2026-10-19）----
+# 用户：「自定义搜索词时第一步先排除平台常用域名、不进入抓取分析；第二步联系方式只标记不删除。」
+# 这一段钉住三件容易静默失效的事：
+#   ① 勾选项的 **key** 没送到后端 → 第一步直接变成空集，什么都不挡（界面看着正常）；
+#   ② domain_rule_hit 退化成子串匹配 → amazon.com 反过来误杀 amazonas.com；
+#   ③ 标记落到「摘要」时把 10 列契约改坏 → 飞书导出/建库全按下标读，整表错位。
+assert 'data-key="${esc(e[0])}" value="${esc(e[1])}"' in _pg, \
+    '#excludes 的勾选框没带 data-key（自定义模式拿不到「排除条件」的 key）'
+assert 'exclude_keys: excludeKeys' in _pg, 'start() 没把 exclude_keys 提交给 /api/start'
+assert "document.querySelectorAll('#excludes input:checked')].map(i => i.dataset.key)" in _pg, \
+    'excludeKeys 没从 data-key 收集'
+assert set(_cc.DOMAIN_RULE_KEYS) == {'amazon', 'ebay', 'etsy', 'wikipedia', 'youtube', 'facebook', 'temu',
+                                     'alibaba', 'made-in-china', 'globalsources', '1688', 'taobao', 'cn'}, \
+    f'DOMAIN_RULE_KEYS 变了：{sorted(_cc.DOMAIN_RULE_KEYS)}'
+assert _cc.DOMAIN_FAMILY['amazon'] == ('amazon',), f"DOMAIN_FAMILY['amazon'] 被改了：{_cc.DOMAIN_FAMILY['amazon']}"
+assert _cc.DOMAIN_SUFFIX_RULES == {'cn': '.cn'}, f'DOMAIN_SUFFIX_RULES 被改了：{_cc.DOMAIN_SUFFIX_RULES}'
+assert m.domain_rule_hit('https://amazon.de/x', {'amazon'}) == 'amazon', \
+    'domain_rule_hit 挡不住 amazon.de（这正是加它的原因：is_blocked 只认 amazon.com）'
+assert m.domain_rule_hit('https://www.alibaba.com/x', {'alibaba'}) == 'alibaba', \
+    'domain_rule_hit 挡不住 alibaba.com'
+assert m.domain_rule_hit('https://amazonas.com/', {'amazon'}) is None, \
+    'domain_rule_hit 用了子串匹配（会误杀 amazonas.com）'
+# YouTube / Facebook 的**变体**：is_blocked 只认 .com 主域，youtu.be / fb.com 会漏
+assert m.domain_rule_hit('https://youtu.be/abcd1234', {'youtube'}) == 'youtube', \
+    'domain_rule_hit 挡不住 youtu.be（BLOCK_DOMAINS 只有 youtube.com）'
+assert m.domain_rule_hit('https://www.youtube-nocookie.com/embed/x', {'youtube'}) == 'youtube', \
+    'domain_rule_hit 挡不住 youtube-nocookie.com'
+assert m.domain_rule_hit('https://m.facebook.com/page', {'facebook'}) == 'facebook', \
+    'domain_rule_hit 挡不住 facebook 子域'
+assert m.domain_rule_hit('https://fb.com/page', {'facebook'}) == 'facebook', \
+    'domain_rule_hit 挡不住 fb.com'
+# Temu：主域 + 区域域名要挡，但 temu 开头的正常站（域名段不等）不能误杀
+assert m.domain_rule_hit('https://www.temu.com/goods.html', {'temu'}) == 'temu', \
+    'domain_rule_hit 挡不住 temu.com'
+assert m.domain_rule_hit('https://temu.eu/x', {'temu'}) == 'temu', 'domain_rule_hit 挡不住 temu.eu'
+assert m.domain_rule_hit('https://temuco-chile.com/', {'temu'}) is None, \
+    'domain_rule_hit 把 temuco-chile.com 误杀了（段相等判据被破坏）'
+assert m.domain_rule_hit('https://normal-shop.fr/', {'alibaba'}) is None, 'domain_rule_hit 误伤正常站'
+assert m.domain_rule_hit('https://alibaba.com/', set()) is None, '没勾选时不该挡任何站'
+assert _cc.MARK_LABELS.get('页面含微信/WeChat') == '微信', 'MARK_LABELS 丢了微信的短标签'
+_row10_src = {'title': 't', 'url': 'u', 'emails': [], 'phones': [], 'contact_url': '',
+              'score': 1, 'rating': '观察', 'snippet': '原摘要', 'formula': 'f', 'country': 'c',
+              'marks': ['微信']}
+_r10 = m._row10(_row10_src)
+assert len(_r10) == 10, f'标记把结果 Excel 的 10 列契约改坏了（实际 {len(_r10)} 列）'
+assert _r10[7].startswith('[标记] 微信 · '), f'摘要列没加标记前缀：{_r10[7]}'
+assert m._row10(dict(_row10_src, marks=[]))[7] == '原摘要', \
+    '没有标记时摘要必须逐字不变（标准模式/手动链路都靠这个）'
+assert 'live-mark' in m.PAGE_HTML, '共享组件里没有 .live-mark 徽章（只标记的痕迹看不到）'
+print('  ✓ R14 追加：data-key / exclude_keys 已接上；domain_rule_hit 段相等不误杀；'
+      '标记进摘要仍 10 列')
+print('  ✓ R14 过滤项拆卡：联系方式 4 项独立成「7.」卡、域名组留在第 5 卡、'
+      '地图只藏平台排除词、value 已转义')
+
+# ---- R15 主页「上次参数」记忆（2026-10-20）----
+# 用户：「1、2、4、5 的卡片功能参数保留上一次记忆功能，比如一是本次任务采集数量，二是目标国家。行业」
+# 这一段钉住四件会**静默失效**的事：
+#   ① 存 localStorage → 端口一漂移（换 origin）就全丢，用户会以为「根本没记住」→ 必须走后端文件；
+#   ② 恢复跑在 loadKeywords() 之前 → 三级下拉还没有 option，set value 落到空值上；
+#   ③ 把卡 3「产品关键词」也记住了 → 用户只点了 1/2/4/5，而且长文本会撑大文件；
+#   ④ ui_prefs 路径写死 _app_dir()/DB → 回归会把真实用户的记忆写脏（必须由 db.db_path() 推导）。
+assert 'async function loadPrefsAndStart' in _pg, '页面缺 loadPrefsAndStart（启动时恢复上次参数）'
+assert "document.getElementById('targetCount').value = p.targetCount" in _pg, \
+    '采集数量（卡 1）没被恢复 —— 用户点名的第一条就是它'
+assert 'await loadKeywords();' in _pg and 'applyPrefs(prefs);' in _pg, \
+    '恢复没有排在关键词库加载之后（行业/品类/产品的 option 那时还不存在）'
+assert 'loadPrefsAndStart();' in _pg, '底部启动没换成 loadPrefsAndStart()'
+assert 'localStorage.' not in _pg and 'localStorage[' not in _pg, \
+    '上次参数用了 localStorage —— 端口一漂移（换 origin）就全丢，必须走后端文件'
+assert "'/api/ui_prefs'" in _pg, '页面没接 /api/ui_prefs'
+_pref_i = _pg.index('ind.value = p.industry;')
+assert _pref_i < _pg.index('onIndustry();', _pref_i), '行业没先设、再重建品类下拉'
+assert 'def ui_prefs_path():' in _src and 'os.path.dirname(db.db_path())' in _src, \
+    'ui_prefs_path 没由 db.db_path() 推导 —— 回归会把真实用户的记忆写脏'
+assert _src.count("@app.route('/api/ui_prefs'") == 2, 'ui_prefs 应有 GET + POST 两个路由'
+assert {'targetCount', 'country', 'industry', 'category', 'product', 'lang',
+        'conds', 'source', 'mapsCity', 'pages', 'countryLimit', 'autoEnrich',
+        'excludes', 'chinaFilters', 'contactFilters'} <= m.UI_PREF_KEYS, \
+    f'UI_PREF_KEYS 缺字段：{sorted(m.UI_PREF_KEYS)}'
+assert 'products' not in m.UI_PREF_KEYS, '卡 3「产品关键词」不该被记忆（用户只点了 1/2/4/5）'
+_old_env = os.environ.pop('DP_UI_PREFS', None)   # 回归调度器可能已注入，先摘掉才能测默认分支
+_old_dbp = m.db.db_path
+try:
+    m.db.db_path = lambda: os.path.join(_root, '.workbuddy', '_reg_tmp', '_prefs_probe', '客户库.sqlite3')
+    assert m.ui_prefs_path() == os.path.join(
+        _root, '.workbuddy', '_reg_tmp', '_prefs_probe', 'ui_prefs.json'), \
+        f'ui_prefs 没跟随 db_path 打桩：{m.ui_prefs_path()}'
+    os.environ['DP_UI_PREFS'] = os.path.join(_root, '.workbuddy', '_reg_tmp', '_prefs_env.json')
+    assert m.ui_prefs_path().endswith('_prefs_env.json'), \
+        'DP_UI_PREFS 覆盖没生效 —— 回归点控件时会把真实记忆写脏'
+finally:
+    m.db.db_path = _old_dbp
+    os.environ.pop('DP_UI_PREFS', None)
+    if _old_env is not None:
+        os.environ['DP_UI_PREFS'] = _old_env
+print('  ✓ R15 上次参数记忆：1/2/4/5 卡走后端 ui_prefs.json、库就绪后再恢复、路径跟随 db_path')
+
+# ---- R16 手机 / 平板打开页面也能看到正在跑的任务（2026-10-20，M27）----
+# 症状：电脑点了「开始」看得到进度，手机打开同一个 URL 却永远是「本轮已采 0 个网站」。
+# 根因是**前端没订阅**（poll 只在 start/export 里 setInterval），不是两个页面、两份数据。
+assert 'async function resumeRunningTask' in _pg, \
+    '页面缺 resumeRunningTask（进页面自动对齐正在跑的任务）'
+assert 'await resumeRunningTask()' in _pg, \
+    'loadPrefsAndStart 没调 resumeRunningTask —— 手机打开页面仍是一具空壳'
+# 调用点必须在 loadPrefsAndStart 里，且排在 applyPrefs 之后
+_lp = _pg[_pg.index('async function loadPrefsAndStart'):]
+_lp = _lp[:_lp.index('\n}')]
+assert 'loadKeywords()' in _lp and _lp.index('applyPrefs(prefs)') < _lp.index('resumeRunningTask()'), \
+    'resumeRunningTask 必须排在 applyPrefs 之后（先把参数恢复到表单，再对齐进度）'
+# poll 必须返回状态对象，否则 resumeRunningTask 无从判断「后端还在不在跑」
+_pf = _pg[_pg.index('async function poll('):]
+_pf = _pf[:_pf.index('\n}\n')]
+assert 'return d;' in _pf, 'poll() 没返回状态对象 d（resumeRunningTask 靠它判断 running）'
+# ⛔ 完成/待核对那一支不能再用 `&& polling` 当门禁：首次 poll 时 polling 还是 null
+#    （手机刚打开就是首次），带上它就永远渲染不出「完成 / 待核对」状态行。
+assert 'if (!d.running && d.done){' in _pf, \
+    '完成态渲染又带上了 polling 门禁（首次 poll 时 polling 为 null → 状态行不刷新）'
+assert 'if (!d.running && d.done && polling)' not in _pg, \
+    'poll() 的完成分支又写回 `&& polling` —— 手机 / 平板首次 poll 渲染不出完成态'
+# 数据源必须以后端为准（手机没走过 start()，本地 RUN_SOURCE 是默认值）
+assert 'if (d.source) RUN_SOURCE = d.source;' in _pg, \
+    'poll() 没用后端回传的 source —— 手机上跑地图任务会显示成「搜索中 / 个网站」'
+assert "'source': STATE.get('source', 'google')," in _src, \
+    '/api/status 没回传 source'
+assert "STATE['source'] = 'maps' if source == 'maps' else 'google'" in _src, \
+    'api_start 没把本轮数据源写进 STATE'
+assert _cs.STATE.get('source') == 'google', \
+    f"STATE 缺 source 字段（当前 {_cs.STATE.get('source')!r}）"
+print('  ✓ R16 手机 / 平板看进度：进页面自动对齐后端任务、完成态不再被 polling 门禁挡住、'
+      '数据源由 /api/status 回传')
+
+# ---- R17 心跳调度 / 空闲停链 / 切回补拉 / 轮次自愈（2026-10-20，M28）----
+# 症状：手机开着页面时，电脑才点「开始」→ 手机永远不刷新（它没在问）；切回前台也不补拉。
+# 根因：poll() 用 setInterval 只在 start/export 里挂，没在跑的时候一点轮询都没有。
+# 现在：跑任务时 1s / 2s 轮询；**没在跑就彻底停链、一个请求都不发**（用户 2026-10-20 拍板）；
+#       空闲后重新开始只有三个入口 —— 点开始/导出、切回前台/网络恢复（各补一次）、刷新页面。
+import re as _re3
+
+for _need in ('const POLL_TICK_MS         = 1000;',
+              'const POLL_GAP_RUN_DESKTOP = 1000;',
+              'const POLL_GAP_RUN_MOBILE  = 2000;',
+              'const POLL_GAP_HIDDEN      = 10000;',
+              'function pollGapMs(',
+              'function clearLogBox(',
+              'function renderUpdatedAge(',
+              'async function pollOnce(',
+              'function schedulePollTick(',
+              'function shouldKeepTicking(',
+              'async function pollTick(',
+              'function startPolling(',
+              'function stopPolling(',
+              'function kickPoll(',
+              'function bindPollWatchers(',
+              'id="updatedAt"',
+              'class="upd"'):
+    assert _need in _pg, f'常驻心跳缺少：{_need}'
+# ⛔ 空闲**彻底不轮询**（用户 2026-10-20 拍板「不跑任务的时候不要刷新」）：
+#    既不许有空闲间隔常量，也不许在停链时漏掉 pollStarted 复位（漏了 = 下次点开始永不刷新）。
+assert 'POLL_GAP_IDLE' not in _pg, \
+    '又加回空闲心跳了（用户要求不跑任务时不刷新）'
+assert 'if (shouldKeepTicking()){' in _pg, \
+    'pollTick 的 finally 没按 shouldKeepTicking() 分支 —— 要么退化成常驻轮询，要么任务跑起来也不更新'
+assert 'await pollOnce();' in _pg, \
+    'pollTick 没 await pollOnce：请求落地前就去判断要不要停链，从空闲被拉起的第一拍会误判成' \
+    '「没在跑」→ 立刻停链 → 明明拉到了运行中也不再更新（真机 K2b 会红）'
+assert 'if (pollFails > 0) return true;' in _pg and 'return pollRunning;' in _pg, \
+    'shouldKeepTicking 判据不对：必须「失败就继续重试 / 只有后端在跑才继续」'
+assert '  pollStarted = false;' in _pg, \
+    'stopPolling 没复位 pollStarted —— 空闲后再点开始，startPolling 会直接 return（永不刷新）'
+# 「更新于」在空闲态必须清空：链停了时间戳会冻在那儿（写着「刚刚」却一直不变 = 骗人）
+assert 'if (!pollRunning && !pollFails){' in _pg, \
+    'renderUpdatedAge 没在空闲态清空小字 —— 会一直显示一个不再变化的「更新于 刚刚」'
+# 旧的 setInterval(poll) 与 polling 声明必须彻底退场，否则两套并存 = 双倍请求
+assert 'setInterval(poll' not in _pg, '还留着旧的 setInterval(poll) —— 会和心跳链重复发请求'
+assert 'let since = 0, polling = null;' not in _pg, '旧的 polling 声明还在（已被心跳调度器取代）'
+# 四个事件各绑**恰好一次**：重复绑 = 每次切回前台发 N 个 /api/status
+for _ev in ('visibilitychange', 'pageshow', 'focus', 'online'):
+    _n = _pg.count("addEventListener('%s'" % _ev)
+    assert _n == 1, f'{_ev} 绑定了 {_n} 次（必须恰好 1 次，重复绑会重复打请求）'
+# 设备判定只许认 pointer:coarse / maxTouchPoints / UA；用窗口宽度会在无头 / 窄窗判成手机
+_mob = _pg[_pg.index('const POLL_IS_MOBILE'):]
+_mob = _mob[:_mob.index('})();')]
+assert 'pointer: coarse' in _mob and 'maxTouchPoints' in _mob, \
+    '设备判定没看 pointer:coarse / maxTouchPoints（UADevice 判定会漏平板）'
+assert 'innerWidth' not in _mob, \
+    '设备判定用了窗口宽度 —— 无头 / 窄窗 Chrome 会被判成手机（运行中 2s，真机测试假红）'
+# 后台只能降频，不能彻底停摆（老 Safari / 被系统冻结时不派 visibilitychange → 永久停更）
+assert "visibilityState === 'hidden'" in _pg and 'POLL_GAP_HIDDEN' in _pg, \
+    '后台没做降频（彻底 clearTimeout 停摆会在不派事件的浏览器上永久不更新）'
+# round 自愈：后端回传 + 只两处 +1 + STATE 有默认值
+assert "'round': STATE.get('round', 0)," in _src, '/api/status 没回传 round'
+assert _src.count("STATE.update(round=STATE.get('round', 0) + 1") == 2, \
+    'round 只该在 api_start / api_export_feishu 两处 +1（api_export_excel 不清 logs，不许加）'
+assert _cs.STATE.get('round') == 0, f"STATE 缺 round 默认值（当前 {_cs.STATE.get('round')!r}）"
+# ⛔ 首帧必须是「只采纳、不清屏」：写成 round !== lastRound 会因 null !== 0 恒真 → 每帧清屏
+assert 'if (lastRound === null){' in _pg, \
+    'lastRound 首帧分支缺失 —— 每帧都会清空日志框，日志区永远空白'
+for _need in ('since = 0;', 'clearLogBox();', 'liveTable.reset();', 'pollRefetch'):
+    assert _need in _pg, f'换轮自愈缺少：{_need}'
+assert 'if (!roundChanged && d.logs' in _pg, \
+    '换轮那一帧把「用旧 since 切出来的残片日志」写进页面了（本轮日志前 N 行会永久缺失）'
+# 两个 finally 是地基：漏了就是「页面从此不再更新且不报错」
+assert 'pollBusy = false;' in _pg and 'schedulePollTick();' in _pg
+assert 'pollFails = 0;' in _pg, '成功后没清退避计数（一次闪断后永久慢速）'
+# 跨 script 顶层重名 = 整段脚本 SyntaxError 后完全不执行，而逐段 node --check 抓不到
+_js_live = open(os.path.join(_root, 'ui', 'live-table.js'), encoding='utf-8').read()
+_js_page = _pg[_pg.rindex('<script>'):]
+# ⚠️ 只认**列 0** 的声明（真正的顶层）：组件里 `var esc / domainOf / ratingCls ...` 都在
+#    makeLiveTable 闭包里、带缩进，按缩进也算进来会假红。
+_decl_re = _re3.compile(r'^(?:let|const|var|function)[ \t]+([A-Za-z_$][\w$]*)', _re3.M)
+_live_names = set(_decl_re.findall(_js_live))
+_page_names = _decl_re.findall(_js_page)
+_overlap = _live_names & set(_page_names)
+assert not _overlap, f'主页脚本与 ui/live-table.js 顶层重名：{sorted(_overlap)}（跨 script 重名 = 整段不执行）'
+_dups = {n for n in _page_names if _page_names.count(n) > 1}
+assert not _dups, f'主页脚本内顶层重复声明：{sorted(_dups)}（同一 script 内重复 let/const = SyntaxError）'
+print('  ✓ R17 心跳调度：运行中 1s/2s、后台降频、**空闲停链一个请求都不发**、切回补拉、'
+      '防重入、失败退避、轮次自愈（since 归零）、「更新于 N 秒前」、无跨 script 重名')
+
 print('  ✓ 拆包防护断言全部通过（程序根 / 单例 / 动态 ENRICH_FILE / 残留定义 / 模板哈希 / '
-      '第二页 R7 / 第三页 R9 / 主页 R10 / 主页 R11 / 主页 R12 / 主页 R13）')
+      '第二页 R7 / 第三页 R9 / 主页 R10 / 主页 R11 / 主页 R12 / 主页 R13 / 主页 R14 / R15 / R16 / R17）')
 
 print('\n✅ 页面静态检查通过')

@@ -148,6 +148,12 @@ function makeLiveTable(cfg){
     var old = showExisted && r && r.kind === 'existed';   // 「已在客户库，跳过」的轻量行
     var mails  = (!old && r.emails && r.emails.length) ? r.emails.join(', ') : '';
     var phones = (!old && r.phones && r.phones.length) ? r.phones.join(' / ') : '';
+    // 「只标记不删除」的徽章（自定义搜索词模式命中联系方式过滤时有值）。
+    // 后端已把 reason 串换成短标签（core/config.py 的 MARK_LABELS），这里只负责渲染。
+    // 灰字的老客户行不显示标记 —— 它本来就没进本轮结果。
+    var marks  = (!old && r.marks && r.marks.length)
+      ? r.marks.map(function(m){ return '<span class="live-mark">' + esc(m) + '</span>'; }).join('')
+      : '';
     var key = r ? r[keyField] : null;
     var tr = document.createElement('tr');
     tr.className = 'row-new';
@@ -156,7 +162,7 @@ function makeLiveTable(cfg){
     tr.innerHTML =
       '<td>' + (key == null ? (i + 1) : esc(key)) + '</td>' +
       '<td><a class="live-co" href="' + esc(r.url) + '" target="_blank" rel="noopener" ' +
-        'title="' + esc(r.title) + '">' + esc(r.title) + '</a><br>' +
+        'title="' + esc(r.title) + '">' + esc(r.title) + '</a>' + marks + '<br>' +
         '<span class="live-dom">' + esc(domainOf(r.url)) + '</span></td>' +
       '<td class="live-cell" title="' + esc(old ? '' : mails) + '">' +
         (old ? '<span class="live-miss">已在客户库</span>'

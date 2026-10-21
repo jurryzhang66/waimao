@@ -243,6 +243,11 @@ EXCLUDE_OPTIONS = [
     ('ebay', '-ebay', 'eBay（电商平台）'),
     ('etsy', '-etsy', 'Etsy（电商平台）'),
     ('wikipedia', '-wikipedia', '维基百科（百科）'),
+    # 2026-10-19 追加：视频 / 社交平台（用户点名）。这两站在 BLOCK_DOMAINS 里本来就硬挡，
+    # 但那边只有 `.com` 主域 —— youtu.be / fb.com / fb.watch 这些变体会漏进来；
+    # 而自定义模式又完全不拼搜索词，只能靠 DOMAIN_FAMILY 在本地按域名段挡。
+    ('youtube', '-youtube', 'YouTube（视频平台）'),
+    ('facebook', '-facebook', 'Facebook（社交平台）'),
 ]
 EXCLUDE_DEFAULT = ' '.join(v for _, v, _ in EXCLUDE_OPTIONS)
 
@@ -254,6 +259,9 @@ CHINA_FILTER_OPTIONS = [
     ('globalsources', '-globalsources', '排除 Global Sources', '供应商聚合平台'),
     ('1688', '-1688', '排除 1688', '中国 B2B 平台'),
     ('taobao', '-taobao -tmall', '排除淘宝 / 天猫', '中国电商平台'),
+    # Temu（拼多多海外版）：与淘宝/1688 同类，属「域名过滤」里的中国电商平台；
+    # query 有值 → 标准模式拼进搜索词；DOMAIN_FAMILY 里也挂了 'temu'，自定义模式按域名挡。
+    ('temu', '-temu', '排除 Temu', '中国电商平台'),
     ('cn', '-site:.cn', '排除 .cn 域名', '中国域名'),
     ('supplier_words', '-"China manufacturer" -"Chinese supplier"', '排除中国供应商关键词', '中国供应商/制造商表达'),
     ('factory_words', '-"factory in China" -"China factory"', '排除中国工厂关键词', '中国工厂表达'),
@@ -268,6 +276,59 @@ CHINA_FILTER_OPTIONS = [
     ('directory_cn', '', '排除中国 B2B 名录和供应商聚合站', '名录/聚合站信号'),
 ]
 CHINA_FILTER_DEFAULTS = {k for k, _, _, _ in CHINA_FILTER_OPTIONS}
+
+# 主页 UI 分组：这 4 项单独成「联系方式过滤」卡，其余 13 项留在第 5 卡「域名过滤」。
+# ⚠️ 这只是**界面分组**，后端仍按 china_filters 的 key 全量判断（17 项语义一字不变）。
+# ⚠️ 这 4 项的 query 必须为空 —— 它们只在结果 / 联系方式上判断，不进搜索词。
+#    （core/ui.py 把它当第 5 个字段塞进 CHINA_FILTERS_PLACEHOLDER 的 JSON，前端按它分流。）
+CONTACT_FILTER_KEYS = ('phone_86', 'wechat', 'qq', 'email_cn')
+
+# ---- 自定义搜索词模式「第一步：抓取前排除平台域名」用的域名族（M24，2026-10-19）----
+# 背景：自定义模式按用户要求「搜索词一字符不加」，所以没法靠 `-alibaba` 让谷歌别给 ——
+#   只能拿到结果后**在本地按域名判定**，命中就 continue（连详情页都不开、不抓联系方式）。
+# key 与 EXCLUDE_OPTIONS / CHINA_FILTER_OPTIONS 同名 —— 用户在「域名过滤」里勾哪个就挡哪个。
+#
+# 值是**品牌标签**：host 任意一段完全相等才算命中
+#   amazon.de / www.amazon.co.uk / sellercentral.amazon.com  → 全中
+# ⛔ 绝不用子串：否则 amazonas.com（亚马逊州）、my-ebay-shop.com 会被误杀。
+# ⛔ 这个字典**只**给自定义模式用 —— 标准模式与地图模式仍走 is_blocked() + china_filter_reasons()，
+#    那边一个字符都不改（用户 2026-10-19 拍板：只给自定义模式）。
+DOMAIN_FAMILY = {
+    'amazon': ('amazon',),
+    'ebay': ('ebay',),
+    'etsy': ('etsy',),
+    'wikipedia': ('wikipedia',),
+    'alibaba': ('alibaba',),
+    'made-in-china': ('made-in-china',),
+    'globalsources': ('globalsources',),
+    '1688': ('1688',),
+    'taobao': ('taobao', 'tmall'),
+    # YouTube / Facebook：主域已在 BLOCK_DOMAINS，这里补的是**变体**——
+    #   youtu.be（短链，搜索视频结果里最常见）、youtube-nocookie.com（嵌入域名）
+    #   fb.com / fb.me / fb.watch（Facebook 自有短域）
+    # ⛔ 仍是段相等：'youtu' 只匹配 host 段，不会误杀 youtube-downloader.com 之外的正常站；
+    #    'fb' 段极短，但真正等于 `fb` 的域只有 Facebook 自己那几个。
+    'youtube': ('youtube', 'youtu', 'youtube-nocookie'),
+    'facebook': ('facebook', 'fb'),
+    # Temu（拼多多海外版）：与 taobao / 1688 同类，属「域名过滤」里的中国电商平台
+    #（key 来自 CHINA_FILTER_OPTIONS 的 temu）；主域 temu.com、区域域 temu.eu 等，段相等即可覆盖。
+    'temu': ('temu',),
+}
+# 后缀判定（不是品牌族）：host 以该后缀结尾即命中。对应「排除 .cn 域名」那一项。
+DOMAIN_SUFFIX_RULES = {'cn': '.cn'}
+# 能参与「抓取前域名拦截」的全部 key。run_search 用它把勾选项过滤一遍 ——
+# 用户勾的 supplier_words / wechat 之类不是域名判据，混进来会被静默忽略，先在这里对掉。
+DOMAIN_RULE_KEYS = frozenset(DOMAIN_FAMILY) | frozenset(DOMAIN_SUFFIX_RULES)
+
+# 「只标记不删除」时显示给用户的短标签：china_filter_reasons() 的 reason 串 → 徽章文字。
+# ⚠️ 映射不到就**原样显示**（文案改了不会崩，只是徽章变长）—— 刻意不做 KeyError / 断言。
+# ⚠️ 与 china_filter_reasons() 里那 4 条联系方式判据的**文字**绑定：那里改文案，这里要跟。
+MARK_LABELS = {
+    '联系方式含 +86 中国电话': '+86 电话',
+    '页面含微信/WeChat': '微信',
+    '页面含 QQ': 'QQ',
+    '邮箱域名为 .cn': '.cn 邮箱',
+}
 
 BLOCK_DOMAINS = [
     'amazon.com', 'ebay.com', 'etsy.com', 'walmart.com', 'wikipedia.org',
