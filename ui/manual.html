@@ -140,6 +140,9 @@
 
 <script>
 let since = 0, polling = null;
+// 已点过「停止」、worker 还在收尾（M30）：让停止键保持压灰，状态行显示「正在停止…」。
+// 由 loadManualState() 在 st.running 变 false 时复位。
+let stopPending = false;
 
 function logBox(msg){
   const b = document.getElementById('log');
@@ -292,10 +295,14 @@ async function loadManualState(){
   const bar = document.getElementById('bar');
   bar.style.width = st.total ? Math.round((st.done / st.total) * 100) + '%' : '0';
   document.getElementById('btnRun').disabled = !!st.running;
-  document.getElementById('btnStop').disabled = !st.running;
+  // ⛔ 带上 stopPending：点过停止后 worker 还要把当前这条采完才退出（1~10 秒），
+  //    这期间 st.running 仍是 true。只看 st.running 的话按钮会每秒被重新点亮 → 用户可以连点。
+  document.getElementById('btnStop').disabled = !st.running || stopPending;
+  if (!st.running) stopPending = false;          // 真的退出了，标志复位
   const s = document.getElementById('mstatus');
   if (st.running){
-    s.textContent = '采集中… 当前：' + (st.current || '');
+    s.textContent = stopPending ? '⏹ 正在停止…（等当前这一条处理完）'
+                                : '采集中… 当前：' + (st.current || '');
   } else if (st.total){
     s.textContent = '✅ 本次批量结束：新增 ' + (st.added || 0) + ' · 已在库 ' + (st.existed || 0) +
                     ' · 失败 ' + (st.failed || 0) + '（其中升级抓取 ' + (st.upgraded || 0) + ' 次）';
@@ -386,8 +393,20 @@ async function run(){
 }
 
 async function stopIt(){
-  await fetch('/api/manual/stop', {method:'POST'});
-  logBox('已请求停止手动采集…');
+  // 与主页同一套「立刻看得见」的做法（M30）：先压灰再发请求，避免连点产生一串 POST。
+  // 注意这里停的是**手动队列**（MANUAL_STATE['stop']），不碰自动搜索的 STATE['stop']。
+  const b = document.getElementById('btnStop');
+  if (b) b.disabled = true;
+  stopPending = true;
+  try {
+    await fetch('/api/manual/stop', {method:'POST'});
+  } catch (e){
+    stopPending = false;
+    if (b) b.disabled = false;
+    logBox('停止请求发送失败：' + e);
+    return;
+  }
+  logBox('已请求停止手动采集…（等当前这一条处理完，约 1~10 秒）');
 }
 
 async function closeBrowser(){

@@ -195,7 +195,7 @@ D:\waimao\dp\
 - **当前完成状态**：✅ 已投产；⚠️ 评分口径有已知缺陷（见 §7）
 - **修改时注意**：
   - ⚠️ `PRODUCT_WORDS` 是**写死的猫砂垫词表**，`score_item` 已开可选入参 `product_words`（传了就按传入算，不传保持旧行为）。自动链路暂时不传，手动采集会传。
-  - ⚠️ `enrich()` 用 `page.new_tab()`，而 `open_search` 用 `page.get()` —— 混用时标签页会串（本项目踩过）。
+  - ⚠️ `enrich()` 用 `page.new_tab()` 后 `nav(tab, url)`，而 `open_search` 是 `nav(page, url)` —— 混用时标签页会串（本项目踩过）。
   - ⚠️ 按钮「补全联系方式+评分」**已从界面删除**，但 `enrich_core` / `_enrich_worklist` / `enrich()` / `_save_enrich_excel` **必须保留**（脚本与搜索链路在用）。
 
 ---
@@ -927,6 +927,94 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
   ② 路由器是否开了「AP 隔离 / 客户端隔离」③ 地址用的是 `192.168.6.x` 那个、不是 `127.0.0.1`
   ④ 电脑有多块网卡时 `lan_ip()` 可能猜中虚拟网卡 → 用 `ipconfig` 看真实那块。
 
+### 4.4c 谷歌反爬 / 验证码（M29，2026-10-21）
+
+- **用户原话**：「太容易触发谷歌的验证码了。是不是你搜索框的提交频率太高了?」
+- **先纠正假设**：**不是提交频率**。`search_url()` 是拼 URL 直接 `page.get()`，
+  整条链路不向搜索框输入（只有连续 3 次拿不到结果才降级到「点搜索框 + 回车」）；
+  默认参数一轮只发 4~6 次 SERP 请求。这个量级不可能触发频率风控。
+- **真因四件**：① 每次任务全新空白 profile（无 cookie，每次都是「第一次见的访客」）
+  ② 自动化特征没藏 ③ **认不出外语 / 新版拦截页** → 被当成「没渲染」→ 15s 内同 URL 连发 3 次
+  ④ 撞码后 `continue` 立刻发下一条，无请求计数、无熔断。
+- **持久 profile**：`create_browser_page(persistent=True)` 用 `DB/_chrome_profile`（`paths.chrome_profile_dir()`），
+  **只给 `run_search` / `run_maps` 两处**；`_manual_browser()` 与 `enrich_core()` 保持 `False`。
+  ⛔ 目录里是真实谷歌 cookie，仓库是 **public** → `.gitignore` 必须有 `DB/_chrome_profile/`（⛔ 别写成 `DB/*`）。
+  - `_profile_busy()`：`--user-data-dir` 被另一实例占用时 Chrome 会「转交请求后自己退出」→ 表现为启动失败。
+    做法是读 `DevToolsActivePort` 的端口 + `socket.create_connection(timeout=0.3)` 探活，占用则**退回一次性 profile**
+    （宁可不复用 cookie，也不能让任务起不来）。`ChromiumPage()` 抛错也只降这一级。
+  - `_clean_profile_locks()` 只碰 **5 个确切锁文件**（`SingletonLock` / `SingletonSocket` / `SingletonCookie` /
+    `lockfile` / `DevToolsActivePort`），⛔ 绝不含 `Default`（那是真数据目录）。干净 `quit()` 本就会自删。
+- **反自动化开关** `--disable-blink-features=AutomationControlled` 加在 `create_browser_page` 的 options 上，
+  **全项目只许一处**（`add_init_js` 只作用于当前 tab，`enrich()` 的 `new_tab` 不继承）。
+  实测 `navigator.webdriver` 本来就是 `false`（DrissionPage 默认已处理），这个开关只是保险。
+- **验证码识别 `has_captcha(page, deep=False)` 三级**：`states.is_loading` 门禁（加载中读 `page.url` 拿到的是上一页）
+  → URL 片段（`/sorry/`、`google.com/sorry`、`/recaptcha/`，**语言无关**）
+  → 4 个选择器（`#captcha-form` / `form[action*="sorry"]` / `iframe[src*="recaptcha"]` / `div.g-recaptcha`）
+  → 仅 `deep=True` 才取整页 html 查 8 语言文案。⛔ **绝不用 `'recaptcha' in html`**：正常结果页也加载该资源。
+- **`wait_results` 三态**：`'ok'` / `'empty'`（壳页面可重开）/ `'blocked'`（被拦截，**必须退避不许重发**）。
+  旧写法把它当布尔用，会把拦截页当空结果再打一次 —— `_check_serp.py` 有静态断言禁 `if wait_results(page`。
+- **节奏 `serp_pace(kind='page'|'query')`**：page 6~14s、query 20~50s、每 8 次一次长休息 60~120s；
+  偏态随机（`u ** SERP_SKEW`，多数短、偶尔长）；内部走 `sleep_check()` 所以**点停止可立刻打断**。
+  计数由 `_serp_tick()` 统一记（翻页 / 重试 / 撞码重发全都算），每轮任务开头 `_serp_reset()`。
+- **撞码熔断 `wait_captcha`**：60s / 180s 两轮退避 + `retry()` 重发原 URL；两轮仍不通 →
+  锁内置 `STATE['stop']=True`、**锁外** `log()`。调用点用 `return` 而不是 `continue`（`continue` 会立刻重发），
+  且撞码重发**不占** attempts 名额。
+- **顺带优化**：`db_has_customer()` / `_live_has_url()` 前移到 `enrich` **之前**（重复客户不再白跑补全），
+  `enrich()` 开头 `sleep(0.5~1.5)`。
+- **已知代价（用户拍板接受）**：10 条从 1~2 分钟变 **3~6 分钟**，每 8 次搜索有一次 1~2 分钟停顿（日志「☕ 长休息」）。
+  且**不保证不再出验证码** —— 谷歌风控多因素加权，**出口 IP 权重很高**，本机 IP 若已被标记只能缓解。
+- **守卫**：`.workbuddy/_check_serp.py`（回归第 2 项，24 项中的一项）。
+
+### 4.4d 停止链路：为什么现在能在 1~2 秒内停（M30，2026-10-21）
+
+- **用户原话**：「在任务进行中，我按停止的话，它要等好一会儿才会停止任务。不能立刻停止吗？」
+- **先纠正假设**：慢的**不是** `/api/stop`。它只置三个标志位，不持锁、不做 IO，
+  `app.run(threaded=True)` 保证它不会被 worker 挡住 → **毫秒级返回**。
+  慢的是**读侧**：worker 正在执行的调用里根本没人看这个标志。
+- **旧账（量化）**：
+
+  | 正在执行 | 旧等待 | 原因 |
+  |---|---|---|
+  | `sleep_check` / 长休息 | ≤0.5s | 本来就是 0.5s 分片 ✅ |
+  | `wait_results()` | 12~35s | 循环里不看 stop；`page.eles(timeout=1)` 还隐含 `doc_loaded(10s)` |
+  | `has_captcha(deep=True)` | 1~42s | `page.url`/`ele`/`html` 各隐含 10s |
+  | **`page.get()`** | **最坏 126s** | 全项目没传过 timeout → 出厂 `30s × retry_times=3` + 3×2s |
+  | **`enrich()` 一个客户** | **最坏 ~7.3 分钟** | 首页 + 2 个联系页 = 3 次整页导航，函数里无 stop |
+  | `page.quit()` | 1~8s | kill + `tasklist` ≤5s，而 `running=False` 写在它之后 |
+  | 前端观感 | 整个等待期 | `stop()` 只有一行 fetch：不置灰、不改文案、不 `kickPoll()` |
+
+- **`nav(page, url)`（核心）**：**不再用 `page.get`**，改用 CDP `Page.navigate(url=…, _timeout=NAV_FIRE=1s)`
+  只「点火」——命令超时也不影响浏览器继续加载，且全程**不会** `Page.stopLoading()`；
+  之后由自己的 `while` 循环每 `NAV_POLL=0.3s` 读 `states.ready_state` / `states.is_loading`
+  （纯本地字段、零 CDP 往返）。load 事件到了立刻返回，否则到软预算 `NAV_SOFT=3s` 返回。
+  → **停止延迟 ≈ 0.3~0.9 秒，与 `NAV_BUDGET=30s` 无关**。这就是「预算给足」与「立刻能停」并存的原因。
+  - ⛔ 软预算/总预算到点都返回 **True**（带着已加载内容继续），只有用户停止才返回 **False**。混成一个含义，
+    慢站一超时就会被上层当成「用户停止」，整轮误杀。
+  - ⛔ 全项目 **零 `page.get` / `tab.get`**（`_check_stop.py` 用 ast 守）。它一超时
+    `_wait_loaded()` 就 `Page.stopLoading()`，把正在渲染的页面掐死（M31 的根因，见下）。
+  - ⛔ 读 DOM / 读地址也必须走非阻塞版本：`raw_html()`（`DOM.getDocument`+`DOM.getOuterHTML`）/
+    `raw_url()`（`Target.getTargetInfo`）。`page.html`、`page.url`、`tab.url` 内部都先 `doc_loaded()`。
+  - `create_browser_page()` 兜底 `set.timeouts(base=6, page_load=30)` / `retry_times(1)` /
+    `retry_interval(0.5)`：任何漏网导航最坏 31s 而非 126s；`base` 从 10→6 也削掉了
+    「半秒的小查询被隐式放大成 10 秒」。
+- **抓联系方式 = 等内容，不等加载**（M31）：`_grab_html()` 每 `ENRICH_POLL=0.4s` 取一次 DOM，
+  `clean_emails()` 一命中立刻走；页面真加载完却还没邮箱就给 `ENRICH_GRACE=2s` 后转联系页。
+  预算 `ENRICH_WAIT=10s`（首页）/ `ENRICH_CONTACT_WAIT=6s`（联系页）。
+  ⛔ 只读一次 DOM 会漏掉晚渲染的邮箱（实测 shopping-bags 第 2.4s、ecohound 第 8s 才出现）。
+  ⛔ 等 load 事件也没用：这类站点的 `readyState` 会一直停在 `loading`（长轮询/统计/慢图）。
+  联系页先跟页面自己的 contact 链接（`_contact_candidates`，限同域名），再退回 `CONTACT_PATHS`。
+- **新增检查点**：`wait_results` 四态（+`'stopped'`）、`has_captcha` 加载中直接 `False`、
+  `enrich` 入口与每次 nav 后、`extract_results` anchor 循环、`run_search` 的 `for pg`/`for item`、
+  `maps_open`/`maps_detail` nav 之后。
+- **停止 = 丢弃半截数据**（拍板）：`enrich` 被停止时返回 `info['stopped']=True`，
+  `run_search`/`run_maps` 看到就 `return` —— 那一行不进 `STATE['rows']`、不入库。
+- **三个状态字段**：`stop`（worker 开关）/ `stopping`（界面「正在停止…」+ 停止键压灰）/
+  `stopped`（结束文案区分「已按你的要求停止」与「采集完成」）。⛔ `running` 语义不动
+  （仍在 `quit()` 之后才 False，它兼着「开始键能不能点」）。
+- **前端**：`stop()` = 压灰 + 立刻改文案 + `kickPoll()`；`setButtons` 判 `pollStopping`
+  （否则 `poll()` 每拍都把它重新点亮）；`/manual` 用 `stopPending` 防同一个坑。
+- **守卫**：`.workbuddy/_check_stop.py`（第 25 项）。
+
 ### 4.5 页面/组件如何通信
 
 - **无框架、无构建**。Python 在 import 期读 `ui/*.html`，把数据以 JSON 注入 `*_PLACEHOLDER`，结果整页返回。**注入的既可以是数据，也可以是「共享代码文本」**：`<style>` 走 `PAGE_CSS_PLACEHOLDER`（从 `ui/page.html` 抽给 `/manual` `/db`），`ui/live-table.js` 走 `LIVE_TABLE_JS_PLACEHOLDER`（从独立文件注入主页与 `/manual`）。两种都发生在 **import 期** → 改完**必须重启工具**。
@@ -976,6 +1064,10 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 | 搜索评分 | `score_item()` + `rating()` | 6 项加分，满分 90；≥70 重点 / ≥50 普通 / 其他观察 |
 | 中国信号过滤 | `china_filter_reasons()` | 16 个可勾选项，分「查询词级」（不参与的进搜索公式）与「结果级」（看标题/网址/摘要/邮箱/电话/正文）两套 |
 | 域名黑名单 | `is_blocked()` | 三层：`BLOCK_SUBSTR` → `SEARCH_ENGINE_PREFIX` → `BLOCK_DOMAINS` + `endswith('.cn')` 兜底 |
+| 验证码识别 | `has_captcha(page, deep=False)` | 三级：加载门禁 → URL 片段（语言无关）→ 4 选择器 → deep 才查 8 语言文案。⛔ 不用 `'recaptcha' in html` |
+| 结果就绪判定 | `wait_results()` | **三态** `'ok'` / `'empty'` / `'blocked'`；blocked 必须退避、不许重发 |
+| 请求节奏 | `serp_pace(kind)` + `_serp_tick()` | page 6~14s / query 20~50s / 每 8 次长休息 60~120s；偏态随机；`sleep_check` 可被打断 |
+| 撞码熔断 | `wait_captcha()` | 60s / 180s 两轮退避 + `retry()` 重发；两轮不通 → `STATE['stop']=True`（锁内改、锁外 log） |
 | 最新结果查找 | `find_latest_result()` + `_result_time_key()` | **从文件名解析日期时间**排序（字典序 ≠ 时间序；mtime 会被「另存为」带偏） |
 | 身份词提取 | `maps_role_word()` | 从 `COND_ROLES` 取该国语言的第一个词，拼进地图查询词 |
 
@@ -987,7 +1079,11 @@ Flask /api/start ──────┤   collect_from_html（手动采集/扩展
 
 ### 4.8 浏览器自动化如何接入
 
-- 每次任务 `create_browser_page()` 起一个**独立 Chrome 实例**（独立临时 profile + 随机空闲调试端口），不依赖用户手工开 9222。
+- 每次任务 `create_browser_page()` 起一个 **Chrome 实例**（随机空闲调试端口），不依赖用户手工开 9222。
+  - **M29 起两种 profile**：`run_search` / `run_maps` 传 `persistent=True` → 复用 `DB/_chrome_profile`
+    （攒谷歌 cookie，降低验证码率）；手动采集与 `enrich()` 仍用一次性临时 profile。
+  - 被别的实例占用（`_profile_busy()` 探 `DevToolsActivePort`）→ 自动退回临时 profile，**不会起不来**。
+  - 进程级加 `--disable-blink-features=AutomationControlled`（全项目唯一一处）。
 - 自动链路「任务开头建、`finally` 里 quit」；手动采集是**惰性常驻**（点一下采一条，重建 Chrome 要 3–5s），并用 `atexit` 兜底关闭。
 - 两者互不干扰（各自独立实例）。
 

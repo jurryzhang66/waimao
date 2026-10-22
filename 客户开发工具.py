@@ -59,12 +59,17 @@ from core.config import (CONDITIONS, COND_TEMPLATE, COND_ROLES, COND_LANGS, cond
                          EXCLUDE_OPTIONS, EXCLUDE_DEFAULT, CHINA_FILTER_OPTIONS,
                          CHINA_FILTER_DEFAULTS, BLOCK_DOMAINS, BLOCK_SUBSTR, CONTACT_FILTER_KEYS,
                          DOMAIN_FAMILY, DOMAIN_SUFFIX_RULES, DOMAIN_RULE_KEYS, MARK_LABELS,
-                         SEARCH_ENGINE_PREFIX)
+                         SEARCH_ENGINE_PREFIX,
+                         SERP_PAGE_MIN, SERP_PAGE_MAX, SERP_QUERY_MIN, SERP_QUERY_MAX,
+                         SERP_LONG_REST_EVERY, SERP_LONG_REST_MIN, SERP_LONG_REST_MAX,
+                         SERP_SKEW, CAPTCHA_BACKOFF, CAPTCHA_POLL,
+                         NAV_BUDGET, NAV_POLL, NAV_FIRE, NAV_SOFT,
+                         ENRICH_WAIT, ENRICH_CONTACT_WAIT, ENRICH_POLL, ENRICH_GRACE)
 from core.paths import (LEGACY_RESULT_FILES, RESULT_DATE_RE, OUTPUT_DIRNAME, MAPS_PLACE_ID_RE,
                         _app_dir, output_dir, _safe_name_part, build_result_name,
                         ts_result_path, _result_time_key, find_latest_result,
                         query_export_dir, ts_query_export_path, QUERY_EXPORT_DIRNAME,
-                        DB_DIR, DB_FILE)
+                        DB_DIR, DB_FILE, chrome_profile_dir)
 # ⚠️ 刻意**不**写 `from core.paths import ENRICH_FILE` —— 它是会被重新赋值的活变量，
 #    那样导入只能拿到快照。读写一律走 `paths.ENRICH_FILE`。
 from core import paths       # 模块对象：_save_enrich_excel 要靠它写 paths.ENRICH_FILE
@@ -112,9 +117,74 @@ def __getattr__(name):
 
 
 
-def create_browser_page():
-    """启动独立的 Chrome 调试实例，避免依赖用户手工开启 9222 端口。"""
-    profile_dir = tempfile.mkdtemp(prefix='waimao_dp_chrome_')
+# ---- 持久 profile 的锁清理（2026-10-21，反爬用）----
+# Windows 的 Chromium 用 ProcessSingleton 独占 user-data-dir：正常退出会连 lockfile /
+# DevToolsActivePort 一起删掉（真机实测：干净 quit 后这些文件都不在）。
+# 只有崩溃 / 被强杀才残留，此时下次启动会「把命令行交接给老进程再自己退出」→
+# 新调试端口永不监听 → DrissionPage 空转 30 秒后抛 BrowserConnectError。
+_PROFILE_LOCKS = ('lockfile', 'SingletonLock', 'SingletonCookie',
+                  'SingletonSocket', 'DevToolsActivePort')
+
+
+def _profile_busy(profile_dir):
+    """profile 是否正被另一个 Chrome 占着（看 DevToolsActivePort 里那台还答不答应）。
+
+    ⛔ 只做只读探测，绝不 kill 任何进程 —— 那可能是用户自己开的窗口。
+    """
+    try:
+        with open(os.path.join(profile_dir, 'DevToolsActivePort'), encoding='utf-8',
+                  errors='ignore') as f:
+            port = int((f.readline() or '').strip())
+    except Exception:
+        return False
+    try:
+        with socket.create_connection(('127.0.0.1', port), timeout=0.3):
+            return True
+    except Exception:
+        return False
+
+
+def _clean_profile_locks(profile_dir):
+    """清掉上次非正常退出留下的锁。返回 False = 目录被占用，调用方必须退回临时 profile。
+
+    ⛔ 只删这 5 个确切文件名，**永不 rmtree、永不碰 Default/** —— 那等于把攒下来的 cookie
+       全丢掉，表现就是「反爬完全没效果」，而且不会有任何报错。
+    """
+    if _profile_busy(profile_dir):
+        return False
+    for name in _PROFILE_LOCKS:
+        p = os.path.join(profile_dir, name)
+        try:
+            if os.path.islink(p) or os.path.isfile(p):
+                os.remove(p)
+        except PermissionError:
+            return False          # 被活进程持有 → 删不掉，这本身就是「占用」信号
+        except OSError:
+            pass
+    return True
+
+
+def create_browser_page(persistent=False):
+    """启动独立的 Chrome 调试实例，避免依赖用户手工开启 9222 端口。
+
+    persistent=True 用 DB/_chrome_profile（跨任务保留谷歌 cookie）；默认 False 仍是一次性
+    临时目录。真机验证（DrissionPage 4.1.1.4）：带 expires 的持久 cookie 能跨进程带出。
+    ⛔ 两条链路绝不能同时用同一个 profile：同一 --user-data-dir 的第二个 Chrome 会把命令行
+       交接给老进程后自己退出，新调试端口起不来（30 秒后 BrowserConnectError）。所以
+       「手动采集」与「补历史欠账」保持临时 profile —— 它们可能与自动任务同时活着。
+    """
+    profile_dir = ''
+    if persistent:
+        try:
+            profile_dir = chrome_profile_dir()
+        except Exception:
+            profile_dir = ''
+        if profile_dir and not _clean_profile_locks(profile_dir):
+            log('⚠️ 持久 profile 正被另一个 Chrome 占用（上次没退干净，或你手动开着它），'
+                '本次改用临时 profile：cookie 不会累积，其它功能不受影响')
+            profile_dir = ''
+    if not profile_dir:
+        profile_dir = tempfile.mkdtemp(prefix='waimao_dp_chrome_')
     # 先向系统申请一个空闲端口，避免固定 9222 被其它 Chrome 占用。
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(('127.0.0.1', 0))
@@ -134,8 +204,34 @@ def create_browser_page():
     options.set_argument('--no-sandbox')
     options.set_argument('--disable-gpu')
     options.set_argument('--disable-popup-blocking')
+    # 反自动化特征：关掉 Blink 的 AutomationControlled（= navigator.webdriver 恒 false）。
+    # 实测 DrissionPage 4.1.1.4 本来就不传 --enable-automation、webdriver 已是 false，
+    # 这条是**保险**（防止将来 configs.ini/系统策略把它打开）。
+    # ⛔ 别换成 page.add_init_js(...)：那只作用于当前 tab，enrich() 新开的 tab 会露标记。
+    # ⛔ --disable-blink-features 是「整串覆盖」语义，全项目只允许出现这一次。
+    options.set_argument('--disable-blink-features=AutomationControlled')
     log('启动独立浏览器实例（自动分配调试端口）...')
-    return ChromiumPage(options)
+    try:
+        page = ChromiumPage(options)
+    except Exception:
+        if not persistent:
+            raise
+        # 持久 profile 起不来（版本不兼容 / 目录损坏）→ 只降一级退回临时 profile，不递归
+        log('⚠️ 持久 profile 启动失败，改用临时 profile 重试一次')
+        return create_browser_page(persistent=False)
+    # ---- 超时兜底（M30，2026-10-21）----
+    # 出厂默认 page_load=30s + retry_times=3 → 一个没传 timeout 的 page.get 最坏要 126 秒。
+    # 所有导航都已改走 nav()（它自己控制预算与停止检查），这里只是**防漏网**：
+    # 将来谁再写一个裸 page.get，最坏也只有 1 次重试 × 30s + 0.5s ≈ 31s，而不是 126s。
+    # base 从 10s 降到 6s：page.ele()/page.html/page.url 都会**隐式**等 doc_loaded(base)，
+    # 那些「半秒级的小查询」在页面加载中会被悄悄放大成 10 秒，也是停止不跟手的来源之一。
+    try:
+        page.set.timeouts(base=6, page_load=NAV_BUDGET)
+        page.set.retry_times(1)
+        page.set.retry_interval(0.5)
+    except Exception:
+        pass          # 桩对象 / 旧版 DrissionPage 没有这些方法时不影响主流程
+    return page
 
 
 # ================= 搜索核心（复用原脚本） =================
@@ -277,24 +373,117 @@ def url_key(href):
     return p.netloc + p.path.rstrip('/')
 
 
-def has_captcha(page):
+# ---- 人机验证识别 + 退避（2026-10-21 重写，降验证码率的关键之一）----
+# ⛔ 旧判据只有 `'unusual traffic' in page.html` + `#captcha-form`，两个致命缺口：
+#    ① 外语国家（hl=fr/de/es…）的拦截页文案是本地化的 → 完全认不出
+#    ② 新版拦截落在 /sorry/index?continue=… → 认不出
+#    认不出的后果不是「少一次提示」：wait_results 会把它当成「页面没渲染」→ 15 秒内对
+#    同一 URL 连发 3 次 → 把「疑似」升级成「确认限流」。
+CAPTCHA_URL_MARKS = ('/sorry/', 'google.com/sorry', '/recaptcha/')
+CAPTCHA_CSS = ('css:#captcha-form', 'css:form[action*="sorry"]',
+               'css:iframe[src*="recaptcha"]', 'css:div.g-recaptcha')
+# 文案判据：覆盖 COND_LANGS 的 8 种语言 + 英文兜底。
+# ⛔ 绝不要加 'recaptcha' 这种泛词：正常结果页也会加载 reCAPTCHA 资源 → 误报 → 白等 240 秒再停掉整轮。
+CAPTCHA_TEXTS = ('unusual traffic', 'automated queries',
+                 'trafic inhabituel',             # fr
+                 'ungewöhnlicher datenverkehr',   # de
+                 'tráfico inusual',               # es
+                 'traffico insolito',             # it
+                 'ongebruikelijk verkeer',        # nl
+                 'olağan dışı trafik',            # tr
+                 'حركة مرور غير عادية')            # ar
+
+# 本轮 SERP 请求计数 / 撞码轮次。只在搜索线程里读写（api_start 用 running 挡住了并发）。
+_SERP_STATE = {'req': 0, 'captcha': 0}
+
+
+def has_captcha(page, deep=False):
+    """是否被谷歌拦到人机验证页。三级判据，由便宜到贵。
+
+    ① URL（语言无关、命中率最高）② 轻量选择器（旧式表单 / reCAPTCHA iframe）③ 整页文本
+    ⛔ `page.url` 内部会 doc_loaded()，页面还在加载时能把 12 秒预算一次吃光 —— 必须先看
+       `page.states.is_loading`（纯本地字段、零 CDP 往返）再用。少了这道门禁就会变成
+       「正常加载被误判成没渲染 → 重开 → 越撞越发」。
+    """
     try:
-        return 'unusual traffic' in page.html or bool(page.ele('#captcha-form', timeout=1))
+        states = getattr(page, 'states', None)
+        loading = bool(getattr(states, 'is_loading', False)) if states is not None else False
+        if loading:
+            # 页面还在加载：URL 是上一页的、DOM 是半截的，任何判据都不可信。
+            # 直接返回「没有验证码」，交给下一拍（wait_results 每轮 / 下一次 open_search）再看。
+            # ⛔ 这样写还有一个好处：`page.ele()` / `page.html` 都会**隐式**等 doc_loaded(base)，
+            #    加载中调用它们等于白白多等 6~10 秒 —— 而那正是「点了停止还在转」的来源之一。
+            return False
+        if any(m in (page.url or '').lower() for m in CAPTCHA_URL_MARKS):
+            return True
+        for css in CAPTCHA_CSS:
+            if page.ele(css, timeout=0):      # ⚠️ 必须用关键字：ele(locator, index, timeout)
+                return True
+        if not deep:
+            return False
+        html = (page.html or '').lower()
+        return any(t in html for t in CAPTCHA_TEXTS)
     except Exception:
         return False
 
 
-def wait_captcha(page, max_wait=180):
-    if not has_captcha(page):
-        return True
-    log('⚠️ 检测到谷歌人机验证，请在浏览器窗口手动完成（脚本每3秒检测，最多等3分钟）')
-    waited = 0
-    while waited < max_wait and not STATE['stop']:
-        time.sleep(3)
-        waited += 3
+def _wait_captcha_clear(page, seconds):
+    """在 seconds 内每 CAPTCHA_POLL 秒轻量复查一次（只查 URL+选择器，不取整页 HTML）。
+
+    返回 True = 验证已通过（用户手动解了）或本来就没了；False = 窗口用尽 / 用户点了停止。
+    """
+    end = time.time() + seconds
+    while time.time() < end:
+        if STATE['stop']:
+            return False
         if not has_captcha(page):
-            log('✅ 验证完成，继续')
             return True
+        time.sleep(min(CAPTCHA_POLL, max(0, end - time.time())))
+    return not has_captcha(page)
+
+
+def wait_captcha(page, max_wait=None, retry=None):
+    """撞码后的退避与恢复。返回 True = 可以继续；False = 本轮到此为止（调用方必须 return）。
+
+    流程：先在 CAPTCHA_BACKOFF[0]=60s 窗口里等人工过验证 → 过不了就退避后 retry() 重发一次 →
+    再在 CAPTCHA_BACKOFF[1]=180s 窗口里等 → 仍不通就置 STATE['stop'] 停掉整轮。
+
+    ⛔ max_wait 只保留签名兼容（旧的 wait_captcha(page, 180) 仍能调）；窗口大小由 CAPTCHA_BACKOFF 决定。
+    ⛔ 返回 False 的唯一含义是「别再发了」。旧代码在撞码后 `continue` 到下一个查询、
+       连 4~8 秒延时都跳过 —— 那才是最快把「疑似」变成「拉黑」的写法。
+    ⛔ 置 stop 必须在锁内、log 必须在锁外：STATE_LOCK 非可重入，log() 内部自己也抢同一把锁。
+    """
+    if not has_captcha(page, deep=True):
+        _SERP_STATE['captcha'] = 0
+        return True
+    windows = list(CAPTCHA_BACKOFF)
+    for i, window in enumerate(windows, 1):
+        _SERP_STATE['captcha'] = i
+        log(f'⚠️ 检测到谷歌人机验证（第 {i}/{len(windows)} 轮）：最多等 {window} 秒，'
+            f'可在浏览器窗口手动完成，脚本每 {CAPTCHA_POLL} 秒复查一次')
+        if _wait_captcha_clear(page, window):
+            log('✅ 验证已通过，继续')
+            _SERP_STATE['captcha'] = 0
+            return True
+        if STATE['stop']:
+            return False
+        if retry and i < len(windows):
+            log(f'   仍在验证页，退避 {window} 秒后重新打开同一搜索页…')
+            if not sleep_check(window):
+                return False
+            try:
+                retry()
+            except Exception as e:
+                log(f'   退避后重发失败：{type(e).__name__}: {e}')
+            _serp_tick()          # 重发也是一次真实请求，不计数就会低估频率
+            if _wait_captcha_clear(page, windows[i] if i < len(windows) else window):
+                log('✅ 退避重发后验证已通过，继续')
+                _SERP_STATE['captcha'] = 0
+                return True
+    with STATE_LOCK:
+        STATE['stop'] = True
+    log('⛔ 连续 2 轮人机验证都没通过：本轮已暂停，不再继续发请求。'
+        '建议等 10~30 分钟再跑，或换个网络出口；也可以先在浏览器里手动搜一次谷歌。')
     return False
 
 
@@ -305,6 +494,137 @@ def sleep_check(seconds):
         if STATE['stop']:
             return False
         time.sleep(min(0.5, max(0, end - time.time())))
+    return True
+
+
+# ---------- 导航（M30，2026-10-21）：让「停止」在 1 秒级生效 ----------
+def raw_url(page):
+    """不等待加载、也**不会掐断加载**地取当前地址。
+
+    ⛔ 别用 `page.url`：它内部是 `_run_cdp_loaded()` → 先 `doc_loaded()`（base 超时 6s），
+       超时后照样 `Page.stopLoading()`。页面还在渲染时调它 = 一边干等 6 秒、一边把页面打死。
+    """
+    try:
+        r = page.run_cdp('Target.getTargetInfo', targetId=page._target_id, _timeout=2)
+        return ((r or {}).get('targetInfo') or {}).get('url') or ''
+    except Exception:
+        return ''
+
+
+def raw_html(page, timeout=3):
+    """加载中也能安全读取当前 DOM（不 `wait.doc_loaded()`、不 `stopLoading()`）。
+
+    ⛔ 别用 `page.html`：它第一行就是 `self.wait.doc_loaded()` —— 页面一直转圈时会阻塞到
+       base 超时（6s），然后 `Page.stopLoading()` 把正在渲染的内容掐掉。
+    ⛔ 也别用 `run_js`：导航过程中执行上下文会丢，实测只返回一个 20 字节的错误串。
+    ✅ `DOM.getDocument` + `DOM.getOuterHTML` 在加载中每次都拿得到当前已解析的 DOM，
+       实测 ecohound.co.uk 从 108KB 一路长到 352KB，全程可读。
+    """
+    try:
+        doc = page.run_cdp('DOM.getDocument', depth=0, _timeout=2)['root']['nodeId']
+        r = page.run_cdp('DOM.getOuterHTML', nodeId=doc, _timeout=timeout)
+        return (r or {}).get('outerHTML') or ''
+    except Exception:
+        return ''
+
+
+def nav(page, url, soft=None):
+    """打开一个网址，**期间每 NAV_POLL 秒看一眼停止标志**。
+
+    返回 True  = 页面可以解析了（load 事件已到，或软预算用完但 DOM 已可用）
+    返回 False = 用户点了停止（调用方必须立刻 return，不要再解析/再发请求）
+
+    ⛔ 为什么不能用 `page.get()`：DrissionPage 的 `_wait_loaded()` 一到超时就
+       `Page.stopLoading()` —— **把正在加载的页面掐死**。M30 用 `get(timeout=1)` 点火，
+       等于第 1 秒就 stopLoading，于是「2.4 秒才渲染出来的邮箱」永远抓不到
+       （2026-10-21 用户反馈「抓取成功率掉下来」的根因，实测两站都有复现）。
+       顺带一提 `get()` 还有第二个坑：新建 tab 的 `_ready_state` 是上一页的 'complete'，
+       `_wait_loaded()` 第一眼就返回 True —— 返回得快，但 DOM 还是空的。
+    ✅ 所以这里用 CDP `Page.navigate` 只「点火」：命令超时也不影响浏览器继续加载，
+       之后按**本地字段**（ready_state / is_loading，零 CDP 往返）分阶段等。
+    ⛔ 导航失败不算「停止」：交给上层看内容够不够用（与 M30 的语义一致）。
+    ⛔ 软预算 soft 是刻意的：有站点的 readyState 会一直停在 loading（长轮询/统计脚本），
+       死等 load 事件等于每站白等 30 秒。DOM 通常 3 秒内就能解析了，剩下的让它后台继续。
+    """
+    soft = NAV_SOFT if soft is None else soft
+    t_fire = time.time()
+    deadline = t_fire + NAV_BUDGET
+    soft_end = t_fire + soft
+    try:
+        page.run_cdp('Page.navigate', url=url, _timeout=NAV_FIRE)
+    except Exception:
+        pass                    # 导航本身失败不算「停止」：交给上层看内容是否够用
+    started = False             # 是否真的看见过「正在加载」——防把上一页的 complete 当成已就绪
+    while True:
+        if STATE['stop']:
+            return False
+        try:
+            rs = page.states.ready_state
+            loading = bool(page.states.is_loading)
+        except Exception:
+            return True         # 拿不到 states（桩对象/驱动异常）就当已就绪，别在这儿卡死
+        if loading or rs in ('loading', 'connecting'):
+            started = True
+        elif started:
+            return True         # 本次导航的 load 事件到了
+        now = time.time()
+        if now >= soft_end:
+            # 软预算到点就交差：DOM 早已可解析，剩下的资源（长轮询/统计/慢图）让它后台继续。
+            # ⛔ 别为了「等 load 事件」把软预算调大 —— 这些站点的 readyState 会一直停在 loading。
+            return True
+        if now >= deadline:
+            log(f'⏱️ 页面 {NAV_BUDGET:.0f} 秒仍未加载完，带着已加载内容继续：{str(url)[:60]}')
+            return True         # 超时 ≠ 停止：继续往下解析，能抓到多少算多少
+        time.sleep(NAV_POLL)
+
+
+# ---------- SERP 节奏（2026-10-21，降验证码率的核心）----------
+def _serp_reset():
+    """新一轮开始时清零计数（run_search 开头调用）。"""
+    _SERP_STATE['req'] = 0
+    _SERP_STATE['captcha'] = 0
+
+
+def _serp_tick():
+    """每发一次 SERP 请求 +1 —— 重试、翻页、撞码后的重发**全部要算**。
+
+    ⛔ 漏计不会报错，只是长休息永远不触发（反爬白做，且看起来一切正常）。
+    """
+    _SERP_STATE['req'] += 1
+    return _SERP_STATE['req']
+
+
+def _skew(lo, hi):
+    """偏态随机而不是均匀分布：u**SERP_SKEW 把结果压向 lo，偶尔冲到 hi。
+
+    固定区间（如 uniform(2,4)）是最容易被统计出「这是脚本」的特征之一 ——
+    人的操作间隔是长尾的：多数很快，偶尔卡很久。
+    """
+    return lo + (hi - lo) * (random.random() ** SERP_SKEW)
+
+
+def serp_pace(kind='page'):
+    """两次 SERP 请求之间的人为延迟。返回 False = 用户点了停止（调用方必须立刻 return）。
+
+    kind='page'  → 6~14 秒（翻页 / 重试之后）
+    kind='query' → 20~50 秒（一条查询含翻页跑完）
+    每满 SERP_LONG_REST_EVERY 次请求，再插一次 60~120 秒长休息，然后把计数清零。
+
+    ⛔ 必须走 sleep_check 而不是 time.sleep：
+       ① 线上：长休息能被「停止」按钮立刻打断（否则最多失灵 2 分钟）；
+       ② 回归：_smoke_search 把 sleep_check 打成 no-op，用 time.sleep 会让一次冒烟跑几分钟。
+    """
+    lo, hi = ((SERP_QUERY_MIN, SERP_QUERY_MAX) if kind == 'query'
+              else (SERP_PAGE_MIN, SERP_PAGE_MAX))
+    if not sleep_check(_skew(lo, hi)):
+        return False
+    n = _SERP_STATE['req']
+    if n and n % SERP_LONG_REST_EVERY == 0:
+        rest = _skew(SERP_LONG_REST_MIN, SERP_LONG_REST_MAX)
+        log(f'☕ 已连续发出 {n} 次搜索，长休息 {rest:.0f} 秒（点「停止」可立即中断）')
+        if not sleep_check(rest):
+            return False
+        _SERP_STATE['req'] = 0
     return True
 
 
@@ -346,27 +666,49 @@ def count_results(page):
 
 
 def wait_results(page, min_items=3, timeout=12):
-    """等结果真正渲染出来再抓。旧版判断 div#search 已失效（新版谷歌页面没有 #search/#rso），
-    改为数「标题链接」条数，并等它稳定两轮。返回 True 表示已就绪。"""
+    """等结果真正渲染出来。返回**四态**字符串：
+
+    'ok'      = 结果已就绪（连续两轮条数一致）
+    'empty'   = 壳页面 / 结果没渲染（**可以**重开一次）
+    'blocked' = 被谷歌拦到人机验证（**绝不能**重发，必须退避）
+    'stopped' = 用户点了停止（调用方必须立刻 return，别再去退避/重开）
+
+    ⛔ 改成三态的原因：旧版返回 bool，于是「被拦」和「没渲染」共用同一条重试路径 ——
+       拦截页被当成壳页面，15 秒内对同一 URL 连发 3 次，把「疑似」升级成「确认限流」。
+    ⛔ M30 补第四态 'stopped'：这个循环最长要转 12 秒（每轮还可能被 doc_loaded 放大），
+       原来完全不看停止标志 → 用户按了停止还要在这里干等十几秒。
+    ⛔ 本函数只做判定，**不调 wait_captcha**：退避重发需要 URL，那是 open_search 的职责。
+    ⛔ 所有调用方都必须按字符串比较（`== 'ok'`）。写成 `if wait_results(...)` 会因为
+       'empty'/'blocked'/'stopped' 都是真值而把每一次失败都当成成功 —— 不报错，只是永远抓不到结果。
+    """
     end = time.time() + timeout
     last, stable, tick = -1, 0, 0
     while time.time() < end:
+        if STATE['stop']:
+            return 'stopped'
+        try:
+            if page.states.is_loading:          # 加载中查 DOM 会隐含等 doc_loaded，纯浪费
+                time.sleep(0.3)
+                continue
+        except Exception:
+            pass
         n = count_results(page)
         if n >= min_items:
             if n == last:
                 stable += 1
                 if stable >= 1:
-                    return True
+                    return 'ok'
             else:
                 stable = 0
             last = n
         else:
             tick += 1
-            if tick % 5 == 0 and has_captcha(page):     # page.html 较贵，每 5 秒才查一次
-                if not wait_captcha(page):
-                    return False
+            if tick % 2 == 0 and has_captcha(page):   # 每 2 秒轻量查一次（URL+选择器，不取 html）
+                return 'blocked'
         time.sleep(1)
-    return False
+    if STATE['stop']:
+        return 'stopped'
+    return 'blocked' if has_captcha(page, deep=True) else 'empty'
 
 
 def type_search(page, formula):
@@ -390,25 +732,52 @@ def type_search(page, formula):
 
 def open_search(page, formula, country_params, start=0, min_items=3, attempts=3):
     """打开搜索结果页，并确认结果真的渲染出来。
+
     实测谷歌偶尔只返回一个「壳页面」：搜索框在、结果区是空的（同时混着
     "Updating location" / 地区选择），此时 page.refresh() 无效，**重新导航一次即可恢复**。
-    所以这里做多轮重开，最后一轮换成搜索框输入兜底。"""
+    所以这里做多轮重开，最后一轮换成搜索框输入兜底。
+
+    ⛔ 遇到 'blocked'（人机验证）走的是**另一条路**：退避等人工 / 退避后重发一次，
+       绝不占用 attempts 名额去连发 3 次 —— 那正是把「疑似」变成「拉黑」的最快写法。
+    ⛔ 返回值仍是 bool（调用方 1446/1458 与 _probe_* 都按真值用）。
+       「整轮是否要停」通过 STATE['stop'] 传递，不改返回类型。
+    """
     for i in range(attempts):
         if i:
-            if not sleep_check(random.uniform(1.0, 2.5)):
+            if not serp_pace():                    # 重试也走同一套节奏（原来只等 1~2.5s）
                 return False
         try:
             if i == attempts - 1:
                 type_search(page, formula)              # 最后一轮换策略
             else:
-                page.get(search_url(formula, country_params, start))
+                if not nav(page, search_url(formula, country_params, start)):
+                    return False                        # 用户点了停止：别再发下一个请求
         except Exception as e:
             log(f'   打开搜索页失败（第 {i + 1} 次）：{type(e).__name__}: {e}')
             continue
-        if wait_results(page, min_items=min_items, timeout=12):
+        _serp_tick()                               # 先计数再判定：异常页面也是一次真实请求
+        status = wait_results(page, min_items=min_items, timeout=12)
+        if status == 'ok':
+            _SERP_STATE['captcha'] = 0
             if i:
                 log(f'   ↻ 第 {i + 1} 次重新打开后结果才渲染出来')
             return True
+        if status == 'stopped':
+            return False                           # 用户点了停止（在 wait_results 里感知到的）
+        if status == 'blocked':
+            if not wait_captcha(page, retry=lambda: nav(
+                    page, search_url(formula, country_params, start))):
+                return False           # 两轮都没过 → wait_captcha 已置 stop，调用方必须 return
+            st2 = wait_results(page, min_items=min_items, timeout=12)
+            if st2 == 'ok':
+                log('✅ 退避重发后结果已恢复')
+                _SERP_STATE['captcha'] = 0
+                return True
+            if st2 == 'blocked':
+                return False           # 又撞上了，别在这里继续循环
+            if st2 == 'stopped':
+                return False
+            continue                   # 'empty'：退避后仍是壳页面，交给下一轮重开
         if i < attempts - 1:
             log(f'   ↻ 结果没渲染出来（第 {i + 1} 次），重新打开搜索页…')
     log(f'   ⚠️ 连续 {attempts} 次都没取到结果，跳过本页')
@@ -478,10 +847,19 @@ def resolve_goto(page, href, card=None):
         return dom
     tab = None
     try:
-        tab = page.new_tab(href)
-        tab.wait.doc_loaded(timeout=15)
-        time.sleep(0.4)
-        return tab.url
+        tab = page.new_tab()
+        if not nav(tab, href):
+            return None
+        # ⛔ 别用 tab.wait.doc_loaded()/tab.url：两者都会等加载，超时还会 stopLoading。
+        #    这里只要「最终落到哪个地址」，用非阻塞的 raw_url 轮询即可。
+        for _ in range(10):
+            u = raw_url(tab)
+            if u and not _is_search_engine_url(u):
+                return u
+            if STATE['stop']:
+                return None
+            time.sleep(0.3)
+        return raw_url(tab) or None
     except Exception:
         return None
     finally:
@@ -532,6 +910,8 @@ def extract_results(page, seen_titles, china_filters=None, domain_keys=None):
     except Exception:
         anchors = []
     for a in anchors:
+        if STATE['stop']:
+            break          # 别再往下解析了（每条 /goto 结果都可能真开一个标签）
         try:
             h3 = a.ele('tag:h3', timeout=0)
             title = (h3.text or '').strip() if h3 else ''
@@ -701,33 +1081,128 @@ def clean_phones(html):
     return out[:3]
 
 
+def _grab_html(tab, budget):
+    """边等边看：每 ENRICH_POLL 秒取一次 DOM，一抓到邮箱立刻返回。
+
+    返回 (最长的那份 html, 是否被停止)。
+
+    ⛔ 为什么不能只读一次（M31 的核心）：实测联系方式常常是页面加载后 2~8 秒才被
+       JS 渲染出来 —— `https://www.shopping-bags.net/` 第 2.4 秒、
+       `https://ecohound.co.uk/` 第 8 秒（1 秒时 186KB 无邮箱，8 秒时 358KB 有邮箱）。
+       只读一次 = 只拿到壳，成功率直接腰斩。
+    ⛔ 为什么不能等「加载完成」：这类站点的 readyState 会一直停在 loading
+       （长轮询/统计脚本/慢图片），死等等于每站白等 NAV_BUDGET 秒 —— 而内容其实早就在 DOM 里了。
+    ✅ 判据换成「内容」：DOM 里出现邮箱就走；页面真的加载完（is_loading=False）却仍没邮箱，
+       再给 ENRICH_GRACE 秒就收手，交给联系页。
+    """
+    t0 = time.time()
+    best = ''
+    while True:
+        html = raw_html(tab)
+        if len(html) > len(best):
+            best = html
+        if clean_emails(best):
+            return best, False
+        if STATE['stop']:
+            return best, True
+        try:
+            loading = bool(tab.states.is_loading)
+        except Exception:
+            loading = False
+        now = time.time()
+        if not loading and now - t0 >= ENRICH_GRACE:
+            return best, False      # 加载已结束还没邮箱 → 别在首页干等，转联系页
+        if now - t0 >= budget:
+            return best, False
+        time.sleep(ENRICH_POLL)
+
+
+# 页面里「联系」链接的候选特征（英/德/西/意/日）。只取 path 里带这些词的 href。
+CONTACT_LINK_RE = re.compile(
+    r'''href=["']([^"'\s>]*(?:contact|kontakt|contacto|contatt|お問い合わせ)[^"'\s>]*)["']''', re.I)
+
+
+def _contact_candidates(html, url, limit=3):
+    """首页没邮箱时，去哪几个页面找 —— 先跟页面自己的「联系」链接，再退回固定路径。
+
+    ⛔ 只用 CONTACT_PATHS 猜路径会漏掉一大半站：`/contact-us.html`、`/en/contact`、
+       `/pages/contact`、`/contact-us/` 都不在表里。页面自己的导航链接才是真答案。
+    ⛔ 必须限同域名：页脚常挂着「服务商 / 支付方」的外链，跟着跳出去就抓到别人的邮箱了。
+    """
+    p = urlparse(url)
+    origin = f'{p.scheme}://{p.netloc}'
+    out = []
+    for href in CONTACT_LINK_RE.findall(html or ''):
+        href = href.strip()
+        if href.lower().startswith(('mailto:', 'tel:', 'javascript:')):
+            continue
+        u = urljoin(origin + '/', href)
+        if urlparse(u).netloc != p.netloc:
+            continue
+        u = u.split('#')[0]
+        if u and u not in out:
+            out.append(u)
+        if len(out) >= 2:
+            break
+    for path in CONTACT_PATHS[:2]:
+        u = origin + path
+        if u not in out:
+            out.append(u)
+    return out[:limit]
+
+
 def enrich(page, url):
     info = {'emails': [], 'phones': [], 'contact_url': '', 'china_signal_text': ''}
     signal_parts = []
     tab = None
+
+    def _stopped():
+        """用户点了停止：把已抓到的部分留在这里，但打上 stopped 标记。
+        ⛔ 调用方**必须**看这个标记并丢掉整行（2026-10-21 拍板）——
+           半截数据（只有邮箱没电话、或只有一个联系页的邮箱）会在客户库里变成
+           一条「看起来正常其实残缺」的记录，之后很难被发现。
+           所以这里不是「尽力返回」，而是「告诉调用方这条不算」。"""
+        info['stopped'] = True
+        info['china_signal_text'] = '\n'.join(signal_parts)
+        return info
+
+    # 站点之间留一点间隔：一个搜索页最多 10 个候选站，原来是在 1~2 秒内被同一 IP 连续打开
+    # （tab 之间零延时），这个突发特征对目标站的 CDN / WAF 比对人更明显。
+    # 用 time.sleep 而不是 sleep_check 是刻意的：最长 1.5 秒，不值得为它插一个「停止」分支。
+    if STATE['stop']:
+        return _stopped()
+    time.sleep(random.uniform(0.5, 1.5))
     try:
-        tab = page.new_tab(url)
-        tab.wait.doc_loaded(timeout=10)
-        html = tab.html or ''
+        tab = page.new_tab()
+        # ⛔ 走 nav()：一个客户站最坏要开 4 个页面（首页 + 最多 3 个联系页）。
+        # ⛔ 读完就走的 html 也**必须**用 raw_html()：`tab.html` 第一行是 wait.doc_loaded()，
+        #    它超时后照样 Page.stopLoading()，把还在渲染的页面掐死。
+        if not nav(tab, url):
+            return _stopped()
+        html, was_stopped = _grab_html(tab, ENRICH_WAIT)
+        if was_stopped:
+            return _stopped()
         signal_parts.append(html[:80000])
         info['emails'] = clean_emails(html)
         info['phones'] = clean_phones(html)
         if not info['emails']:
-            p = urlparse(url)
-            base = f'{p.scheme}://{p.netloc}/'
-            for path in CONTACT_PATHS[:2]:
-                try:
-                    tab.get(urljoin(base, path.lstrip('/')))
-                    tab.wait.doc_loaded(timeout=8)
-                except Exception:
-                    continue
-                contact_html = tab.html or ''
+            # 首页没邮箱 → 逐个别页找。先跟页面自己给的「联系」链接（比猜路径准得多：
+            # /contact-us.html、/en/contact、/pages/contact 这些固定表里都没有），
+            # 再退回固定路径兜底。
+            for target in _contact_candidates(html, url):
+                if STATE['stop']:
+                    return _stopped()
+                if not nav(tab, target):
+                    return _stopped()
+                contact_html, was_stopped = _grab_html(tab, ENRICH_CONTACT_WAIT)
+                if was_stopped:
+                    return _stopped()
                 signal_parts.append(contact_html[:80000])
                 e = clean_emails(contact_html)
                 if e:
                     info['emails'] = e
                     info['phones'] = info['phones'] or clean_phones(contact_html)
-                    info['contact_url'] = tab.url
+                    info['contact_url'] = raw_url(tab) or target
                     break
     except Exception as ex:
         log(f'   访问失败: {url[:50]} {type(ex).__name__}')
@@ -907,8 +1382,10 @@ def _live_has_url(url):
 # ================= 手动采集：常驻浏览器 =================
 # 自动链路（run_search / run_maps / enrich_core）都是「任务开头建、finally 里 quit」，
 # 手动采集是「点一下采一条」，每次重建一个 Chrome 要 3–5 秒，所以这里做成**惰性常驻**。
-# ⚠️ 与自动链路互不干扰：`create_browser_page()` 每次都给独立临时 profile + 独立调试端口，
-#    是各自独立的 Chrome 实例，谁 quit 都影响不到对方。
+# ⚠️ 与自动链路互不干扰：本页走 `create_browser_page()` 默认参数 = 独立临时 profile +
+#    独立调试端口，各自独立的 Chrome 实例，谁 quit 都影响不到对方。
+#    ⛔ 刻意**不用** persistent=True：自动任务用 DB/_chrome_profile，同一个 --user-data-dir
+#       起第二个 Chrome 会「交接给老进程后自己退出」，新调试端口起不来（30s 后连接失败）。
 _MANUAL_PAGE = None
 _BROWSER_LOCK = threading.Lock()
 
@@ -1136,7 +1613,8 @@ def _maps_attr(page, css, attr=None, timeout=1):
 def maps_consent_wall(page):
     """谷歌地图首访可能弹 Cookie 同意墙，挡住列表与详情面板。"""
     try:
-        if 'consent.google' in (page.url or '').lower():
+        # ⛔ 用 raw_url 而不是 page.url：后者会等加载（base 6s），超时还 stopLoading
+        if 'consent.google' in raw_url(page).lower():
             return True
         return bool(page.ele('css:form[action*="consent"]', timeout=0.5))
     except Exception:
@@ -1150,11 +1628,16 @@ def maps_open(page, url, attempts=2):
         if STATE['stop']:
             return False
         try:
-            page.get(url)
-            page.wait.doc_loaded(timeout=15)
+            if not nav(page, url):
+                return False                   # 用户点了停止
+            # ⛔ 不要再 wait.doc_loaded()：地图页的 readyState 常年停在 loading，
+            #    这里等 15 秒后还会 stopLoading —— 白等 + 把列表掐掉。列表就绪由下面
+            #    的 `page.ele(MAPS_FEED_CSS, timeout=12)` 自己轮询。
         except Exception as e:
             log(f'⚠️ 地图页打开失败（第 {i + 1} 次）：{type(e).__name__}')
             continue
+        if STATE['stop']:
+            return False
         if maps_consent_wall(page):
             log('⚠️ 谷歌地图弹出 Cookie 同意墙：请在浏览器窗口点「全部接受」，脚本最多等 60 秒')
             for _ in range(30):
@@ -1260,8 +1743,9 @@ def maps_detail(page, place_url):
     面板里各字段都可能合法缺失（有的商家就是没电话、没官网），缺了就留空，不算失败。
     """
     try:
-        page.get(place_url)
-        page.wait.doc_loaded(timeout=15)
+        if not nav(page, place_url):
+            return None                    # 用户点了停止
+        # ⛔ 不要 wait.doc_loaded()：详情面板的待读元素由下面的重试轮询自己等。
     except Exception as e:
         log(f'     · 打开商家页失败：{type(e).__name__}')
         return None
@@ -1308,7 +1792,7 @@ def maps_detail(page, place_url):
         'website': website,
         'address': address,
         'category': category,
-        'place_url': (page.url or place_url),
+        'place_url': (raw_url(page) or place_url),
     }
 
 
@@ -1365,6 +1849,7 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
     try:
         init_customer_db()
         STATE['phase'] = 'search'
+        _serp_reset()          # 本轮请求计数 / 撞码轮次归零（长休息靠它算）
         with STATE_LOCK:
             # 行号发号器清零。api_start 已经清过一次，这里再清一次是为「直调 run_search 的调用方」
             # （冒烟测试）兜底 —— n 必须本轮内唯一且单调（前端 ✕ 靠它定位），
@@ -1374,7 +1859,7 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
             log(f'启动浏览器... 自定义查询 {len(raw_queries)} 条 × 国家 {len(countries)} 个（原样搜索，不拼任何词）')
         else:
             log(f'启动浏览器... 产品 {len(products)} 个 × 条件 {len(cond_keys)} 个 × 国家 {len(countries)} 个')
-        page = create_browser_page()
+        page = create_browser_page(persistent=True)      # 网页搜索：复用持久 profile 攒谷歌 cookie
         try:
             search_tab_id = page.tab_id    # 记下搜索主标签，补全用临时标签时才好切回来
         except Exception:
@@ -1442,29 +1927,49 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                             core = f'{core} {site_term}'
                         formula = f'{core} {exclude} {china_exclude}'.strip()
                     log(f'[{q_index}/{total}] 搜索({cname}·{cname2})：{pq}')
-                    # 打开并确认结果已渲染（内置多次重开，专治谷歌的「壳页面」）
+                    # 打开并确认结果已渲染（内置多次重开，专治谷歌的「壳页面」；
+                    # 撞到人机验证时它会退避重发，两轮不通就把 STATE['stop'] 置真）
                     open_search(page, formula, country_params)
                     if search_tab_id is None:
                         try:
                             search_tab_id = page.tab_id   # 首次导航后标签一定就绪，补取一次兜底
                         except Exception:
                             pass
+                    if STATE['stop']:
+                        log('已停止')
+                        return
+                    # ⛔ 撞码没通过时必须是 return，不能 continue：
+                    #    旧代码 continue 会跳过下面的查询间延时，立刻发下一条 —— 越撞越黑。
                     if not wait_captcha(page):
-                        continue
+                        return
                     stat = {'cand': 0, 'blocked': 0, 'dup': 0, 'existing': 0, 'added': 0,
                             'mail': 0, 'china': Counter()}
                     for pg in range(pages):
+                        if STATE['stop']:
+                            log('已停止')
+                            return
                         if pg > 0:
+                            # 翻页前的节奏延时挪到这里（原来是「每页跑完再等」，第 1 页后
+                            # 也要等一次才翻页；统一由 serp_pace 控制，且带长休息）
+                            if not serp_pace():
+                                log('已停止')
+                                return
                             if not open_search(page, formula, country_params, pg * 10):
+                                if STATE['stop']:
+                                    log('已停止')
+                                    return
                                 break
                             if not wait_captcha(page):
-                                break
+                                return
                         items, blocked_n, china_reasons = extract_results(
                             page, seen_titles, china_filters, domain_keys)
                         stat['cand'] += len(items) + blocked_n
                         stat['blocked'] += blocked_n
                         stat['china'].update(china_reasons)
                         for item in items:
+                            if STATE['stop']:
+                                log('已停止')
+                                return
                             key = url_key(item['url'])
                             if key in seen:
                                 stat['dup'] += 1
@@ -1472,12 +1977,28 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                             seen.add(key)
                             item['formula'] = formula
                             item['country'] = cname
-                            # ① 就地补全这一个网站；联系方式信号过滤必须发生在入库之前。
+                            # ① 先去重（客户库 + 本轮内存），再决定要不要开 tab 抓联系方式。
+                            #    ⛔ 顺序很重要：原来去重放在 enrich 之后，于是「客户库里早就有的站」
+                            #       也照样被开一个 tab 访问一遍官网 —— 每个搜索页最多白开 10 个 tab，
+                            #       对本机出口 IP 是纯浪费（还容易被目标站 CDN 记一笔）。
+                            #    安全性：老客户命中的是 continue，本来就不会进 STATE['rows']、不会写库，
+                            #    前移不丢任何行为（联系方式更新一直是 补历史欠账.py 的职责）。
+                            if db_has_customer(item['url']) or _live_has_url(item['url']):
+                                stat['existing'] += 1
+                                log(f'   ↩ 已存在（客户库或本轮已采过），跳过：{item["title"][:45]}')
+                                continue
+                            # ② 就地补全这一个网站；联系方式信号过滤必须发生在入库之前。
                             info = {'emails': [], 'phones': [], 'contact_url': ''}
                             if auto_enrich and not STATE['stop']:
                                 info = enrich(page, item['url'])
+                                # ⛔ 半截数据丢弃（2026-10-21 拍板）：enrich 在导航途中被停止打断时
+                                #    会带 stopped 标记 —— 这条既不入 STATE['rows'] 也不入库，
+                                #    免得客户库里冒出「有邮箱没电话」的残缺记录。
+                                if info.get('stopped'):
+                                    log('已停止（当前这条联系方式没抓完，已丢弃）')
+                                    return
                                 _back_to_search(page, search_tab_id)
-                            # ② 联系方式判据 —— 两种模式两种处置（2026-10-19 用户拍板）：
+                            # ③ 联系方式判据 —— 两种模式两种处置（2026-10-19 用户拍板）：
                             #    · 标准模式：命中即**整条丢弃**（原逻辑，一字不改）
                             #    · 自定义模式：只判「联系方式过滤」那 4 项，命中**只标记**，
                             #      行照样进明细、照样能导出（用户：「只做标记不做删除」）
@@ -1503,13 +2024,7 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                                     stat['china'].update(contact_reasons)
                                     log(f'   过滤：{item["title"][:40]}（{"；".join(contact_reasons)}）')
                                     continue
-                            # ② 去重：库里已有的老客户 **＋ 本轮内存里已经采过的同一个站**。
-                            # ⛔ 本轮采到的东西**还没入库**（要等用户点「📥 导出 Excel」才写库），
-                            #    db_has_customer() 看不见它们 —— 同轮重复只能靠内存挡（_live_has_url）。
-                            if db_has_customer(item['url']) or _live_has_url(item['url']):
-                                stat['existing'] += 1
-                                log(f'   ↩ 已存在（客户库或本轮已采过），跳过：{item["title"][:45]}')
-                                continue
+                            # （去重已在 enrich 之前做过 —— 见上面的「① 先去重」）
                             s = score_item(item['title'], item['url'], info)
                             stat['added'] += 1
                             if info['emails']:
@@ -1549,9 +2064,8 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                                 break
                         if reached_target:
                             break
-                        if not sleep_check(random.uniform(2, 4)):
-                            log('已停止')
-                            return
+                        # 页间延时已挪到翻页前（serp_pace），这里不再重复等待 ——
+                        # 原来「每页跑完等 2~4s」会让最后一页白等一次。
                     # 一个查询跑完（含翻页），打印它的账目
                     for k in stat:
                         total_stat[k] += stat[k]
@@ -1566,7 +2080,7 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
                         f'中国商家过滤：{reason_text}')
                     if reached_target:
                         break
-                    if not sleep_check(random.uniform(4, 8)):
+                    if not serp_pace('query'):      # 一条查询跑完：20~50s（长尾偏态）
                         log('已停止')
                         return
                 if reached_target:
@@ -1620,6 +2134,9 @@ def run_search(products, cond_keys, countries, pages, exclude, match='or', targe
             log('本轮没有新增网站，未产出结果文件（客户库未变化）')
         STATE['done'] = True
         STATE['running'] = False
+        # 收尾完毕，「正在停止…」的中间态到此结束（stopped 保留：前端要靠它区分
+        # 「被用户停掉」和「自然跑完」两种结束文案）。
+        STATE['stopping'] = False
 
 
 def maps_role_word(cond_keys, lang='en'):
@@ -1661,7 +2178,7 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
         log(f'谷歌地图采集：关键词 {len(products)} 个 × 国家 {len(countries)} 个'
             + (f' · 城市「{city}」' if city else '（未指定城市，只用国家中心视野）'))
         log('⚠️ 地图结果会受出口 IP 所在地影响，比网页搜索更明显；指定城市可显著提高精度')
-        page = create_browser_page()
+        page = create_browser_page(persistent=True)      # 地图采集：同样复用持久 profile
         try:
             maps_tab_id = page.tab_id
         except Exception:
@@ -1756,6 +2273,10 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
                     info = {'emails': [], 'phones': [], 'contact_url': '', 'china_signal_text': ''}
                     if auto_enrich and website and not STATE['stop']:
                         info = enrich(page, website)
+                        # ⛔ 半截数据丢弃（同 run_search）：停止时正在补全的这条不进明细、不入库。
+                        if info.get('stopped'):
+                            log('已停止（当前这条联系方式没抓完，已丢弃）')
+                            return
                         _back_to_search(page, maps_tab_id)
                     for p in info['phones']:
                         if p not in phones:
@@ -1856,6 +2377,7 @@ def run_maps(products, cond_keys, countries, city='', target_count=10, industry=
             log('本轮没有新增商家，未产出结果文件（客户库未变化）')
         STATE['done'] = True
         STATE['running'] = False
+        STATE['stopping'] = False       # 同 run_search：收尾结束，清掉「正在停止」中间态
 
 
 def _enrich_worklist():
@@ -2754,6 +3276,7 @@ def api_start():
         STATE.update(round=STATE.get('round', 0) + 1,
                      running=True, done=False, logs=[], result_count=0, rows=[], n_seq=0,
                      output='', stop=False, phase='search',
+                     stopping=False, stopped=False,
                      pending_export=False, export_error='')
     exclude = data.get('exclude', EXCLUDE_DEFAULT)
     china_filters = [k for k in data.get('china_filters', CHINA_FILTER_DEFAULTS)
@@ -2867,7 +3390,10 @@ def api_export_excel():
 
     with STATE_LOCK:
         if ok:
-            STATE.update(pending_export=False, rows=[], result_count=0, export_error='')
+            # 导出成功 = 这一轮彻底收尾：连「被停止过」也一起清掉，
+            # 否则页面会一直显示「⏹ 已按停止结束」而不是「✅ 完成，结果文件：…」。
+            STATE.update(pending_export=False, rows=[], result_count=0, export_error='',
+                         stopped=False)
             out = STATE.get('output', '')
         else:
             STATE['export_error'] = ('结果 Excel 保存失败（可能被 Excel 占用），'
@@ -3164,7 +3690,15 @@ def api_db_delete():
 
 @app.route('/api/stop', methods=['POST'])
 def api_stop():
+    # ⛔ 三个字段、三种职责，别合并：
+    #    stop     = worker 的检查点读它（真正的开关）
+    #    stopping = 前端据此显示「⏹ 正在停止…」并把停止按钮置灰
+    #    stopped  = 本轮是被用户停掉的，结束文案要能区分（别写「采集完成」）
+    # ⛔ 这里依然**不持锁、不做 IO**：一旦持锁就可能被正在写日志的 worker 挡住，
+    #    「按了停止没反应」会从 2 秒变成不可预期。
     STATE['stop'] = True
+    STATE['stopping'] = True
+    STATE['stopped'] = True
     return jsonify({'ok': True})
 
 
@@ -3190,6 +3724,10 @@ def api_status():
             #（此刻客户库里还没有这些行，前端据此显示提示、放开删除、启用导出按钮）
             'pending_export': STATE['pending_export'],
             'export_error': STATE['export_error'],
+            # 「停止中」的两个展示态（M30）：stopping 让页面立刻显示「⏹ 正在停止…」并把停止键置灰；
+            # stopped 让结束文案能区分「被你停掉」和「自然跑完」。
+            'stopping': STATE.get('stopping', False),
+            'stopped': STATE.get('stopped', False),
             'rows': list(STATE['rows']),      # 本轮采集明细（未入库），前端每秒刷新用它渲染表格
             'logs': new_logs,
             'total_logs': len(logs),

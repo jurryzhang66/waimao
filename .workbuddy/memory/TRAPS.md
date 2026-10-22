@@ -131,3 +131,115 @@
   ——后者在有 VMware / Hyper-V 虚拟网卡时经常把 `192.168.189.1` 之类排在前面。APIPA（169.254.x）/ 回环 → 返回 `''`。
 - 手机仍连不上时按序查：① 是否同一路由器（不是 4G/5G）② 路由器「AP 隔离 / 客户端隔离」③ 地址用 `192.168.6.x`
   那个 ④ `lan_ip()` 可能猜中虚拟网卡 → `ipconfig` 看真实那块。
+
+## 谷歌反爬 / 验证码（M29，2026-10-21）
+
+- **症状**：随便跑两下就出「我们的系统检测到来自你的计算机网络的不寻常流量」。
+  **用户第一反应是「搜索框提交频率太高」→ 不是。** `search_url()` 拼好 URL 直接 `page.get()`，
+  从不在搜索框打字（只有连续 3 次失败才降级到「点搜索框 + 回车」）；默认参数一轮只发 4~6 次 SERP。
+- 真因四件叠一起：① 每次任务全新空白 profile（无 cookie，每次都像从未见过的访客）；
+  ② 自动化特征没藏；③ **认不出外语/新版拦截页** → 被 `wait_results` 判成「没渲染」→ 15s 内同 URL 连发 3 次；
+  ④ 撞码后 `continue` 跳过延时立刻发下一条，且无请求计数、无熔断。
+- ⛔ **持久 profile 的静默风险**（`DB/_chrome_profile`）：
+  - `set_user_data_path()` 内部就是 `--user-data-dir`，DrissionPage **不检查目录非空**；
+    若另一实例正用同一目录，Chrome 会把新实例的请求转给它、自己立刻退出 → 表现为「启动即失败」。
+    所以 `_profile_busy()` 必须**先探活**（读 `DevToolsActivePort` 里的端口 + `socket.create_connection(timeout=0.3)`），
+    占用就退回一次性 profile —— **宁可不复用 cookie，也不能让任务起不来**。
+  - `_clean_profile_locks()` **只准碰 5 个确切文件名**（`SingletonLock`/`SingletonSocket`/`SingletonCookie`/
+    `lockfile`/`DevToolsActivePort`）。⛔ 绝不能用 glob 或删整个 `Default` —— 那是真数据目录（cookie/缓存）。
+    干净的 `quit()` 本来就会自己删这些锁，只在崩溃残留时才需要手动清。
+  - ⛔ `.gitignore` 必须忽略 `DB/_chrome_profile/`：里面是真实谷歌 cookie（NID 等），
+    **本仓库是 public**，提交一次等于把登录态公开。⛔ 别图省事写 `DB/*` —— `客户库.sqlite3` 与 `ui_prefs.json` 是要跟踪的。
+- ⛔ **验证码判据的三个错误写法**（都会造成静默故障）：
+  - `'recaptcha' in html` → **100% 误报**：正常搜索结果页也加载 reCAPTCHA 资源（`/recaptcha/api.js`）。
+    只在 `deep=True` 时取整页 html，且只查「不寻常流量」类**文案**（覆盖英/法/德/西/意/荷）。
+  - 只查英文文案 → 德语站、法语站拦截页认不出 → 被当成空结果重发 → **越救越封**。
+    所以第一级判据用 **URL 片段**（`/sorry/`、`google.com/sorry`、`/recaptcha/`），语言无关。
+  - 不加 `states.is_loading` 门禁就读 `page.url`：加载中读到的是**上一页**地址 → 判据全错。
+    该字段是纯本地状态（零 CDP 往返），先读它不花钱。
+- ⛔ **`wait_results` 必须三态**（`'ok'`/`'empty'`/`'blocked'`）：旧代码把「被拦截」当「没结果」→
+  重开一次再等 12s，等于对拦截页再打一次。`'blocked'` 只能退避，**不许重发**。
+  `_check_serp.py` 里有一条静态断言专门禁 `if wait_results(page` 这种布尔用法。
+- ⛔ **节奏只能走 `serp_pace()`**：写死 `sleep(...)` 的后果是「点停止后还要硬等 14 秒」，
+  而且**翻页、重试、撞码后重发这些路径最容易漏加**——所以计时统一由 `_serp_tick()` 记（所有 SERP 请求都算一次），
+  `serp_pace()` 内部再按 `sleep_check()` 睡（可被停止信号打断）。
+  偏态随机 `u ** 2.2` 是为了「多数短、偶尔很长」，比均匀分布更像人。
+- ⛔ **撞码熔断**：60s / 180s 两轮退避 + `retry()` 重发原 URL；两轮仍不通 →
+  `with STATE_LOCK: STATE['stop']=True` 后**在锁外** `log()`。锁内 log 必死锁（`log()` 自己抢 `STATE_LOCK`）。
+  调用点必须 `return` 而不是 `continue`：`continue` 会回到 for 循环开头**立刻又发一次**，
+  熔断等于白做。撞码重发**不占** attempts 名额（用户手动解完验证应当还能继续跑）。
+- ⛔ `--disable-blink-features=AutomationControlled` **全项目只许一处**（`create_browser_page` 里）：
+  `add_init_js` 只作用于当前 tab，`enrich()` 里 `new_tab` 出来的页面**不继承**，用它等于半藏半露。
+  实测 `navigator.webdriver` 本来就是 `false`（DrissionPage 默认已处理），这个开关只是保险。
+- **别对用户承诺「不会再出验证码」**：谷歌风控是多因素加权，**出口 IP 权重很高**。
+  本机 IP 若已被标记，慢速 + cookie 只能缓解。诚实说法：大概率有效但不保证；且 10 条会从 1~2 分钟变成 3~6 分钟。
+- 关联改动：`db_has_customer()` / `_live_has_url()` **前移到 `enrich` 之前** ——
+  重复客户不再白跑一次补全（省请求也省时间）。补全内部开头加 `sleep(0.5~1.5)`。
+
+## 「停止」迟迟不生效（M30，2026-10-21）
+
+- **症状**：任务跑着点「■ 停止」，界面上按钮纹丝不动、状态行还在写「搜索中…」，
+  要等十几秒到两分钟才真的停。用户第一反应是「停止接口慢」→ **不是**。
+- ⛔ `/api/stop` 只做三件事：置 `stop`/`stopping`/`stopped`，**不持锁、不做 IO**，毫秒级返回。
+  千万别在这里加 `with STATE_LOCK`：`log()` 内部也抢同一把锁，worker 正在写日志时两者互等，
+  「按了没反应」会从 2 秒变成不可预期。
+- 真因全是**读侧**（这些点以前根本不看停止标志）：
+  - `page.get()` **一次最坏 126 秒** —— DrissionPage 出厂 `page_load=30s` × `retry_times=3`（4 次尝试）+ 3×2s。
+    全项目以前一个 timeout 都没传过。`_wait_loaded()` 是**阻塞**的，期间读不到 `STATE['stop']`。
+  - `enrich()` 一个客户要开 3 个页面（首页 + 2 个联系页）→ 最坏压住停止键 **7 分钟**。
+  - `wait_results()` 12 秒窗口里不看 stop；`has_captcha(deep=True)` 的 `page.url`/`ele`/`html`
+    都可能**隐含** `doc_loaded(base=10)`。
+  - `running=False` 写在 `page.quit()` **之后**（quit 还要 kill 进程 + `tasklist` 循环最多 5s）。
+  - 前端 `stop()` 只有一行 fetch：不 disable（可以连点，每点真发一个 POST）、不改文案、
+    不 `kickPoll()`（还要等下一拍才更新）。
+- ⛔ **判据**：界面上一切「停止后还在转」的现象，先问「此刻阻塞在哪个 Python 调用里」，
+  再去那个调用里补检查 —— 别去优化 `/api/stop`，它本来就是快的。
+- ⛔ **`page.get` 不许再裸写**：全项目只允许 `nav()` 内部出现（`_check_stop.py` 用 ast 遍历
+  `page.get`/`tab.get` 的调用点，出现第二个函数名就报红）。裸写一次 = 把 126 秒请回来。
+- ⛔ **超时 ≠ 停止**：`nav()` 预算耗尽返回 True（带着已加载内容继续），只有用户停止才返回 False。
+  混成一个返回值，慢站一超时就会被上层当成「用户停止」，整轮任务被误杀。
+- ⛔ **`retry=0` 别改**：重试是调用方的职责（`open_search`/`maps_open` 的 attempts）。
+  在 nav 里重试会让「一次导航」偷偷变成 4 次请求 —— 既拖慢停止，也更容易撞验证码。
+- ⛔ **`running` 语义不许动**：它仍要等 `quit()` 之后才 False，因为还兼着「开始按钮能不能点」。
+  提前放开会让用户在上一个 Chrome 还没退干净时开新一轮 → 两个实例抢同一个 `--user-data-dir`
+  （Chrome 会把请求转给先启动的那个，新实例立刻退出，表现为「启动即失败」）。
+  要表达「正在收尾」就用 `stopping`，别去动 `running`。
+- ⛔ **轮询会把停止键重新点亮**：`poll()` 每拍都 `setButtons(true)`，所以 `setButtons` 必须判
+  `pollStopping`，否则用户刚点完灰掉的按钮 1 秒后又亮了，看起来像没点着。
+  `/manual` 是完全一样的坑（`loadManualState` 每秒写 `btnStop.disabled = !st.running`），
+  用顶层 `stopPending` 挡，并在 `st.running` 变 false 时复位。
+- ⛔ **半截数据必须丢**（用户拍板）：`enrich` 被停止时返回 `{'stopped': True, ...}`，
+  调用方看到就 `return`，那一行不进 `STATE['rows']`、不入库。
+  只打标记不丢 = 客户库里出现「有邮箱没电话」的残缺记录，事后极难发现。
+- ⛔ 改 `ui/page.html` 后**两个 sha256 都要重算**（`_TMPL_SHA` 与 `_BUILT_SHA`），
+  并且要重启工具 —— 否则真机看到的还是旧页面，会得出「改了没用」的错误结论。
+
+## 联系方式抓不到 / 抓取成功率突然下降（M31，2026-10-21）
+
+- **症状**：用户说「我打开网站就能看到 email，工具抓不到」，或「改完之后成功率掉了一半」。
+  先别怀疑选择器或正则 —— 先确认**读的时候页面到底渲染到哪一步了**。
+- ⛔ **`page.get()` 超时会 `Page.stopLoading()`**（DrissionPage 4.1.1.4 的 `_wait_loaded`）：
+  ```python
+  if err:
+      ...
+      self.stop_loading()      # 而且 finally 里把 _ready_state 写成 'complete'
+  ```
+  → 传 `timeout=1` 等于「加载 1 秒就按下停止键」；异步渲染出来的联系方式永远出不来。
+  更阴的是 `_ready_state` 被伪造成 `complete`，于是后面那句 `wait.doc_loaded(10)` 直接空转。
+  **典型误判**：「我明明等了 10 秒」—— 其实一秒都没等。
+- ⛔ **判据不能用「加载完成」**：实测 `shopping-bags.net` 到第 10 秒 `readyState` 还是 `loading`
+  （长轮询/统计脚本/慢图），但正文早就可读了。判据只能是**内容**（DOM 里出现邮箱就收工）。
+- ⛔ 联系方式是**晚渲染**的：shopping-bags 第 2.4s、ecohound 第 8s。`ENRICH_WAIT` 低于 8 秒
+  会重新掉出去，`_check_stop.py` 里有硬断言。
+- ⛔ **三个读法都会阻塞**：`page.html`（首行 `wait.doc_loaded()`）、`page.url` / `tab.url`
+  （`_run_cdp_loaded` → `doc_loaded`）、`tab.get`（就是 `get`）。加载中调它们 = 白等 base(6s) + 掐掉加载。
+- ⛔ **`run_js` 不是万能替代**：导航过程中执行上下文会丢，`return document.documentElement.outerHTML`
+  实测返回 20 字节错误串。**排查时如果你用它采样，会误以为「页面是空的」—— 我自己就先踩了这个坑。**
+  正解：`DOM.getDocument(depth=0)` 拿 document nodeId → `DOM.getOuterHTML(nodeId=...)`。
+- ⛔ 联系页不要只靠 `CONTACT_PATHS` 猜：那张表只有 `/contact`、`/contact-us`、`/pages/contact-us`、
+  `/contactus`，漏掉 `/contact-us.html`、`/en/contact`、`/pages/contact`。先跟页面自己的导航链接
+  （`_contact_candidates`），再退回固定表。**必须限同域名**，否则会跟着页脚外链抓到服务商的邮箱。
+- ⛔ `maps_open` / `maps_detail` 里**不要** `wait.doc_loaded()`：地图页 readyState 常年 loading，
+  那 15 秒除了白等，末尾还会 stopLoading 把结果列表掐掉。就绪判据交给 `ele(MAPS_FEED_CSS)`。
+- 校验这条链路的最快办法：`python .workbuddy/_probe_enrich.py`（真浏览器抓这两个站，
+  应输出 ecohound 1 个邮箱、shopping-bags 2 邮箱 + 2 电话）。

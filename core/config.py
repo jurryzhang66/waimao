@@ -344,3 +344,44 @@ BLOCK_SUBSTR = ['ubuy', 'europages', 'exportgenius']
 # 搜索引擎自身的域名族：谷歌会按出口 IP 跳到 google.com.hk / google.de 等区域站，
 # 只写 'google.com' 拦不住，结果里会混进谷歌内部链接（曾污染出假客户 google.com.hk）。
 SEARCH_ENGINE_PREFIX = ('google.', 'bing.', 'yahoo.', 'duckduckgo.', 'baidu.', 'yandex.')
+
+# ================= 谷歌反爬：节奏 / 退避（2026-10-21）=================
+# 背景（用户反馈「太容易弹验证码」）：不是提交频率高（默认参数只发 4~6 次搜索），
+#   而是 ① 每次任务全新空白 profile（无 cookie）② 认不出外语拦截页 → 被当「没渲染」→ 15s 内重发 3 次
+#   ③ 撞码后不减速、无熔断。这里只管 ②③ 的节奏部分，① 见 paths.chrome_profile_dir()。
+#
+# 单位：秒。语义是「两次 SERP 请求之间」的等待，不含请求本身耗时。
+SERP_PAGE_MIN, SERP_PAGE_MAX = 6.0, 14.0          # 翻页 / 重试之后
+SERP_QUERY_MIN, SERP_QUERY_MAX = 20.0, 50.0       # 一条查询（含翻页）跑完
+SERP_LONG_REST_EVERY = 8                          # 每 N 次 SERP 请求插一次长休息
+SERP_LONG_REST_MIN, SERP_LONG_REST_MAX = 60.0, 120.0
+SERP_SKEW = 2.2        # 偏态强度：random()**2.2 让等待堆在区间下沿、偶尔冲到上沿。
+                       # ⛔ 别退回 random.uniform(a, b) —— 规整的固定区间最容易被统计出「这是脚本」。
+CAPTCHA_BACKOFF = (60, 180)   # 撞码退避窗口：第 1 轮等 60s，第 2 轮等 180s
+CAPTCHA_POLL = 5              # 窗口内每 5s 复查一次（用户手动解了验证就能立刻继续）
+
+# ================= 单个网页的加载预算（M30，2026-10-21）=================
+# 背景（用户反馈「按停止要等好久」）：慢的不是停止请求，是**正在执行的导航**。
+#   DrissionPage 出厂默认 page_load=30s + retry_times=3 → 一个网址最坏 126 秒，
+#   而这整段时间里代码是**阻塞**的、读不到 STATE['stop']。enrich() 一次要开 3 个页面
+#   （首页 + 2 个联系页），最坏能压住停止键 7 分钟。
+#
+# NAV_BUDGET 是「一个网址愿意等多久」的总预算（用户拍板 30 秒）。
+# ⛔ 它**不等于**停止延迟：nav() 只让 CDP 的 Page.navigate 等 NAV_FIRE 秒（点火，不等加载），
+#    之后自己按 NAV_POLL 的粒度轮询，所以停止延迟 ≈ NAV_POLL 级（≈0.3~0.6s），与预算无关。
+NAV_BUDGET = 30.0     # 单个网址的总等待预算（超时不算失败：带着已加载的内容继续）
+NAV_POLL = 0.3        # 轮询粒度：检查 STATE['stop'] 与 states.is_loading / ready_state
+NAV_FIRE = 1.0        # Page.navigate 这条 CDP 命令最多等多久（⛔ 只是「命令返回」，不掐加载）
+NAV_SOFT = 3.0        # 软预算：还没等到 load 事件就先返回，剩下的让页面在后台继续加载
+
+# ================= 联系方式抓取：等多久（M31，2026-10-21）=================
+# 背景（用户反馈「改了之后联系方式成功率掉下来」）：根因不是频率，而是**只读了一次 DOM**。
+#   实测 `https://www.shopping-bags.net/` 的邮箱在第 2.4 秒才渲染出来，
+#   `https://ecohound.co.uk/` 要到第 8 秒（1 秒时 HTML 186KB 无邮箱，8 秒时 358KB 有邮箱）。
+#   ⛔ 更糟的是 M30 的 `page.get(timeout=1)`：DrissionPage 的 _wait_loaded() 一超时就
+#      `Page.stopLoading()` —— 等于第 1 秒就把正在渲染的页面掐死，邮箱永远出不来。
+# 所以改成：点火后**边等边看 DOM**，一抓到邮箱就走，最多等 ENRICH_WAIT 秒。
+ENRICH_WAIT = 10.0         # 首页最多等这么久（实测有站点第 8 秒才把邮箱渲染出来）
+ENRICH_CONTACT_WAIT = 6.0  # 联系页同样逻辑，预算小一点（已经有 2 个页面试过）
+ENRICH_POLL = 0.4          # 复查 DOM 的间隔（同时是这段逻辑的停止延迟粒度）
+ENRICH_GRACE = 2.0         # 页面**已经加载完**却仍没邮箱 → 再等这么久就收手，转联系页

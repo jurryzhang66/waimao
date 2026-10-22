@@ -164,3 +164,25 @@ def find_latest_result():
 ENRICH_FILE = find_latest_result()
 DB_DIR = 'DB'                  # 数据库统一放在 DB 子文件夹
 DB_FILE = '客户库.sqlite3'
+
+# ---- 谷歌反爬：跨任务保留的 Chrome profile（2026-10-21）----
+# 里面是谷歌 cookie（NID 等持久 cookie），复用它能让谷歌把本工具当「回访用户」而不是
+# 每次都是全新设备 —— 这是降低人机验证触发率最有效的一条。
+# ⛔ 绝不能进版本库：origin 是 public 仓库，见 .gitignore 的 DB/_chrome_profile/ 一条。
+CHROME_PROFILE_DIRNAME = '_chrome_profile'
+
+
+def chrome_profile_dir():
+    """持久 Chrome profile 的绝对路径（DB/_chrome_profile），不存在就建。
+
+    ⚠️ 必须经 `_app_dir()` 拼路径 —— 写成 `dirname(abspath(__file__))` 会落到 core/DB/，
+       于是 profile 建在包目录里、而 cookie 看起来「永远攒不起来」（静默失效）。
+    ⚠️ 建目录失败（只读磁盘等）不抛异常：调用方会退回临时 profile，功能不受影响。
+    """
+    d = os.path.join(_app_dir(), DB_DIR, CHROME_PROFILE_DIRNAME)
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        return ''
+    return d
+

@@ -381,8 +381,8 @@ print('  ✓ R4 入口已无任何已搬迁的模块级定义（AST 扫描 19 �
 #    那十七次都是**故意**改的；以后凡是故意动 page.html 或 ui/live-table.js，下面两个字面量必须**一起**重算（漏一个就红）。
 #    这条断言剩余的价值 = 「哪次误格式化/误翻译把模板改变形，立刻能被抓到」。
 #    ⛔ 如果只是改了别的东西却发现这里红：先看 diff，别顺手把基线改掉。
-_TMPL_SHA = 'af209fa7ca24a7b8ea509fb70e774e0aeb99b579983a3990941a04c436ee6533'
-_BUILT_SHA = '16b704f9eea68b39828fdf2d09c822353643507707790056ed86e971ab29c7b8'
+_TMPL_SHA = '62a7182988361e8c6d442c7b2eb89ae89fefb147fac844a13fe51ff9d9c7e125'
+_BUILT_SHA = '845f347813f3bf5de1c3e61b4329c607d62683f926ad85768628e5faee421953'
 import hashlib as _hl
 _raw = open(os.path.join(_root, 'ui', 'page.html'), encoding='utf-8').read()
 assert _hl.sha256(_raw.encode('utf-8')).hexdigest() == _TMPL_SHA, \

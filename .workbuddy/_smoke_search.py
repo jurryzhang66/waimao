@@ -57,7 +57,9 @@ class FakePage:
         calls['quit'] += 1
 
 
-m.create_browser_page = lambda: FakePage()
+# ⚠️ run_search 现在带参调用 create_browser_page(persistent=True)（复用持久 profile 攒谷歌 cookie），
+#    桩必须收下这个参数 —— 写成零参 lambda 会 TypeError，整个冒烟直接挂（不是产品 bug）。
+m.create_browser_page = lambda persistent=False: FakePage()
 
 
 def fake_open_search(page, formula, country_params, start=0, min_items=3, attempts=3):

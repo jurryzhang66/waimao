@@ -47,3 +47,7 @@ output/海关编码/
 
 # 测试脚本为保护真实客户库留的临时快照（留在磁盘上，不进版本库）
 DB/backups/客户库_污染前_*.sqlite3
+
+# 谷歌反爬用的持久 Chrome profile（2026-10-21）：里面是谷歌 cookie（NID 等），
+# 本仓库是 public，绝不能提交。⛔ 别写成 DB/* —— 客户库与 ui_prefs.json 是要跟踪的。
+DB/_chrome_profile/

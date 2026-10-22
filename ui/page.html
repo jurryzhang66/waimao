@@ -382,6 +382,11 @@ let liveEditable = false;
 // 上一帧读到的「待导出」状态（poll() 每帧更新）。setButtons() 靠它决定「📥 导出 Excel」能不能点 ——
 // 按钮可用性完全由后端状态决定，前端只照着画。
 let lastPending = false;
+// 后端已收到停止请求、worker 还在收尾（M30）。
+// ⛔ 为什么需要它：`running` 只在 worker 真正退出后才变 False，而退出前还要关浏览器（1~2 秒）。
+//    这期间若界面什么都不变，用户会以为没点着、反复点「停止」（每点一次真的再发一个 POST）。
+//    setButtons() 用它把停止键一直按灰着，poll() 用它把状态行写成「⏹ 正在停止…」。
+let pollStopping = false;
 let RUN_SOURCE = 'google';   // 本轮数据源：google / maps（由 start() 写入，poll() 用来切换文案）
 
 // 「📥 本轮已入库明细（实时）」= ui/live-table.js 里的共享组件，与 /manual「③ 本轮采集明细」
@@ -474,6 +479,8 @@ async function poll(){
   //    还挂着上一轮的行、结果 Excel 早就写好了 —— 那时删了也改不了表（假删除），继续挡住。
   liveEditable = !!((d.running && d.phase === 'search') || d.pending_export);
   lastPending = !!d.pending_export;
+  // ⛔ 必须在下面任何一次 setButtons() 之前更新：setButtons 靠它决定停止键是否压灰。
+  pollStopping = !!d.stopping;
   syncLiveEditable(Array.isArray(d.rows) ? d.rows.length : 0);
   if (d.db_total != null){
     document.getElementById('dbCounter').textContent = 'SQLite 已存 ' + d.db_total + ' 条（已评分 ' +
@@ -483,25 +490,32 @@ async function poll(){
   //    手机 / 平板刚打开页面就是这种情况）永远渲染不出「完成 / 待核对」状态行。
   //    现在也不在完成时掐定时器：交给调度器判（`shouldKeepTicking()` 为假 → 自己停链）。
   if (!d.running && d.done){
+    pollStopping = false;                 // 真退出了，中间态收掉
     setButtons(false);
     const s = document.getElementById('status');
     if (d.pending_export){
       // ⏸️ 采集结束、**还没入库也没落盘** —— 停下来等用户核对（这正是这次改造的核心交互）。
+      // ⛔ 被用户停掉时标题必须不一样：写「采集完成」会让人以为任务自己跑完了。
       s.innerHTML = d.export_error
         ? '⚠️ ' + d.export_error + ' —— 处理后可再点「📥 导出 Excel」。'
-        : '⏸️ <b>采集完成，等待核对：</b>下面这些还<b>没有</b>写进客户库，也还没有结果文件。'
-          + '确认无误后点「📥 导出 Excel」，那一刻才入库 + 生成表格。';
+        : (d.stopped
+            ? '⏹ <b>已按你的要求停止，等待核对：</b>下面这些还<b>没有</b>写进客户库，也还没有结果文件。'
+              + '确认无误后点「📥 导出 Excel」，那一刻才入库 + 生成表格。'
+            : '⏸️ <b>采集完成，等待核对：</b>下面这些还<b>没有</b>写进客户库，也还没有结果文件。'
+              + '确认无误后点「📥 导出 Excel」，那一刻才入库 + 生成表格。');
     } else {
       // 本轮结果可能为空（一条都没采到、或采到的全被 ✕ 删光了）—— 那就别留一句「结果文件：」晾在那
       s.innerHTML = (d.output
           ? '✅ 完成，结果文件：' + d.output +
             ' <button class="btn-open" onclick="openFolder()">📂 打开结果文件夹</button>'
-          : '✅ 完成（本轮未产出结果文件）');
+          : (d.stopped ? '⏹ 已按你的要求停止（本轮未产出结果文件）'
+                       : '✅ 完成（本轮未产出结果文件）'));
     }
   } else if (d.running){
     setButtons(true);
     const s = document.getElementById('status');
-    s.textContent = d.phase === 'export' ? '导出到飞书…'
+    s.textContent = d.stopping ? '⏹ 正在停止…（等当前这一步收尾）'
+                  : d.phase === 'export' ? '导出到飞书…'
                   : RUN_SOURCE === 'maps'
                     ? '地图采集 + 就地抓联系方式中（每条要点开详情面板，较慢）…'
                     : d.phase === 'search' ? '搜索中（每搜到一个网站就同步抓联系方式）…'
@@ -709,7 +723,9 @@ function setButtons(running){
   document.getElementById('btnStart').disabled = running;
   document.getElementById('btnExportExcel').disabled = running || !lastPending;
   document.getElementById('btnExport').disabled = running || lastPending;
-  document.getElementById('btnStop').disabled = !running;
+  // ⛔ `|| pollStopping` 必须留着：点完停止到 worker 真正退出之间有 1~2 秒（关浏览器要时间），
+  //    这期间 running 仍是 true —— 不压灰的话用户会连点，每点一次都真发一个 POST。
+  document.getElementById('btnStop').disabled = !running || pollStopping;
 }
 
 async function start(){
@@ -775,6 +791,7 @@ async function start(){
   liveTable.reset();
   document.getElementById('status').textContent = '运行中...';
   lastPending = false;          // 新一轮开始：上一轮没导出的直接被丢弃（后端 api_start 也会清）
+  pollStopping = false;         // 新一轮：清掉上一轮可能残留的「正在停止」
   setButtons(true);
   startPolling();
   kickPoll();                   // 立刻拉一帧，别等第一个整拍
@@ -812,8 +829,28 @@ async function exportFeishu(){
 }
 
 async function stop(){
-  await fetch('/api/stop', { method:'POST' });
+  // 点停止要**立刻**看得见反应（M30）。原来只有一行 fetch + 一行日志，
+  // 按钮纹丝不动、状态行还每拍重写「搜索中…」，用户会以为没点着，于是连点好几次
+  // —— 每一次真的都是一个 POST。现在三件事一起做：
+  //   ① 当场把停止键压灰（防连点）
+  //   ② 状态行立刻写「正在停止…」（下面 poll() 也会按 d.stopping 保持这句）
+  //   ③ kickPoll() 补一拍，别等下一个整拍
+  // 后端那侧真正的延迟已经压到 1~2 秒（见 nav()），这里补的是「有没有点着」的确认感。
+  const b = document.getElementById('btnStop');
+  b.disabled = true;
+  pollStopping = true;
+  document.getElementById('status').textContent = '⏹ 正在停止…（等当前这一步收尾）';
+  try {
+    await fetch('/api/stop', { method:'POST' });
+  } catch (e){
+    // 请求没发出去（后端已退出 / 断网）：把界面还原，别让按钮永远卡在灰色
+    pollStopping = false;
+    b.disabled = false;
+    logBox('停止请求发送失败：' + e);
+    return;
+  }
   logBox('已请求停止...');
+  kickPoll();
 }
 
 async function openFolder(){

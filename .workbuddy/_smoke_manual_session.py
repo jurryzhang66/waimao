@@ -91,7 +91,7 @@ class FakePage:
         pass
 
 
-m.create_browser_page = lambda: FakePage()
+m.create_browser_page = lambda *a, **k: FakePage()
 m._manual_browser = lambda: FakePage()
 
 

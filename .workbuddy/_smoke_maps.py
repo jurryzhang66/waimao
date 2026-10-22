@@ -48,7 +48,9 @@ class FakePage:
         calls['quit'] += 1
 
 
-m.create_browser_page = lambda: FakePage()
+# ⚠️ run_maps 现在带参调用 create_browser_page(persistent=True)；桩用宽签名，
+#    以后再加启动参数也不用跟着改（_check_serp.py 有静态断言钉住「只在两处传 True」）。
+m.create_browser_page = lambda *a, **k: FakePage()
 # maps_open / wait_captcha 都在地图链路内部，直接打桩（真机行为由 _probe_maps.py 覆盖）
 m.sleep_check = lambda seconds: True
 

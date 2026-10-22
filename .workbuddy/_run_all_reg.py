@@ -45,6 +45,8 @@ NODE = _find_node()
 # (名字, 解释器, 相对路径, 附加参数)
 ITEMS = [
     ('_check_page',            PY,   '.workbuddy/_check_page.py',            []),
+    ('_check_serp',            PY,   '.workbuddy/_check_serp.py',            []),
+    ('_check_stop',            PY,   '.workbuddy/_check_stop.py',            []),
     ('_check_startup',         PY,   '.workbuddy/_check_startup.py',         []),
     ('_kwlib_check',           PY,   '.workbuddy/_kwlib_check.py',           []),
     ('_check_industry_rules',  PY,   '.workbuddy/_check_industry_rules.py',  []),
